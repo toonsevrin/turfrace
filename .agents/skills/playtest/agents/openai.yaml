@@ -1,0 +1,4 @@
+interface:
+  display_name: "Playtest"
+  short_description: "Run deterministic visual and gameplay QA"
+  default_prompt: "Use $playtest to run a controlled Turfrace playtest and review the resulting screenshots."

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+
+set -u
+
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT_DIR" || exit 1
+
+export CARGO_TERM_COLOR=never
+
+usage() {
+    printf 'usage: %s [--quick]\n' "${BASH_SOURCE[0]}" >&2
+}
+
+case "${1-}" in
+    '')
+        QUICK=0
+        ;;
+    --quick)
+        QUICK=1
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+if [[ $# -gt 1 ]]; then
+    usage
+    exit 2
+fi
+
+START_TIME=${EPOCHREALTIME:-$(date +%s.%N)}
+
+elapsed() {
+    awk -v start="$1" -v end="${EPOCHREALTIME:-$(date +%s.%N)}" \
+        'BEGIN { printf "%.2fs", end - start }'
+}
+
+run_step() {
+    local label=$1
+    shift
+    local log start status duration
+
+    log=$(mktemp "${TMPDIR:-/tmp}/turfrace-feedback.XXXXXX") || {
+        printf 'FAIL %-8s unable to create temporary output file\n' "$label"
+        return 1
+    }
+
+    start=${EPOCHREALTIME:-$(date +%s.%N)}
+    "$@" >"$log" 2>&1
+    status=$?
+    duration=$(elapsed "$start")
+
+    if [[ $status -eq 0 ]]; then
+        printf 'PASS %-8s %s\n' "$label" "$duration"
+        rm -f "$log"
+        return 0
+    fi
+
+    printf 'FAIL %-8s %s (exit %d)\n' "$label" "$duration" "$status"
+    printf '%s\n' '--- recent output ---'
+    tail -n 24 "$log" | awk 'length($0) > 240 { print substr($0, 1, 237) "..."; next } { print }'
+    rm -f "$log"
+    return "$status"
+}
+
+finish() {
+    printf 'TOTAL             %s\n' "$(elapsed "$START_TIME")"
+}
+
+if ! run_step format cargo fmt --all -- --check; then
+    finish
+    exit 1
+fi
+
+if ! run_step check cargo check --workspace --all-targets --all-features; then
+    finish
+    exit 1
+fi
+
+if ! run_step clippy cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+    finish
+    exit 1
+fi
+
+if [[ $QUICK -eq 0 ]]; then
+    if ! run_step test cargo test --workspace --all-targets --all-features; then
+        finish
+        exit 1
+    fi
+fi
+
+finish
