@@ -20,6 +20,21 @@ cargo install trunk --locked
 trunk serve --open
 ```
 
+To test the optimized browser build locally, let Trunk build the release WASM
+and serve the generated static site:
+
+```sh
+trunk serve --release --open
+```
+
+This serves the same release output that is deployed, with live reload enabled.
+For a deploy-style build followed by a separate static server, run:
+
+```sh
+trunk build --release
+python3 -m http.server 8080 --directory dist
+```
+
 Create the optimized static site with:
 
 ```sh

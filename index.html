@@ -9,7 +9,10 @@
     <title>Turfrace</title>
     <link data-trunk rel="copy-dir" href="assets" />
     <link data-trunk rel="css" href="web/styles.css" />
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <!-- Rust's release profile performs the WASM optimization. Keep Trunk's
+         wasm-opt pass disabled because its bundled validator does not accept
+         the bulk-memory and non-trapping-float operations emitted here. -->
+    <link data-trunk rel="rust" data-wasm-opt="0" />
   </head>
   <body>
     <main id="game-shell" aria-label="Turfrace game">
