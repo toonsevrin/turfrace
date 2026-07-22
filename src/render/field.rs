@@ -47,7 +47,7 @@ pub(super) fn setup_stage(
         Name::new("Outside Canvas"),
         Mesh3d(meshes.add(Plane3d::default().mesh().size(260.0, 260.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(222, 227, 235),
+            base_color: Color::srgb_u8(10, 18, 31),
             perceptual_roughness: 1.0,
             ..default()
         })),
@@ -103,7 +103,7 @@ pub(super) fn sync_field_mesh(
             FieldShadow,
             Mesh3d(meshes.add(shadow_mesh)),
             MeshMaterial3d(standard.add(StandardMaterial {
-                base_color: Color::srgba(0.10, 0.12, 0.16, 0.12),
+                base_color: Color::srgba(0.01, 0.02, 0.04, 0.48),
                 alpha_mode: AlphaMode::Premultiplied,
                 unlit: true,
                 ..default()
@@ -124,7 +124,7 @@ pub(super) fn sync_field_mesh(
             FieldBorder,
             Mesh3d(meshes.add(border_mesh)),
             MeshMaterial3d(standard.add(StandardMaterial {
-                base_color: Color::srgb_u8(170, 178, 191),
+                base_color: Color::srgb_u8(19, 30, 47),
                 unlit: true,
                 ..default()
             })),

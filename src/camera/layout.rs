@@ -2,6 +2,8 @@ use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
 
 use super::PlayerCamera;
 
+const VIEWPORT_GAP: u32 = 8;
+
 /// A pixel-space camera rectangle. Coordinates use Bevy's top-left viewport origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportRect {
@@ -62,7 +64,7 @@ pub(super) fn update_camera_viewports(
 ) {
     let Ok(window) = windows.single() else { return };
     let count = cameras.iter().count();
-    let layout = viewport_layout(count, window.physical_size(), 2);
+    let layout = viewport_layout(count, window.physical_size(), VIEWPORT_GAP);
     for (player_camera, mut camera) in &mut cameras {
         if let Some(rect) = layout.get(player_camera.slot as usize) {
             let next = Viewport {

@@ -7,7 +7,7 @@ use std::{env, path::PathBuf};
 
 use bevy::{
     app::AppExit,
-    asset::AssetPlugin,
+    asset::{AssetMetaCheck, AssetPlugin},
     prelude::*,
     render::view::screenshot::{Screenshot, save_to_disk},
     time::TimeUpdateStrategy,
@@ -25,27 +25,31 @@ use turfrace::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     Home,
+    Leaderboard,
     Lobby,
     Match,
     Pause,
     Results,
+    Settings,
 }
 
 impl Scenario {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "home" => Some(Self::Home),
+            "leaderboard" => Some(Self::Leaderboard),
             "lobby" => Some(Self::Lobby),
             "match" => Some(Self::Match),
             "pause" => Some(Self::Pause),
             "results" => Some(Self::Results),
+            "settings" => Some(Self::Settings),
             _ => None,
         }
     }
 
     const fn default_capture_frame(self) -> u32 {
         match self {
-            Self::Home => 30,
+            Self::Home | Self::Leaderboard | Self::Settings => 30,
             Self::Lobby | Self::Results => 45,
             Self::Match => 360,
             Self::Pause => 240,
@@ -95,6 +99,7 @@ fn main() {
                 })
                 .set(AssetPlugin {
                     file_path: format!("{}/assets", env!("CARGO_MANIFEST_DIR")),
+                    meta_check: AssetMetaCheck::Never,
                     ..default()
                 }),
         )
@@ -141,7 +146,7 @@ fn arguments() -> (Scenario, PathBuf, u32, u32, u32) {
             }
             "--help" | "-h" => {
                 println!(
-                    "usage: visual_playtest [--scenario home|lobby|match|pause|results] \
+                    "usage: visual_playtest [--scenario home|leaderboard|lobby|match|pause|results|settings] \
                      [--output PATH.png] [--frames N | --seconds N] \
                      [--width PX] [--height PX]"
                 );
@@ -209,10 +214,26 @@ fn configure_scenario(world: &mut World) {
     let scenario = world.resource::<Harness>().scenario;
     match scenario {
         Scenario::Home => {}
+        Scenario::Leaderboard => configure_profiles_screen(world, AppState::LocalLeaderboard),
         Scenario::Lobby => configure_lobby(world),
         Scenario::Match | Scenario::Pause => configure_match(world),
         Scenario::Results => configure_results(world),
+        Scenario::Settings => configure_profiles_screen(world, AppState::Settings),
     }
+}
+
+fn configure_profiles_screen(world: &mut World, state: AppState) {
+    let mut profiles = world.resource_mut::<turfrace::profiles::ProfileStore>();
+    for name in ["MOUSE ACE", "KEY KID", "RUNE", "NOVA"] {
+        profiles.create(name);
+    }
+    for (index, profile) in profiles.profiles.iter_mut().enumerate() {
+        profile.statistics.games_played = 18 - index as u32 * 2;
+        profile.statistics.wins = 7_u32.saturating_sub(index as u32);
+        profile.statistics.kills = 42 - index as u32 * 7;
+        profile.statistics.best_territory_percent = 74.0 - index as f32 * 9.0;
+    }
+    world.resource_mut::<NextState<AppState>>().set(state);
 }
 
 fn configure_lobby(world: &mut World) {
@@ -282,6 +303,7 @@ fn configure_results(world: &mut World) {
         rows: vec![
             ResultRow {
                 name: "MOUSE ACE".into(),
+                color_id: 0,
                 placement: 1,
                 peak_percent: 100.0,
                 kills: 6,
@@ -292,6 +314,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "KEY KID".into(),
+                color_id: 4,
                 placement: 2,
                 peak_percent: 32.8,
                 kills: 3,
@@ -302,6 +325,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "RUNE [NPC]".into(),
+                color_id: 2,
                 placement: 3,
                 peak_percent: 24.6,
                 kills: 2,
@@ -312,6 +336,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "NOVA [NPC]".into(),
+                color_id: 3,
                 placement: 4,
                 peak_percent: 18.9,
                 kills: 2,
@@ -322,6 +347,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "CRUMB [NPC]".into(),
+                color_id: 6,
                 placement: 5,
                 peak_percent: 14.1,
                 kills: 1,
@@ -332,6 +358,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "FIZZ [NPC]".into(),
+                color_id: 5,
                 placement: 6,
                 peak_percent: 10.8,
                 kills: 1,
@@ -342,6 +369,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "MOSS [NPC]".into(),
+                color_id: 8,
                 placement: 7,
                 peak_percent: 8.4,
                 kills: 0,
@@ -352,6 +380,7 @@ fn configure_results(world: &mut World) {
             },
             ResultRow {
                 name: "ZAP [NPC]".into(),
+                color_id: 7,
                 placement: 8,
                 peak_percent: 5.3,
                 kills: 0,
@@ -380,9 +409,11 @@ fn scenario_is_visible(world: &mut World) -> bool {
     }
     match scenario {
         Scenario::Home => state == AppState::Home,
+        Scenario::Leaderboard => state == AppState::LocalLeaderboard,
         Scenario::Lobby => state == AppState::Lobby,
         Scenario::Match => state == AppState::Playing,
         Scenario::Pause => state == AppState::Paused,
         Scenario::Results => state == AppState::Results,
+        Scenario::Settings => state == AppState::Settings,
     }
 }

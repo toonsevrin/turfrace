@@ -1,7 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+#[cfg(test)]
+use std::collections::HashSet;
 
 use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
+};
+use clipper2_rust::{
+    FillRule, Path64, Paths64, Point64, difference_64, union_64, union_subjects_64,
 };
 
 use super::{
@@ -12,13 +18,15 @@ use super::{
 
 pub const CHUNK_SIZE: u32 = 32;
 
-// Ownership is authoritative on the half-unit grid, but its presentation should
-// read as one continuous painted surface.  These values are deliberately small
-// relative to a cell: they soften the stepped silhouette without changing the
-// playable or collision geometry.
+// Ownership remains authoritative on the half-unit grid for this release, but
+// presentation is rebuilt from globally extracted rings. These values round
+// the derived silhouette without changing playable or collision geometry.
 const EDGE_RISE: f32 = 0.112;
+const CONTOUR_SMOOTHING: f32 = 0.22;
+const CONTOUR_SMOOTHING_PASSES: usize = 3;
+const CONTOUR_COORDINATE_SCALE: f32 = 1024.0;
 
-/// Dense ownership snapshot optimized for chunk rebuilding, not gameplay queries.
+/// Dense ownership snapshot plus derived owner contours for presentation.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct TerritoryVisual {
     pub width: u32,
@@ -32,8 +40,23 @@ pub struct TerritoryVisual {
     pub pattern_ids: [u8; 12],
     /// Color selected by each stable owner ID.
     pub color_ids: [u8; 12],
+    /// Simplified, globally extracted ownership contours used by the
+    /// presentation mesh.  The dense ownership arrays remain available for
+    /// gameplay-facing snapshots and compatibility, but rendering no longer
+    /// emits one marching-square surface per cell.
+    pub contours: [Vec<Vec<Vec2>>; 12],
+    /// Resolved contours after applying capture order. Later layers cover
+    /// earlier ones, so independent owner meshes can never z-fight.
+    pub resolved_contours: [Vec<Vec<Vec2>>; 12],
+    /// Chronological owner order for capture snapshots and live board sync.
+    /// Zero entries are ignored; when absent, stable owner order is used.
+    pub layer_order: [u8; 12],
+    /// Distinguishes a deliberately resolved empty layer from a snapshot that
+    /// has not had its contours resolved yet. A fully covered older layer must
+    /// stay empty rather than falling back to its raw contour.
+    pub contours_resolved: bool,
     pub revision: u64,
-    /// If empty after a revision, every chunk is considered dirty.
+    /// Retained for compatibility with consumers that track cell revisions.
     pub dirty_chunks: Vec<UVec2>,
 }
 
@@ -52,21 +75,119 @@ impl TerritoryVisual {
         }
         self.owners[(y as u32 * self.width + x as u32) as usize]
     }
+
+    pub fn rebuild_contours(&mut self) {
+        self.contours = std::array::from_fn(|slot| {
+            let owner = (slot + 1) as u8;
+            owner_contours(self, owner)
+                .into_iter()
+                .map(|contour| smooth_contour(&contour))
+                .filter(|contour| contour.len() >= 3 && polygon_area(contour).abs() > 0.000_1)
+                .collect()
+        });
+        self.resolve_contour_layers();
+    }
+
+    pub fn resolve_contour_layers(&mut self) {
+        let mut order: Vec<u8> = self
+            .layer_order
+            .iter()
+            .copied()
+            .filter(|owner| (1..=12).contains(owner))
+            .collect();
+        if order.is_empty() {
+            order.extend(1..=12);
+        } else {
+            // A snapshot may only provide chronology for owners that changed
+            // recently. Keep untouched owners in the deterministic fallback
+            // order instead of accidentally dropping their meshes.
+            for owner in 1..=12 {
+                if !order.contains(&owner) && !self.contours[(owner - 1) as usize].is_empty() {
+                    order.push(owner);
+                }
+            }
+        }
+        order.sort_by_key(|owner| {
+            self.layer_order
+                .iter()
+                .position(|candidate| candidate == owner)
+                .unwrap_or(*owner as usize)
+        });
+        order.dedup();
+
+        let mut covered = Paths64::new();
+        self.resolved_contours = std::array::from_fn(|_| Vec::new());
+        self.contours_resolved = true;
+        for owner in order.into_iter().rev() {
+            let raw = self.contours[(owner - 1) as usize].clone();
+            if raw.is_empty() {
+                continue;
+            }
+            let subject = union_subjects_64(&contours_to_paths(&raw), FillRule::NonZero);
+            let visible = if covered.is_empty() {
+                subject.clone()
+            } else {
+                difference_64(&subject, &covered, FillRule::NonZero)
+            };
+            self.resolved_contours[(owner - 1) as usize] = paths_to_contours(&visible);
+            covered = union_64(&covered, &subject, FillRule::NonZero);
+        }
+    }
+
+    fn owner_contours(&self, owner: u8) -> Vec<Vec<Vec2>> {
+        let index = owner.saturating_sub(1) as usize;
+        if self.contours_resolved {
+            self.resolved_contours[index].clone()
+        } else if self.contours[index].is_empty() {
+            owner_contours(self, owner)
+                .into_iter()
+                .map(|contour| smooth_contour(&contour))
+                .collect()
+        } else {
+            self.contours[(owner - 1) as usize].clone()
+        }
+    }
+
+    /// Move owners that changed in the latest simulation update to the end of
+    /// the paint order. This lets the renderer preserve capture chronology
+    /// without retaining a mesh for every individual capture.
+    pub(super) fn promote_layers<I>(&mut self, owners: I)
+    where
+        I: IntoIterator<Item = u8>,
+    {
+        for owner in owners {
+            if !(1..=12).contains(&owner) {
+                continue;
+            }
+            let mut compacted = [0; 12];
+            let mut next = 0;
+            for candidate in self.layer_order {
+                if candidate != 0 && candidate != owner {
+                    compacted[next] = candidate;
+                    next += 1;
+                }
+            }
+            if next < compacted.len() {
+                compacted[next] = owner;
+            }
+            self.layer_order = compacted;
+        }
+    }
 }
 
 #[derive(Component)]
-pub(super) struct TerritoryChunk(UVec2);
+pub(super) struct TerritoryOwner(u8);
 
 #[derive(Component)]
-pub(super) struct TerritoryChunkAnimation(f32);
+pub(super) struct TerritoryOwnerAnimation(f32);
 
-pub(super) fn sync_territory_chunks(
+pub(super) fn sync_territory_meshes(
     mut commands: Commands,
     territory: Res<TerritoryVisual>,
     render_assets: Option<Res<RenderAssets>>,
     mut retired: ResMut<RetiredMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
-    chunks: Query<(Entity, &TerritoryChunk, &Mesh3d)>,
+    owners: Query<(Entity, &TerritoryOwner, &Mesh3d)>,
     mut last_revision: Local<Option<u64>>,
 ) {
     if last_revision.as_ref() == Some(&territory.revision) || !territory.is_valid() {
@@ -76,50 +197,38 @@ pub(super) fn sync_territory_chunks(
         return;
     };
     *last_revision = Some(territory.revision);
-    let existing: HashMap<UVec2, (Entity, Handle<Mesh>)> = chunks
+    let existing: HashMap<u8, (Entity, Handle<Mesh>)> = owners
         .iter()
-        .map(|(entity, chunk, mesh)| (chunk.0, (entity, mesh.0.clone())))
+        .map(|(entity, owner, mesh)| (owner.0, (entity, mesh.0.clone())))
         .collect();
-    let chunk_columns = territory.width.div_ceil(CHUNK_SIZE);
-    let chunk_rows = territory.height.div_ceil(CHUNK_SIZE);
-    for (entity, chunk, _) in &chunks {
-        if chunk.0.x >= chunk_columns || chunk.0.y >= chunk_rows {
+    for (entity, owner, _) in &owners {
+        if !(1..=12).contains(&owner.0) {
             commands.entity(entity).despawn();
         }
     }
-    let dirty: HashSet<UVec2> = if territory.dirty_chunks.is_empty() {
-        (0..chunk_rows)
-            .flat_map(|y| (0..chunk_columns).map(move |x| UVec2::new(x, y)))
-            .collect()
-    } else {
-        territory.dirty_chunks.iter().copied().collect()
-    };
 
-    for chunk in dirty {
-        if chunk.x >= chunk_columns || chunk.y >= chunk_rows {
-            continue;
-        }
-        let rebuilt = build_chunk_mesh(&territory, chunk);
+    for owner in 1..=12 {
+        let rebuilt = build_owner_mesh(&territory, owner);
         if rebuilt.count_vertices() == 0 {
-            if let Some((entity, old_handle)) = existing.get(&chunk) {
+            if let Some((entity, old_handle)) = existing.get(&owner) {
                 retired.0.push_back((old_handle.clone(), 0));
                 commands.entity(*entity).despawn();
             }
             continue;
         }
-        if let Some((entity, old_handle)) = existing.get(&chunk) {
+        if let Some((entity, old_handle)) = existing.get(&owner) {
             // Replace the component handle rather than mutating an already
             // extracted Mesh asset in place.  WebGL2 drivers can still be
-            // reading the old slab allocation when the CPU rebuilds a chunk;
+            // reading the old slab allocation when the CPU rebuilds a mesh;
             // a fresh handle lets Bevy retire that allocation safely.
             let replacement = meshes.add(rebuilt);
             retired.0.push_back((old_handle.clone(), 0));
             commands.entity(*entity).insert(Mesh3d(replacement));
         } else {
             commands.spawn((
-                Name::new(format!("Territory Chunk {},{}", chunk.x, chunk.y)),
-                TerritoryChunk(chunk),
-                TerritoryChunkAnimation(0.25),
+                Name::new(format!("Territory Owner {owner}")),
+                TerritoryOwner(owner),
+                TerritoryOwnerAnimation(0.25),
                 Mesh3d(meshes.add(rebuilt)),
                 MeshMaterial3d::<TerritoryMaterial>(render_assets.territory_material.clone()),
             ));
@@ -127,16 +236,16 @@ pub(super) fn sync_territory_chunks(
     }
 }
 
-pub(super) fn animate_territory_chunks(
+pub(super) fn animate_territory_meshes(
     mut commands: Commands,
     time: Res<Time>,
     settings: Res<PresentationSettings>,
-    mut chunks: Query<(Entity, &mut TerritoryChunkAnimation, &mut Transform)>,
+    mut chunks: Query<(Entity, &mut TerritoryOwnerAnimation, &mut Transform)>,
 ) {
     for (entity, mut animation, mut transform) in &mut chunks {
         if settings.reduced_motion || settings.quality == GraphicsQuality::Low {
             transform.translation.y = 0.0;
-            commands.entity(entity).remove::<TerritoryChunkAnimation>();
+            commands.entity(entity).remove::<TerritoryOwnerAnimation>();
             continue;
         }
         animation.0 = (animation.0 - time.delta_secs()).max(0.0);
@@ -144,11 +253,49 @@ pub(super) fn animate_territory_chunks(
         transform.translation.y = -0.10 * remaining * remaining;
         if animation.0 <= 0.0 {
             transform.translation.y = 0.0;
-            commands.entity(entity).remove::<TerritoryChunkAnimation>();
+            commands.entity(entity).remove::<TerritoryOwnerAnimation>();
         }
     }
 }
 
+/// Builds one continuous mesh for an owner from its globally extracted rings.
+/// Keeping the whole owner in one mesh is both cheaper than rebuilding every
+/// cell and important for holes: triangulation sees the outer ring and its
+/// holes together instead of filling each chunk independently.
+fn build_owner_mesh(board: &TerritoryVisual, owner: u8) -> Mesh {
+    let identity = (owner.saturating_sub(1)) as usize;
+    let color = mix_with_white(palette_color(board.color_ids[identity]), 0.12)
+        .to_linear()
+        .to_f32_array();
+    let pattern = f32::from(board.pattern_ids[identity]);
+    let mut builder = MeshBuilder::default();
+    let mut rings = board.owner_contours(owner);
+    // The edge walk is deterministic but its first ring depends on the
+    // lowest scanned cell. Sort by area so an enclosing exterior is always
+    // available before a hole is assigned to it.
+    rings.sort_by(|a, b| polygon_area(b).abs().total_cmp(&polygon_area(a).abs()));
+    let mut outers: Vec<(Vec<Vec2>, Vec<Vec<Vec2>>)> = Vec::new();
+    for ring in rings {
+        if polygon_area(&ring) > 0.0 {
+            outers.push((ring, Vec::new()));
+        } else if let Some((_, holes)) = outers.iter_mut().find(|(outer, _)| {
+            ring.first()
+                .is_some_and(|point| point_in_polygon(*point, outer))
+        }) {
+            holes.push(ring);
+        }
+    }
+    for (outer, holes) in outers {
+        builder.polygon_with_holes(&outer, &holes, color, pattern, EDGE_RISE);
+        builder.boundary_ring(&outer, color, pattern, EDGE_RISE);
+        for hole in holes {
+            builder.boundary_ring(&hole, color, pattern, EDGE_RISE);
+        }
+    }
+    builder.finish()
+}
+
+#[cfg(test)]
 fn build_chunk_mesh(board: &TerritoryVisual, chunk: UVec2) -> Mesh {
     let start_x = chunk.x * CHUNK_SIZE;
     let start_y = chunk.y * CHUNK_SIZE;
@@ -168,7 +315,7 @@ fn build_chunk_mesh(board: &TerritoryVisual, chunk: UVec2) -> Mesh {
     }
     for owner in owners {
         let identity = (owner - 1) as usize;
-        let color = mix_with_white(palette_color(board.color_ids[identity]), 0.20)
+        let color = mix_with_white(palette_color(board.color_ids[identity]), 0.12)
             .to_linear()
             .to_f32_array();
         let pattern = f32::from(board.pattern_ids[identity]);
@@ -203,6 +350,7 @@ fn darken(mut color: [f32; 4], amount: f32) -> [f32; 4] {
 /// as convex pieces; diagonal cases deliberately split into two wedges. This
 /// avoids self-intersections in concave captures while preserving a shared
 /// edge between neighboring squares.
+#[cfg(test)]
 fn marching_square(board: &TerritoryVisual, owner: u8, x: i32, y: i32) -> Vec<Vec<Vec2>> {
     let corners = [
         dual_point(board, x, y),
@@ -210,18 +358,53 @@ fn marching_square(board: &TerritoryVisual, owner: u8, x: i32, y: i32) -> Vec<Ve
         dual_point(board, x + 1, y + 1),
         dual_point(board, x, y + 1),
     ];
-    let occupied = [
-        board.owner(x, y) == owner,
-        board.owner(x + 1, y) == owner,
-        board.owner(x + 1, y + 1) == owner,
-        board.owner(x, y + 1) == owner,
+    let values = [
+        smoothed_owner_value(board, owner, x, y),
+        smoothed_owner_value(board, owner, x + 1, y),
+        smoothed_owner_value(board, owner, x + 1, y + 1),
+        smoothed_owner_value(board, owner, x, y + 1),
     ];
-    marching_square_values(
-        corners,
-        occupied.map(|occupied| if occupied { 1.0 } else { 0.0 }),
-    )
+    marching_square_values(corners, values)
 }
 
+/// A small visual-only blur makes the contour read as painted territory
+/// instead of exposing every half-unit ownership cell. The authoritative
+/// grid remains untouched; neighboring chunks use the same samples, so the
+/// smoothing cannot introduce a seam at a chunk boundary.
+#[cfg(test)]
+fn smoothed_owner_value(board: &TerritoryVisual, owner: u8, x: i32, y: i32) -> f32 {
+    let mut weighted = 0.0;
+    let mut total = 0.0;
+    for offset_y in -1..=1 {
+        for offset_x in -1..=1 {
+            let weight = if offset_x == 0 && offset_y == 0 {
+                4.0
+            } else if offset_x == 0 || offset_y == 0 {
+                2.0
+            } else {
+                1.0
+            };
+            weighted += weight
+                * if board.owner(x + offset_x, y + offset_y) == owner {
+                    1.0
+                } else {
+                    0.0
+                };
+            total += weight;
+        }
+    }
+    let blurred = weighted / total;
+    // Never erase a tiny claimed island just because the visual blur has too
+    // little neighboring support. Larger areas still borrow their boundary
+    // position from surrounding cells, while a one-cell claim remains visible.
+    if board.owner(x, y) == owner {
+        0.75 + blurred * 0.25
+    } else {
+        blurred
+    }
+}
+
+#[cfg(test)]
 fn marching_square_values(corners: [Vec2; 4], values: [f32; 4]) -> Vec<Vec<Vec2>> {
     let occupied = values.map(|value| value >= 0.5);
     let mask = occupied
@@ -261,6 +444,7 @@ fn marching_square_values(corners: [Vec2; 4], values: [f32; 4]) -> Vec<Vec<Vec2>
     vec![polygon]
 }
 
+#[cfg(test)]
 fn edge_crossing(a: Vec2, b: Vec2, a_value: f32, b_value: f32) -> Vec2 {
     let denominator = b_value - a_value;
     let amount = if denominator.abs() < 0.000_001 {
@@ -271,10 +455,12 @@ fn edge_crossing(a: Vec2, b: Vec2, a_value: f32, b_value: f32) -> Vec2 {
     a.lerp(b, amount)
 }
 
+#[cfg(test)]
 fn dual_point(board: &TerritoryVisual, x: i32, y: i32) -> Vec2 {
     board.origin + Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * board.cell_size
 }
 
+#[cfg(test)]
 fn marching_square_boundary(
     board: &TerritoryVisual,
     owner: u8,
@@ -287,17 +473,18 @@ fn marching_square_boundary(
         dual_point(board, x + 1, y + 1),
         dual_point(board, x, y + 1),
     ];
-    let occupied = [
-        board.owner(x, y) == owner,
-        board.owner(x + 1, y) == owner,
-        board.owner(x + 1, y + 1) == owner,
-        board.owner(x, y + 1) == owner,
+    let values = [
+        smoothed_owner_value(board, owner, x, y),
+        smoothed_owner_value(board, owner, x + 1, y),
+        smoothed_owner_value(board, owner, x + 1, y + 1),
+        smoothed_owner_value(board, owner, x, y + 1),
     ];
+    let occupied = values.map(|value| value >= 0.5);
     let midpoint = [
-        corners[0].lerp(corners[1], 0.5),
-        corners[1].lerp(corners[2], 0.5),
-        corners[2].lerp(corners[3], 0.5),
-        corners[3].lerp(corners[0], 0.5),
+        edge_crossing(corners[0], corners[1], values[0], values[1]),
+        edge_crossing(corners[1], corners[2], values[1], values[2]),
+        edge_crossing(corners[2], corners[3], values[2], values[3]),
+        edge_crossing(corners[3], corners[0], values[3], values[0]),
     ];
     let transitions: Vec<_> = (0..4)
         .filter(|edge| occupied[*edge] != occupied[(*edge + 1) % 4])
@@ -319,6 +506,7 @@ fn marching_square_boundary(
     }
 }
 
+#[cfg(test)]
 fn clip_convex_polygon(points: &[Vec2], min: Vec2, max: Vec2) -> Vec<Vec2> {
     let mut clipped = points.to_vec();
     for (axis, limit, keep_greater) in [
@@ -362,6 +550,7 @@ fn clip_convex_polygon(points: &[Vec2], min: Vec2, max: Vec2) -> Vec<Vec2> {
     clipped
 }
 
+#[cfg(test)]
 fn segment_in_rect(a: Vec2, b: Vec2, min: Vec2, max: Vec2) -> bool {
     let on_chunk_cut = (a.x - b.x).abs() < 0.000_001
         && ((a.x - min.x).abs() < 0.000_001 || (a.x - max.x).abs() < 0.000_001)
@@ -375,17 +564,50 @@ fn segment_in_rect(a: Vec2, b: Vec2, min: Vec2, max: Vec2) -> bool {
         .all(|point| point.x >= min.x && point.x <= max.x && point.y >= min.y && point.y <= max.y)
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GridEdge {
     start: IVec2,
     end: IVec2,
 }
 
+fn contours_to_paths(contours: &[Vec<Vec2>]) -> Paths64 {
+    contours
+        .iter()
+        .filter(|contour| contour.len() >= 3)
+        .map(|contour| {
+            contour
+                .iter()
+                .map(|point| {
+                    Point64::new(
+                        (point.x * CONTOUR_COORDINATE_SCALE).round() as i64,
+                        (point.y * CONTOUR_COORDINATE_SCALE).round() as i64,
+                    )
+                })
+                .collect::<Path64>()
+        })
+        .collect()
+}
+
+fn paths_to_contours(paths: &Paths64) -> Vec<Vec<Vec2>> {
+    paths
+        .iter()
+        .filter(|path| path.len() >= 3)
+        .map(|path| {
+            path.iter()
+                .map(|point| {
+                    Vec2::new(
+                        point.x as f32 / CONTOUR_COORDINATE_SCALE,
+                        point.y as f32 / CONTOUR_COORDINATE_SCALE,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Extract closed, directed boundary loops for one owner across the whole
-/// board. Individual chunk meshes clip these shared loops to their rectangle,
-/// so a large capture remains continuous at chunk boundaries.
-#[cfg(test)]
+/// board. The resulting rings are shared by the owner mesh, so a large
+/// capture remains continuous instead of being cut at chunk boundaries.
 fn owner_contours(board: &TerritoryVisual, owner: u8) -> Vec<Vec<Vec2>> {
     let start_x = 0;
     let start_y = 0;
@@ -428,6 +650,11 @@ fn owner_contours(board: &TerritoryVisual, owner: u8) -> Vec<Vec<Vec2>> {
         }
     }
 
+    let mut outgoing: HashMap<IVec2, Vec<usize>> = HashMap::new();
+    for (index, edge) in edges.iter().enumerate() {
+        outgoing.entry(edge.start).or_default().push(index);
+    }
+
     let mut used = vec![false; edges.len()];
     let mut contours = Vec::new();
     for first_index in 0..edges.len() {
@@ -444,15 +671,14 @@ fn owner_contours(board: &TerritoryVisual, owner: u8) -> Vec<Vec<Vec2>> {
                 closed = true;
                 break;
             }
-            let mut candidates = edges
-                .iter()
-                .enumerate()
-                .filter(|(index, edge)| !used[*index] && edge.start == current)
-                .collect::<Vec<_>>();
+            let mut candidates = outgoing.get(&current).cloned().unwrap_or_default();
+            candidates.retain(|index| !used[*index]);
             if candidates.is_empty() {
                 break;
             }
-            candidates.sort_by(|(_, a), (_, b)| {
+            candidates.sort_by(|a_index, b_index| {
+                let a = edges[*a_index];
+                let b = edges[*b_index];
                 let a_direction =
                     Vec2::new((a.end.x - a.start.x) as f32, (a.end.y - a.start.y) as f32);
                 let b_direction =
@@ -466,7 +692,8 @@ fn owner_contours(board: &TerritoryVisual, owner: u8) -> Vec<Vec<Vec2>> {
                     .atan2(previous.dot(b_direction));
                 b_turn.total_cmp(&a_turn)
             });
-            let (next_index, next) = candidates[0];
+            let next_index = candidates[0];
+            let next = edges[next_index];
             used[next_index] = true;
             previous_direction = next.end - next.start;
             path.push(next.end);
@@ -491,7 +718,6 @@ fn owner_contours(board: &TerritoryVisual, owner: u8) -> Vec<Vec<Vec2>> {
 /// One Chaikin pass rounds the grid corners while keeping the contour inside
 /// its cell union at convex corners.  This is intentionally modest: the shape
 /// stays legible at high zoom and never gains a large, expensive spline.
-#[cfg(test)]
 fn smooth_contour(contour: &[Vec2]) -> Vec<Vec2> {
     if contour.len() < 3 {
         return contour.to_vec();
@@ -517,12 +743,16 @@ fn smooth_contour(contour: &[Vec2]) -> Vec<Vec2> {
             }
         }
     }
-    let mut rounded = Vec::with_capacity(simplified.len() * 2);
-    for index in 0..simplified.len() {
-        let point = simplified[index];
-        let following = simplified[(index + 1) % simplified.len()];
-        rounded.push(point.lerp(following, 0.24));
-        rounded.push(point.lerp(following, 0.76));
+    let mut rounded = simplified;
+    for _ in 0..CONTOUR_SMOOTHING_PASSES {
+        let mut next = Vec::with_capacity(rounded.len() * 2);
+        for index in 0..rounded.len() {
+            let point = rounded[index];
+            let following = rounded[(index + 1) % rounded.len()];
+            next.push(point.lerp(following, CONTOUR_SMOOTHING));
+            next.push(point.lerp(following, 1.0 - CONTOUR_SMOOTHING));
+        }
+        rounded = next;
     }
     rounded
 }
@@ -571,7 +801,6 @@ fn clip_contour(points: &[Vec2], min: Vec2, max: Vec2) -> Vec<Vec2> {
     clipped
 }
 
-#[cfg(test)]
 fn polygon_area(points: &[Vec2]) -> f32 {
     points
         .iter()
@@ -582,8 +811,6 @@ fn polygon_area(points: &[Vec2]) -> f32 {
         * 0.5
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
 fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
     let mut inside = false;
     for (a, b) in polygon
@@ -685,6 +912,78 @@ impl MeshBuilder {
         for index in 1..points.len() - 1 {
             self.indices
                 .extend_from_slice(&[base, base + index as u32 + 1, base + index as u32]);
+        }
+    }
+
+    fn polygon_with_holes(
+        &mut self,
+        outer: &[Vec2],
+        holes: &[Vec<Vec2>],
+        color: [f32; 4],
+        pattern: f32,
+        height: f32,
+    ) {
+        if outer.len() < 3 {
+            return;
+        }
+        let mut coordinates = Vec::new();
+        let mut append_ring = |ring: &[Vec2]| {
+            coordinates.extend(ring.iter().flat_map(|point| [point.x, point.y]));
+        };
+        append_ring(outer);
+        let mut hole_indices = Vec::with_capacity(holes.len());
+        let mut vertex_count = outer.len();
+        for hole in holes.iter().filter(|hole| hole.len() >= 3) {
+            hole_indices.push(vertex_count);
+            append_ring(hole);
+            vertex_count += hole.len();
+        }
+        let Ok(indices) = earcutr::earcut(&coordinates, &hole_indices, 2) else {
+            // A malformed contour should not remove a player's territory
+            // from the frame. The outer ring is still a useful fallback;
+            // normal generated contours take the hole-aware path above.
+            self.convex_polygon(outer, color, pattern, height);
+            return;
+        };
+        let base = self.positions.len() as u32;
+        let points: Vec<Vec2> = coordinates
+            .chunks_exact(2)
+            .map(|point| Vec2::new(point[0], point[1]))
+            .collect();
+        self.positions
+            .extend(points.iter().map(|point| [point.x, height, point.y]));
+        self.normals
+            .extend(std::iter::repeat_n([0.0, 1.0, 0.0], points.len()));
+        self.colors.extend(std::iter::repeat_n(color, points.len()));
+        self.uv0
+            .extend(points.iter().map(|point| [point.x, point.y]));
+        self.uv1
+            .extend(std::iter::repeat_n([pattern, 0.0], points.len()));
+        for triangle in indices.chunks_exact(3) {
+            let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+            let winding = (points[b] - points[a]).perp_dot(points[c] - points[a]);
+            if winding > 0.0 {
+                self.indices.extend_from_slice(&[
+                    base + a as u32,
+                    base + c as u32,
+                    base + b as u32,
+                ]);
+            } else {
+                self.indices.extend_from_slice(&[
+                    base + a as u32,
+                    base + b as u32,
+                    base + c as u32,
+                ]);
+            }
+        }
+    }
+
+    fn boundary_ring(&mut self, points: &[Vec2], color: [f32; 4], pattern: f32, height: f32) {
+        for segment in points.windows(2) {
+            self.boundary_wall(segment[0], segment[1], darken(color, 0.18), pattern, height);
+        }
+        if let (Some(&first), Some(&last)) = (points.first(), points.last()) {
+            self.boundary_wall(last, first, darken(color, 0.18), pattern, height);
         }
     }
 
@@ -989,6 +1288,22 @@ mod tests {
         };
         assert!(!board.is_valid());
     }
+
+    #[test]
+    fn visual_blur_rounds_edges_without_erasing_single_cell_claims() {
+        let board = TerritoryVisual {
+            width: 1,
+            height: 1,
+            cell_size: 0.5,
+            owners: vec![1],
+            playable: vec![true],
+            ..default()
+        };
+        assert!(smoothed_owner_value(&board, 1, 0, 0) > 0.75);
+        assert!(smoothed_owner_value(&board, 1, 1, 0) < 0.5);
+        assert!(build_chunk_mesh(&board, UVec2::ZERO).count_vertices() > 0);
+    }
+
     #[test]
     fn chunk_contains_top_faces_without_one_entity_per_cell() {
         let board = TerritoryVisual {
@@ -1025,6 +1340,178 @@ mod tests {
             mesh.count_vertices() > 20,
             "contour and ribbon must be present"
         );
+    }
+
+    #[test]
+    fn vector_mesh_keeps_an_unclaimed_hole_empty() {
+        let width = 7;
+        let height = 7;
+        let mut owners = vec![0; width * height];
+        for x in 1..=5 {
+            owners[x] = 1;
+            owners[5 * width + x] = 1;
+        }
+        for y in 1..=5 {
+            owners[y * width + 1] = 1;
+            owners[y * width + 5] = 1;
+        }
+        let board = TerritoryVisual {
+            width: width as u32,
+            height: height as u32,
+            cell_size: 1.0,
+            owners,
+            playable: vec![true; width * height],
+            ..default()
+        };
+        let mesh = build_owner_mesh(&board, 1);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let center = Vec2::new(3.5, 3.5);
+        let covered = mesh
+            .indices()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>()
+            .chunks(3)
+            .any(|triangle| {
+                if triangle.len() < 3 {
+                    return false;
+                }
+                let a = Vec2::new(positions[triangle[0]][0], positions[triangle[0]][2]);
+                let b = Vec2::new(positions[triangle[1]][0], positions[triangle[1]][2]);
+                let c = Vec2::new(positions[triangle[2]][0], positions[triangle[2]][2]);
+                point_in_triangle(center, a, b, c)
+            });
+        assert!(
+            !covered,
+            "hole center must remain unclaimed in the vector mesh"
+        );
+    }
+
+    #[test]
+    fn rebuilding_snapshot_extracts_only_owned_contours() {
+        let mut board = TerritoryVisual {
+            width: 3,
+            height: 2,
+            cell_size: 1.0,
+            owners: vec![1, 1, 0, 0, 2, 2],
+            playable: vec![true; 6],
+            ..default()
+        };
+        board.rebuild_contours();
+        assert_eq!(board.contours[0].len(), 1);
+        assert_eq!(board.contours[1].len(), 1);
+        assert!(board.contours[2].is_empty());
+        assert!(board.contours[0][0].len() >= 4);
+    }
+
+    #[test]
+    fn latest_contour_layer_covers_older_geometry_without_overlap() {
+        let mut contours: [Vec<Vec<Vec2>>; 12] = std::array::from_fn(|_| Vec::new());
+        contours[0] = vec![vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(4.0, 0.0),
+            Vec2::new(4.0, 4.0),
+            Vec2::new(0.0, 4.0),
+        ]];
+        contours[1] = vec![vec![
+            Vec2::new(2.0, 2.0),
+            Vec2::new(6.0, 2.0),
+            Vec2::new(6.0, 6.0),
+            Vec2::new(2.0, 6.0),
+        ]];
+        let mut board = TerritoryVisual {
+            width: 1,
+            height: 1,
+            cell_size: 1.0,
+            owners: vec![1],
+            playable: vec![true],
+            contours,
+            layer_order: [1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ..default()
+        };
+        board.resolve_contour_layers();
+        assert!(
+            board.resolved_contours[0]
+                .iter()
+                .all(|ring| !point_in_polygon(Vec2::new(3.0, 3.0), ring))
+        );
+        assert!(
+            board.resolved_contours[1]
+                .iter()
+                .any(|ring| { point_in_polygon(Vec2::new(3.0, 3.0), ring) })
+        );
+    }
+
+    #[test]
+    fn fully_covered_older_layer_does_not_fall_back_to_raw_contour() {
+        let square = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(4.0, 0.0),
+            Vec2::new(4.0, 4.0),
+            Vec2::new(0.0, 4.0),
+        ];
+        let mut contours: [Vec<Vec<Vec2>>; 12] = std::array::from_fn(|_| Vec::new());
+        contours[0] = vec![square.clone()];
+        contours[1] = vec![square];
+        let mut board = TerritoryVisual {
+            width: 1,
+            height: 1,
+            cell_size: 1.0,
+            owners: vec![1],
+            playable: vec![true],
+            contours,
+            layer_order: [1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ..default()
+        };
+        board.resolve_contour_layers();
+
+        assert!(board.resolved_contours[0].is_empty());
+        assert_eq!(build_owner_mesh(&board, 1).count_vertices(), 0);
+        assert!(!board.owner_contours(2).is_empty());
+    }
+
+    #[test]
+    fn partial_layer_order_keeps_unlisted_owner_contours() {
+        let mut contours: [Vec<Vec<Vec2>>; 12] = std::array::from_fn(|_| Vec::new());
+        for (slot, offset) in [(0, 0.0), (1, 5.0), (2, 10.0)] {
+            contours[slot] = vec![vec![
+                Vec2::new(offset, 0.0),
+                Vec2::new(offset + 2.0, 0.0),
+                Vec2::new(offset + 2.0, 2.0),
+                Vec2::new(offset, 2.0),
+            ]];
+        }
+        let mut board = TerritoryVisual {
+            width: 1,
+            height: 1,
+            cell_size: 1.0,
+            owners: vec![1],
+            playable: vec![true],
+            contours,
+            layer_order: [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ..default()
+        };
+        board.resolve_contour_layers();
+
+        assert_eq!(board.resolved_contours[0].len(), 1);
+        assert_eq!(board.resolved_contours[1].len(), 1);
+        assert_eq!(board.resolved_contours[2].len(), 1);
+    }
+
+    #[test]
+    fn promoting_owner_moves_its_layer_to_the_newest_position() {
+        let mut board = TerritoryVisual {
+            layer_order: [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ..default()
+        };
+
+        board.promote_layers([2, 1]);
+
+        assert_eq!(board.layer_order, [3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -1102,7 +1589,7 @@ mod tests {
         else {
             panic!("territory pattern coordinates must be float2");
         };
-        let expected = mix_with_white(palette_color(5), 0.20)
+        let expected = mix_with_white(palette_color(5), 0.12)
             .to_linear()
             .to_f32_array();
         assert_eq!(colors[0], expected);

@@ -12,11 +12,11 @@ Native development:
 cargo run
 ```
 
-Web development requires the WASM target and [Trunk](https://trunkrs.dev/):
+Web development requires the WASM target and [Trunk-rs](https://github.com/trunk-rs/trunk):
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install trunk
+cargo install trunk --locked
 trunk serve --open
 ```
 
@@ -52,13 +52,22 @@ The visual harness boots the real game plugins at a fixed timestep and captures 
 
 ```sh
 ./scripts/visual-feedback home
+./scripts/visual-feedback leaderboard
 ./scripts/visual-feedback match --frames 180
 ./scripts/visual-feedback match --seconds 6
 ./scripts/visual-feedback results --width 960 --height 600
+./scripts/visual-feedback settings
 ./scripts/visual-feedback --all
 ```
 
 Images are written to `target/visual-feedback/`. Frame and second offsets use the game's fixed 60 Hz clock, while optional dimensions make layout stress tests repeatable. The script uses Xvfb and Mesa's software Vulkan driver by default so people or automated review agents can inspect actual rendering in headless Linux. `VK_ICD_FILENAMES`, `WGPU_BACKEND`, and `WGPU_SETTINGS_PRIO` remain overridable for another test environment.
+
+For fast territory-only iteration, the predefined-shape review tool compares the continuous vector renderer with the authoritative raster snapshot without starting a match:
+
+```sh
+./scripts/territory-review vector target/visual-feedback/territory-vector.png
+./scripts/territory-review raster target/visual-feedback/territory-raster.png
+```
 
 ## Architecture
 
@@ -66,6 +75,6 @@ Images are written to `target/visual-feedback/`. Frame and second offsets use th
 
 - `AppShellPlugin`: states, profiles/persistence, input abstraction, lobby, responsive UI, and browser integration.
 - `MatchPlugin`: the deterministic 60 Hz authoritative board, movement, trails, capture, combat, ranking, respawn, and NPC simulation.
-- `PresentationPlugin`: split-screen cameras, chunked territory and custom materials, cube/trail/effect rendering, and procedural shared audio.
+- `PresentationPlugin`: split-screen cameras, continuous territory meshes and custom materials, cube/trail/effect rendering, and procedural shared audio.
 
-Gameplay is 2D and deterministic even though presentation is 3D. Input and NPCs both produce the same steering intent, presentation consumes simulation events without owning rules, and territory rendering is revision-gated and chunked. This keeps new game modes, NPC brains, render treatments, and platform adapters independently extensible.
+Gameplay is 2D and deterministic even though presentation is 3D. Input and NPCs both produce the same steering intent, presentation consumes simulation events without owning rules, and territory rendering is revision-gated with globally triangulated owner contours. This keeps new game modes, NPC brains, render treatments, and platform adapters independently extensible.

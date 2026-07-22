@@ -94,8 +94,8 @@ pub(super) fn setup_render_assets(
     mut territories: ResMut<Assets<TerritoryMaterial>>,
     mut papers: ResMut<Assets<PaperMaterial>>,
 ) {
-    let cube_mesh = meshes.add(Cuboid::from_size(Vec3::splat(1.36)));
-    let inner_cube_mesh = meshes.add(Cuboid::from_size(Vec3::splat(1.20)));
+    let cube_mesh = meshes.add(Cuboid::from_size(Vec3::splat(1.50)));
+    let inner_cube_mesh = meshes.add(Cuboid::from_size(Vec3::splat(1.30)));
     let shadow_mesh = meshes.add(Circle::new(0.82));
     let icon_mesh = meshes.add(Circle::new(0.26));
     let ring_mesh = meshes.add(Torus::new(0.76, 0.055));
@@ -124,7 +124,7 @@ pub(super) fn setup_render_assets(
     for color in PLAYER_COLORS {
         let base = Color::Srgba(color);
         cube_materials.push(standard.add(StandardMaterial {
-            base_color: mix_with_white(base, 0.30),
+            base_color: mix_with_white(base, 0.16),
             perceptual_roughness: 0.74,
             reflectance: 0.20,
             ..default()
@@ -136,7 +136,14 @@ pub(super) fn setup_render_assets(
         }));
         let linear = LinearRgba::from(base);
         trail_materials.push(trails.add(TrailMaterial {
-            color: LinearRgba::new(linear.red * 0.5, linear.green * 0.5, linear.blue * 0.5, 0.5),
+            // Premultiplied blending used to make trails look like washed-out
+            // string: the colour was halved before the shader halved it again.
+            color: LinearRgba::new(
+                linear.red * 0.96,
+                linear.green * 0.96,
+                linear.blue * 0.96,
+                0.78,
+            ),
             parameters: Vec4::new(0.0, 1.0, 0.0, 0.0),
         }));
     }
@@ -160,8 +167,8 @@ pub(super) fn setup_render_assets(
         paper_material: papers.add(PaperMaterial {
             // Warm paper keeps the arena from reading as a blank white debug
             // canvas and gives the player colors a stable high-contrast field.
-            color: LinearRgba::new(0.97, 0.955, 0.925, 1.0),
-            parameters: Vec4::new(0.025, 0.0, 0.0, 0.0),
+            color: LinearRgba::new(0.91, 0.875, 0.79, 1.0),
+            parameters: Vec4::new(0.035, 0.0, 0.0, 0.0),
         }),
     });
 }

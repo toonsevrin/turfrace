@@ -98,7 +98,7 @@ pub(super) fn reconcile_player_cameras(
                 }),
                 Camera {
                     order: subject.slot as isize,
-                    clear_color: ClearColorConfig::Custom(Color::srgb_u8(242, 243, 245)),
+                    clear_color: ClearColorConfig::Custom(Color::srgb_u8(10, 18, 31)),
                     ..default()
                 },
                 Transform::from_translation(

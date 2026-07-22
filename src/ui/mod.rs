@@ -31,21 +31,20 @@ use crate::{
     trail::ActiveTrail,
 };
 
-// The UI palette is deliberately separate from the bright in-game player
-// colours.  Menus need a calmer canvas and a predictable contrast floor so
-// that an eight-player match never makes a button or label hard to read.
-const INK: Color = Color::srgb(0.01, 0.015, 0.025);
-const PAPER: Color = Color::srgb(0.035, 0.055, 0.09);
-const PANEL: Color = Color::srgba(0.07, 0.095, 0.145, 0.98);
-// A darker cyan keeps white Bungee copy readable when a button is focused.
-const SKY: Color = Color::srgb(0.04, 0.42, 0.55);
-const LIME: Color = Color::srgb(0.68, 0.92, 0.22);
-const CORAL: Color = Color::srgb(1.0, 0.33, 0.27);
-const MUTED: Color = Color::srgb(0.62, 0.70, 0.80);
+// The shell is an ink-and-paper control surface. Competitor colours are used
+// as signals, while the neutral UI stays quiet enough to keep eight-player
+// information legible.
+const INK: Color = Color::srgb(0.035, 0.055, 0.09);
+const PAPER: Color = Color::srgb_u8(244, 240, 230);
+const LIME: Color = Color::srgb(0.25, 0.55, 0.06);
+const CORAL: Color = Color::srgb(1.0, 0.39, 0.30);
+const MUTED: Color = Color::srgb(0.24, 0.31, 0.40);
+const CREAM: Color = Color::srgb(0.96, 0.93, 0.85);
 
 #[derive(Resource, Clone)]
 struct UiTheme {
-    font: FontSource,
+    display_font: FontSource,
+    body_font: FontSource,
 }
 
 #[derive(Component)]
@@ -189,6 +188,7 @@ pub struct MatchResults {
 #[derive(Debug, Clone, Default)]
 pub struct ResultRow {
     pub name: String,
+    pub color_id: u8,
     pub placement: u8,
     pub peak_percent: f32,
     pub kills: u32,
@@ -241,6 +241,7 @@ impl Plugin for UiPlugin {
                     dispatch_ui_actions,
                     update_button_focus,
                     pause_input,
+                    scroll_lobby.run_if(in_state(AppState::Lobby)),
                     update_lobby_screen.run_if(in_state(AppState::Lobby)),
                     update_lobby_countdown.run_if(in_state(AppState::Lobby)),
                     refresh_settings_labels.run_if(in_state(AppState::Settings)),
@@ -261,9 +262,9 @@ mod tests {
     #[test]
     fn lobby_fingerprint_excludes_subsecond_countdown_churn() {
         let mut lobby = Lobby::default();
-        let before = lobby_fingerprint(&lobby);
+        let before = lobby_fingerprint(&lobby, false);
         lobby.countdown_remaining = Some(1.25);
-        assert_eq!(before, lobby_fingerprint(&lobby));
+        assert_eq!(before, lobby_fingerprint(&lobby, false));
     }
 
     #[test]

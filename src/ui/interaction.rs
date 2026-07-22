@@ -140,7 +140,6 @@ pub(super) fn audio_cue_for_action(action: &UiAction) -> AudioCue {
 
 pub(super) fn update_button_focus(
     focus: Res<UiFocus>,
-    settings: Res<UserSettings>,
     mut buttons: Query<
         (Entity, &Interaction, &mut BackgroundColor, &mut BorderColor),
         With<Button>,
@@ -155,14 +154,10 @@ pub(super) fn update_button_focus(
     }
     for (entity, interaction, mut background, mut border) in &mut buttons {
         let selected = focus.entity == Some(entity) || *interaction == Interaction::Hovered;
-        background.0 = if selected {
-            SKY
-        } else if settings.high_contrast_ui {
-            Color::BLACK
-        } else {
-            Color::srgb(0.095, 0.125, 0.19)
-        };
-        border.set_all(if selected { Color::WHITE } else { INK });
+        // Controls stay open on the paper shell. Focus is communicated by the
+        // coral rule so the menu never grows another filled slab behind text.
+        background.0 = Color::NONE;
+        border.set_all(if selected { CORAL } else { INK });
     }
 }
 
@@ -395,13 +390,13 @@ pub(super) fn spawn_name_editor(commands: &mut Commands, theme: &UiTheme, value:
             let mut editor_panel = panel_node(percent(94));
             editor_panel.max_width = px(710);
             overlay
-                .spawn((editor_panel, BackgroundColor(PANEL), BorderColor::all(INK)))
+                .spawn((editor_panel, BackgroundColor(PAPER), BorderColor::all(INK)))
                 .with_children(|panel| {
                     spawn_title(panel, theme, "NEW PROFILE", 35.0);
                     panel.spawn((
                         Text::new(value),
                         TextFont {
-                            font: theme.font.clone(),
+                            font: theme.body_font.clone(),
                             font_size: FontSize::Px(28.0),
                             ..default()
                         },
@@ -437,9 +432,15 @@ pub(super) fn spawn_name_editor(commands: &mut Commands, theme: &UiTheme, value:
                             ..default()
                         },))
                         .with_children(|row| {
-                            spawn_button(row, theme, "BACKSPACE", UiAction::EditorBackspace, 240);
-                            spawn_button(row, theme, "SAVE", UiAction::EditorSave, 241);
-                            spawn_button(row, theme, "CANCEL", UiAction::EditorCancel, 242);
+                            spawn_mini_button(
+                                row,
+                                theme,
+                                "BACKSPACE",
+                                UiAction::EditorBackspace,
+                                240,
+                            );
+                            spawn_mini_button(row, theme, "SAVE", UiAction::EditorSave, 241);
+                            spawn_mini_button(row, theme, "CANCEL", UiAction::EditorCancel, 242);
                         });
                 });
         });
@@ -460,24 +461,24 @@ pub(super) fn spawn_key(
             Node {
                 width: px(52),
                 height: px(45),
-                border: UiRect::all(px(2)),
+                border: UiRect::all(px(1)),
                 border_radius: BorderRadius::all(px(0)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.095, 0.125, 0.19)),
+            BackgroundColor(Color::NONE),
             BorderColor::all(INK),
         ))
         .with_children(|key| {
             key.spawn((
                 Text::new(label),
                 TextFont {
-                    font: theme.font.clone(),
+                    font: theme.body_font.clone(),
                     font_size: FontSize::Px(16.0),
                     ..default()
                 },
-                TextColor(Color::WHITE),
+                TextColor(INK),
             ));
         });
 }

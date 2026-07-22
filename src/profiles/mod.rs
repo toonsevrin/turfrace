@@ -1,5 +1,6 @@
 //! Browser-local player identity, settings, and lifetime statistics.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
@@ -234,10 +235,16 @@ pub fn sanitize_profile_name(requested: &str, fallback: &str) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unix_time_ms() -> u64 {
+    js_sys::Date::now().max(0.0) as u64
 }
 
 pub struct ProfilesPlugin;
@@ -287,6 +294,14 @@ mod tests {
             ProfileStore::default().schema_version,
             PROFILE_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn temporary_profiles_have_non_empty_stable_ids() {
+        let profile = LocalProfile::temporary(2);
+        assert!(!profile.id.is_empty());
+        assert!(profile.id.ends_with("-2"));
+        assert_eq!(profile.created_at_unix_ms, profile.last_used_at_unix_ms);
     }
 
     #[test]

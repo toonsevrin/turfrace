@@ -1,5 +1,5 @@
 use bevy::{
-    asset::AssetPlugin,
+    asset::{AssetMetaCheck, AssetPlugin},
     prelude::*,
     window::{PresentMode, WindowResolution},
 };
@@ -21,7 +21,7 @@ fn main() {
     }
 
     App::new()
-        .insert_resource(ClearColor(Color::srgb_u8(242, 243, 245)))
+        .insert_resource(ClearColor(Color::srgb_u8(10, 18, 31)))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .add_plugins(
             DefaultPlugins
@@ -47,6 +47,12 @@ fn asset_plugin() -> AssetPlugin {
     let file_path = format!("{}/assets", env!("CARGO_MANIFEST_DIR"));
     AssetPlugin {
         file_path,
+        // A static Trunk server serves the SPA fallback for unknown paths. If
+        // Bevy probes for optional `.meta` files, that HTML is mistaken for
+        // asset metadata and valid browser assets fail to load. The release
+        // bundle is unprocessed, so the loader defaults are the complete
+        // metadata we need.
+        meta_check: AssetMetaCheck::Never,
         ..default()
     }
 }

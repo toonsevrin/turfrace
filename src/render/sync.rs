@@ -36,9 +36,27 @@ pub(super) fn sync_board_visuals(
         || territory.origin != board.world_origin
         || territory.owners.len() != board.owner.len();
     let mut dirty = std::collections::HashSet::new();
-    if ownership_changed && !geometry_changed {
+    let mut promoted_owners = Vec::new();
+    let mut promoted = [false; 13];
+    let mut promote = |owner: u8| {
+        if (1..=12).contains(&owner) && !promoted[owner as usize] {
+            promoted[owner as usize] = true;
+            promoted_owners.push(owner);
+        }
+    };
+    if geometry_changed {
+        territory.layer_order = [0; 12];
+        for owner in &board.owner {
+            promote(owner.0);
+        }
+    }
+    if ownership_changed {
         for (index, (old, new)) in territory.owners.iter().zip(&board.owner).enumerate() {
             if *old == new.0 {
+                continue;
+            }
+            promote(new.0);
+            if geometry_changed {
                 continue;
             }
             let x = index as u32 % board.width;
@@ -74,6 +92,8 @@ pub(super) fn sync_board_visuals(
         .owners
         .extend(board.owner.iter().map(|owner| owner.0));
     territory.playable.clone_from(&board.field_mask);
+    territory.promote_layers(promoted_owners);
+    territory.rebuild_contours();
     territory.revision = territory.revision.wrapping_add(1);
     territory.dirty_chunks = if geometry_changed {
         Vec::new()

@@ -4,8 +4,15 @@ use super::*;
 use bevy::{core_pipeline::Core2d, render::camera::CameraRenderGraph};
 
 pub(super) fn setup_ui(mut commands: Commands, assets: Res<AssetServer>) {
-    let font = FontSource::Handle(assets.load("fonts/Bungee-Regular.ttf"));
-    commands.insert_resource(UiTheme { font });
+    let display_font = FontSource::Handle(assets.load("fonts/Bungee-Regular.ttf"));
+    // Keep the expressive display face for titles. The built-in mono face is
+    // intentionally used for body copy: it is available in native and WASM
+    // builds and keeps stats, controls, and player names aligned.
+    let body_font = FontSource::default();
+    commands.insert_resource(UiTheme {
+        display_font,
+        body_font,
+    });
     commands.spawn((
         Camera2d,
         CameraRenderGraph::new(Core2d),
@@ -47,57 +54,22 @@ pub(super) fn panel_node(width: Val) -> Node {
     Node {
         width,
         max_width: px(940),
-        padding: UiRect::axes(px(30), px(24)),
+        padding: UiRect::axes(px(32), px(26)),
         display: Display::Flex,
         flex_direction: FlexDirection::Column,
         align_items: AlignItems::Stretch,
-        row_gap: px(10),
-        border: UiRect::all(px(2)),
-        // Sharp corners are intentional: this is an arcade control surface,
-        // not a rounded web card. The black keyline does the visual grouping.
+        row_gap: px(12),
+        border: UiRect::all(px(0)),
         border_radius: BorderRadius::all(px(0)),
         ..default()
     }
 }
 
 pub(super) fn spawn_background(parent: &mut ChildSpawnerCommands) {
-    parent.spawn((
-        Node {
-            width: percent(72),
-            height: percent(82),
-            position_type: PositionType::Absolute,
-            left: percent(14),
-            top: percent(9),
-            border: UiRect::all(px(3)),
-            border_radius: BorderRadius::all(px(0)),
-            ..default()
-        },
-        BorderColor::all(Color::srgba(0.30, 0.45, 0.60, 0.12)),
-        UiTransform::from_rotation(Rot2::radians(-0.035)),
-    ));
-    let colors = [CORAL, SKY, LIME, Color::srgb(0.72, 0.35, 0.95)];
-    for index in 0..8 {
-        parent.spawn((
-            Node {
-                width: px(150 + (index % 3) * 42),
-                height: px(13),
-                position_type: PositionType::Absolute,
-                left: percent(4.0 + (index * 13 % 82) as f32),
-                top: percent(8.0 + (index * 19 % 84) as f32),
-                border: UiRect::all(px(2)),
-                border_radius: BorderRadius::all(px(0)),
-                ..default()
-            },
-            BackgroundColor(colors[index % colors.len()].with_alpha(0.16)),
-            BorderColor::all(INK.with_alpha(0.42)),
-            UiTransform::from_rotation(Rot2::radians(index as f32 * 0.37)),
-            DecorativeTrail {
-                phase: index as f32 * 0.9,
-                speed: 0.45 + index as f32 * 0.035,
-                amplitude: 8.0 + (index % 3) as f32 * 5.0,
-            },
-        ));
-    }
+    // The shell uses the same paper tone as the arena. Profile cards are the
+    // only intentional menu fills, so the title and controls stand directly
+    // on the field instead of sitting in another slab.
+    let _ = parent;
 }
 
 pub(super) fn spawn_title(
@@ -109,25 +81,25 @@ pub(super) fn spawn_title(
     parent
         .spawn((Node {
             width: percent(100),
-            min_height: px(size * 1.18),
-            margin: UiRect::bottom(px(8)),
+            min_height: px(size * 1.1),
+            margin: UiRect::bottom(px(4)),
             ..default()
         },))
         .with_children(|title| {
+            // A black keyline keeps the pale face legible on paper; the
+            // down-right layers give it a small printed, dimensional edge.
             for offset in [
-                Vec2::new(-4.0, 0.0),
-                Vec2::new(4.0, 0.0),
-                Vec2::new(0.0, -4.0),
-                Vec2::new(0.0, 4.0),
-                Vec2::new(-3.0, -3.0),
-                Vec2::new(3.0, -3.0),
-                Vec2::new(-3.0, 3.0),
-                Vec2::new(3.0, 3.0),
+                Vec2::new(-2.0, 0.0),
+                Vec2::new(2.0, 0.0),
+                Vec2::new(0.0, -2.0),
+                Vec2::new(0.0, 2.0),
+                Vec2::new(2.0, 2.0),
+                Vec2::new(4.0, 4.0),
             ] {
                 title.spawn((
                     Text::new(text),
                     TextFont {
-                        font: theme.font.clone(),
+                        font: theme.display_font.clone(),
                         font_size: FontSize::Px(size),
                         ..default()
                     },
@@ -145,14 +117,13 @@ pub(super) fn spawn_title(
             title.spawn((
                 Text::new(text),
                 TextFont {
-                    font: theme.font.clone(),
+                    font: theme.display_font.clone(),
                     font_size: FontSize::Px(size),
                     ..default()
                 },
-                TextColor(Color::WHITE),
+                TextColor(CREAM),
                 TextLayout::justify(Justify::Center),
                 Node {
-                    position_type: PositionType::Absolute,
                     width: percent(100),
                     ..default()
                 },
@@ -168,8 +139,8 @@ pub(super) fn spawn_subtitle(
     parent.spawn((
         Text::new(text),
         TextFont {
-            font: theme.font.clone(),
-            font_size: FontSize::Px(15.0),
+            font: theme.body_font.clone(),
+            font_size: FontSize::Px(14.0),
             ..default()
         },
         TextColor(MUTED),
@@ -194,6 +165,11 @@ pub(super) fn spawn_button(
             min_height: 46.0,
             horizontal_padding: 18.0,
             font_size: 20.0,
+            width: percent(76),
+            max_width: px(360),
+            align_self: AlignSelf::Center,
+            label_style: ButtonLabelStyle::Perspective,
+            frame_style: ButtonFrameStyle::MenuRule,
         },
     );
 }
@@ -214,9 +190,42 @@ pub(super) fn spawn_mini_button(
         action,
         order,
         ButtonMetrics {
-            min_height: 38.0,
+            min_height: 36.0,
+            horizontal_padding: 12.0,
+            font_size: 14.0,
+            width: Val::Auto,
+            max_width: Val::Auto,
+            align_self: AlignSelf::Start,
+            label_style: ButtonLabelStyle::Utility,
+            frame_style: ButtonFrameStyle::Box,
+        },
+    );
+}
+
+/// A short menu action for dense screens such as the results table. It keeps
+/// the same centered measure as primary menu actions without adding height.
+pub(super) fn spawn_compact_menu_button(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    label: impl Into<String>,
+    action: UiAction,
+    order: u16,
+) {
+    spawn_button_sized(
+        parent,
+        theme,
+        label,
+        action,
+        order,
+        ButtonMetrics {
+            min_height: 34.0,
             horizontal_padding: 10.0,
-            font_size: 16.0,
+            font_size: 15.0,
+            width: percent(76),
+            max_width: px(360),
+            align_self: AlignSelf::Center,
+            label_style: ButtonLabelStyle::Utility,
+            frame_style: ButtonFrameStyle::QuietRule,
         },
     );
 }
@@ -226,6 +235,24 @@ struct ButtonMetrics {
     min_height: f32,
     horizontal_padding: f32,
     font_size: f32,
+    width: Val,
+    max_width: Val,
+    align_self: AlignSelf,
+    label_style: ButtonLabelStyle,
+    frame_style: ButtonFrameStyle,
+}
+
+#[derive(Clone, Copy)]
+enum ButtonLabelStyle {
+    Perspective,
+    Utility,
+}
+
+#[derive(Clone, Copy)]
+enum ButtonFrameStyle {
+    MenuRule,
+    Box,
+    QuietRule,
 }
 
 fn spawn_button_sized(
@@ -236,36 +263,124 @@ fn spawn_button_sized(
     order: u16,
     metrics: ButtonMetrics,
 ) {
+    let label = label.into();
+    // Absolute text layers do not contribute to flex sizing. Compact controls
+    // therefore receive a stable text-derived measure while menu actions use
+    // their explicit centered width.
+    let intrinsic_width = (label.chars().count() as f32 * metrics.font_size * 0.62
+        + metrics.horizontal_padding * 2.0
+        + 8.0)
+        .max(58.0);
+    let width = if matches!(metrics.width, Val::Auto) {
+        px(intrinsic_width)
+    } else {
+        metrics.width
+    };
+    let (border, justify_content) = match metrics.frame_style {
+        ButtonFrameStyle::MenuRule => (
+            UiRect {
+                left: px(4),
+                right: px(0),
+                top: px(0),
+                bottom: px(1),
+            },
+            JustifyContent::FlexStart,
+        ),
+        ButtonFrameStyle::Box => (UiRect::all(px(1)), JustifyContent::Center),
+        ButtonFrameStyle::QuietRule => (UiRect::bottom(px(1)), JustifyContent::Center),
+    };
     parent
         .spawn((
             Button,
             action,
             FocusOrder(order),
             Node {
+                width,
+                max_width: metrics.max_width,
                 min_width: px(58),
                 min_height: px(metrics.min_height),
                 padding: UiRect::axes(px(metrics.horizontal_padding), px(7)),
-                border: UiRect::all(px(2)),
+                border,
                 border_radius: BorderRadius::all(px(0)),
-                justify_content: JustifyContent::Center,
+                align_self: metrics.align_self,
+                justify_content,
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.095, 0.125, 0.19)),
+            BackgroundColor(Color::NONE),
             BorderColor::all(INK),
         ))
-        .with_children(|button| {
-            button.spawn((
+        .with_children(|button| match metrics.label_style {
+            ButtonLabelStyle::Perspective => {
+                spawn_perspective_button_label(button, theme, &label, metrics.font_size);
+            }
+            ButtonLabelStyle::Utility => {
+                button.spawn((
+                    Text::new(label),
+                    TextFont {
+                        font: theme.body_font.clone(),
+                        font_size: FontSize::Px(metrics.font_size),
+                        ..default()
+                    },
+                    TextColor(INK),
+                ));
+            }
+        });
+}
+
+fn spawn_perspective_button_label(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    label: &str,
+    font_size: f32,
+) {
+    parent
+        .spawn((Node {
+            width: percent(100),
+            height: px(font_size * 1.25),
+            position_type: PositionType::Relative,
+            ..default()
+        },))
+        .with_children(|stack| {
+            for offset in [
+                Vec2::new(-1.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(0.0, -1.0),
+                Vec2::new(0.0, 1.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(2.0, 2.0),
+            ] {
+                stack.spawn((
+                    Text::new(label),
+                    TextFont {
+                        font: theme.display_font.clone(),
+                        font_size: FontSize::Px(font_size),
+                        ..default()
+                    },
+                    TextColor(INK),
+                    TextLayout::justify(Justify::Left),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: percent(100),
+                        left: px(offset.x),
+                        top: px(offset.y),
+                        ..default()
+                    },
+                ));
+            }
+            stack.spawn((
                 Text::new(label),
                 TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(metrics.font_size),
+                    font: theme.display_font.clone(),
+                    font_size: FontSize::Px(font_size),
                     ..default()
                 },
-                TextColor(Color::WHITE),
-                TextShadow {
-                    offset: Vec2::new(1.0, 2.0),
-                    color: INK,
+                TextColor(CREAM),
+                TextLayout::justify(Justify::Left),
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: percent(100),
+                    ..default()
                 },
             ));
         });

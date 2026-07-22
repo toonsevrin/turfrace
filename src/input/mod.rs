@@ -136,6 +136,7 @@ fn track_gamepads(
 fn poll_keyboard_and_mouse(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    buttons: Query<&Interaction, With<Button>>,
     mut input: MessageWriter<MenuInput>,
     mut last: ResMut<LastActiveDevice>,
 ) {
@@ -164,9 +165,16 @@ fn poll_keyboard_and_mouse(
             send(InputDeviceId::KeyboardPrimary, action);
         }
     }
-    if mouse.just_pressed(MouseButton::Left) {
+    let mouse_over_ui = buttons
+        .iter()
+        .any(|interaction| matches!(interaction, Interaction::Hovered | Interaction::Pressed));
+    if mouse_click_should_join(mouse.just_pressed(MouseButton::Left), mouse_over_ui) {
         send(InputDeviceId::Mouse, MenuAction::Join);
     }
+}
+
+fn mouse_click_should_join(mouse_pressed: bool, mouse_over_ui: bool) -> bool {
+    mouse_pressed && !mouse_over_ui
 }
 
 fn poll_gamepad_menus(
@@ -309,5 +317,12 @@ mod tests {
     fn screen_up_maps_to_world_negative_y() {
         assert_eq!(screen_direction_to_world(Vec2::Y), Vec2::NEG_Y);
         assert_eq!(screen_direction_to_world(Vec2::X), Vec2::X);
+    }
+
+    #[test]
+    fn clicks_on_ui_controls_do_not_toggle_mouse_lobby_readiness() {
+        assert!(mouse_click_should_join(true, false));
+        assert!(!mouse_click_should_join(true, true));
+        assert!(!mouse_click_should_join(false, false));
     }
 }

@@ -30,7 +30,7 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     if family == 10 { ink = smoothstep(0.76, 0.95, fract(length(p) * 0.28)); }
     if family == 11 { ink = smoothstep(0.76, 0.95, fract((abs(fract(p.x * 0.22) - 0.5) + p.y * 0.24))); }
     let wash = 0.5 + 0.5 * sin(mesh.world_position.x * 0.17 + mesh.world_position.z * 0.13);
-    let pattern_strength = material.parameters.x * (1.0 - is_wall) * 0.075;
-    let wall_strength = is_wall * 0.10;
+    let pattern_strength = material.parameters.x * (1.0 - is_wall) * 0.09;
+    let wall_strength = is_wall * 0.14;
     return vec4(color.rgb * (1.0 - ink * pattern_strength) * (1.0 - wall_strength + wash * 0.015), 1.0);
 }

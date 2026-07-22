@@ -1,2 +1,4 @@
 /target
+/target/visual-feedback/
 /dist
+/.playwright-cli/

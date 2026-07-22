@@ -421,27 +421,31 @@ fn translate_menu_input(
     mut commands: MessageWriter<LobbyCommandMessage>,
 ) {
     for input in input.read() {
-        let slot = lobby.slot_for_device(input.device);
-        let command = match (slot, input.action) {
-            (
-                None,
-                MenuAction::Join | MenuAction::Confirm | MenuAction::Secondary | MenuAction::Pause,
-            ) => Some(LobbyCommand::Join(input.device)),
-            (Some(_), MenuAction::Confirm) => Some(LobbyCommand::ToggleReady(input.device)),
-            (Some(_), MenuAction::Back) if lobby.countdown_remaining.is_some() => {
-                Some(LobbyCommand::Cancel)
-            }
-            (Some(_), MenuAction::Back) => Some(LobbyCommand::Leave(input.device)),
-            (Some(_), MenuAction::Pause) => Some(LobbyCommand::Start),
-            (Some(_), MenuAction::ColorPrevious) => {
-                Some(LobbyCommand::CycleColor(input.device, -1))
-            }
-            (Some(_), MenuAction::ColorNext) => Some(LobbyCommand::CycleColor(input.device, 1)),
-            _ => None,
-        };
+        let command = lobby_command_for_input(&lobby, *input);
         if let Some(command) = command {
             commands.write(LobbyCommandMessage(command));
         }
+    }
+}
+
+fn lobby_command_for_input(lobby: &Lobby, input: MenuInput) -> Option<LobbyCommand> {
+    let slot = lobby.slot_for_device(input.device);
+    match (slot, input.action) {
+        (
+            None,
+            MenuAction::Join | MenuAction::Confirm | MenuAction::Secondary | MenuAction::Pause,
+        ) => Some(LobbyCommand::Join(input.device)),
+        (Some(_), MenuAction::Join | MenuAction::Confirm) => {
+            Some(LobbyCommand::ToggleReady(input.device))
+        }
+        (Some(_), MenuAction::Back) if lobby.countdown_remaining.is_some() => {
+            Some(LobbyCommand::Cancel)
+        }
+        (Some(_), MenuAction::Back) => Some(LobbyCommand::Leave(input.device)),
+        (Some(_), MenuAction::Pause) => Some(LobbyCommand::Start),
+        (Some(_), MenuAction::ColorPrevious) => Some(LobbyCommand::CycleColor(input.device, -1)),
+        (Some(_), MenuAction::ColorNext) => Some(LobbyCommand::CycleColor(input.device, 1)),
+        _ => None,
     }
 }
 
@@ -591,5 +595,33 @@ mod tests {
         lobby.join(InputDeviceId::Gamepad(1), &profiles);
         lobby.cycle_color(1, -1);
         assert_ne!(lobby.players[0].color_id, lobby.players[1].color_id);
+    }
+
+    #[test]
+    fn an_assigned_mouse_can_toggle_ready_with_the_same_click_used_to_join() {
+        let profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        let device = InputDeviceId::Mouse;
+        assert_eq!(
+            lobby_command_for_input(
+                &lobby,
+                MenuInput {
+                    device,
+                    action: MenuAction::Join,
+                },
+            ),
+            Some(LobbyCommand::Join(device))
+        );
+        lobby.join(device, &profiles);
+        assert_eq!(
+            lobby_command_for_input(
+                &lobby,
+                MenuInput {
+                    device,
+                    action: MenuAction::Join,
+                },
+            ),
+            Some(LobbyCommand::ToggleReady(device))
+        );
     }
 }
