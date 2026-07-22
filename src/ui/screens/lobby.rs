@@ -1,8 +1,17 @@
 //! Device registration cards and match-composition controls.
 
 use super::super::*;
+use crate::lobby::MAX_HUMANS;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::window::PrimaryWindow;
+
+fn input_device_label(device: InputDeviceId) -> String {
+    match device {
+        InputDeviceId::KeyboardPrimary => "KEYBOARD".to_owned(),
+        InputDeviceId::Mouse => "MOUSE".to_owned(),
+        InputDeviceId::Gamepad(id) => format!("CONTROLLER {}", id + 1),
+    }
+}
 
 fn card_customization_actions(device: InputDeviceId) -> [LobbyCommand; 4] {
     [
@@ -83,7 +92,12 @@ pub(crate) fn spawn_lobby_content(
             ))
             .with_children(|panel| {
                 spawn_title(panel, theme, "LOBBY", 42.0);
-                spawn_subtitle(panel, theme, "A / ENTER TO JOIN   /   L/R: COLOR");
+                spawn_subtitle(panel, theme, "KEYBOARD: ENTER / ARROWS / WASD");
+                spawn_subtitle(
+                    panel,
+                    theme,
+                    "MOUSE: JOIN WITH MOUSE   /   CONTROLLER: PRESS A",
+                );
                 panel
                     .spawn((Node {
                         width: percent(100),
@@ -108,7 +122,7 @@ pub(crate) fn spawn_lobby_content(
                     .with_children(|grid| {
                         if lobby.players.is_empty() {
                             grid.spawn((
-                                Text::new("PRESS A TO JOIN"),
+                                Text::new("PRESS ANY INPUT TO JOIN"),
                                 TextFont {
                                     font: theme.body_font.clone(),
                                     font_size: FontSize::Px(22.0),
@@ -144,7 +158,7 @@ pub(crate) fn spawn_lobby_content(
                                 } else if player.ready {
                                     "READY"
                                 } else {
-                                    "PRESS A"
+                                    "NOT READY"
                                 };
                                 card.spawn((Node {
                                     width: percent(100),
@@ -155,9 +169,10 @@ pub(crate) fn spawn_lobby_content(
                                     .with_children(|header| {
                                         header.spawn((
                                             Text::new(format!(
-                                                "P{}  {}",
+                                                "P{}  {}  /  {}",
                                                 slot + 1,
-                                                player.display_name
+                                                player.display_name,
+                                                input_device_label(player.device),
                                             )),
                                             TextFont {
                                                 font: theme.body_font.clone(),
@@ -218,6 +233,21 @@ pub(crate) fn spawn_lobby_content(
                                                     UiAction::CreateProfile(slot),
                                                     44 + slot as u16 * 10,
                                                 );
+                                                if player.connected {
+                                                    spawn_mini_button(
+                                                        controls,
+                                                        theme,
+                                                        if player.ready {
+                                                            "UNREADY"
+                                                        } else {
+                                                            "READY UP"
+                                                        },
+                                                        UiAction::Lobby(LobbyCommand::ToggleReady(
+                                                            player.device,
+                                                        )),
+                                                        46 + slot as u16 * 10,
+                                                    );
+                                                }
                                             });
                                         body.spawn((
                                             Node {
@@ -252,6 +282,17 @@ pub(crate) fn spawn_lobby_content(
                             });
                         }
                     });
+                if lobby.players.len() < MAX_HUMANS
+                    && lobby.slot_for_device(InputDeviceId::Mouse).is_none()
+                {
+                    spawn_button(
+                        panel,
+                        theme,
+                        "JOIN WITH MOUSE",
+                        UiAction::Lobby(LobbyCommand::Join(InputDeviceId::Mouse)),
+                        19,
+                    );
+                }
                 panel
                     .spawn((Node {
                         width: percent(76),
@@ -299,7 +340,7 @@ pub(crate) fn spawn_lobby_content(
                 let start_label = if lobby.can_start() {
                     "START MATCH"
                 } else {
-                    "READY 2 TO START"
+                    "READY 1 TO START"
                 };
                 spawn_button(
                     panel,
@@ -309,17 +350,6 @@ pub(crate) fn spawn_lobby_content(
                     22,
                 );
                 spawn_button(panel, theme, "BACK", UiAction::State(AppState::Home), 23);
-                panel.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font: theme.body_font.clone(),
-                        font_size: FontSize::Px(42.0),
-                        ..default()
-                    },
-                    TextColor(LIME),
-                    TextLayout::justify(Justify::Center),
-                    LobbyCountdownText,
-                ));
             });
         });
 }
@@ -330,7 +360,8 @@ pub(crate) fn lobby_fingerprint(lobby: &Lobby, compact: bool) -> String {
         .iter()
         .map(|player| {
             format!(
-                "{}:{}:{}:{}:{}:{}",
+                "{:?}:{}:{}:{}:{}:{}:{}",
+                player.device,
                 player.display_name,
                 player.color_id,
                 player.pattern_id,
@@ -411,20 +442,6 @@ pub(crate) fn update_lobby_screen(
     spawn_lobby_content(&mut commands, &theme, &lobby, compact);
 }
 
-pub(crate) fn update_lobby_countdown(
-    lobby: Res<Lobby>,
-    mut text: Query<&mut Text, With<LobbyCountdownText>>,
-) {
-    let Ok(mut text) = text.single_mut() else {
-        return;
-    };
-    text.0 = lobby
-        .countdown_remaining
-        .map_or_else(String::new, |remaining| {
-            format!("STARTING IN {}", remaining.ceil() as u8)
-        });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +467,18 @@ mod tests {
         assert_eq!(clamp_lobby_scroll(0.0, -100.0, 900.0, 600.0, 1.0), 0.0);
         assert_eq!(clamp_lobby_scroll(100.0, 500.0, 900.0, 600.0, 1.0), 300.0);
         assert_eq!(clamp_lobby_scroll(0.0, 100.0, 500.0, 600.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn lobby_labels_each_supported_input_device() {
+        assert_eq!(
+            input_device_label(InputDeviceId::KeyboardPrimary),
+            "KEYBOARD"
+        );
+        assert_eq!(input_device_label(InputDeviceId::Mouse), "MOUSE");
+        assert_eq!(
+            input_device_label(InputDeviceId::Gamepad(1)),
+            "CONTROLLER 2"
+        );
     }
 }

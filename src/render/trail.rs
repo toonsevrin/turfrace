@@ -1,21 +1,20 @@
-use std::collections::{HashMap, HashSet};
-
 use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
 
-use super::{
-    CompetitorVisual, RetiredMeshes,
-    materials::{RenderAssets, TrailMaterial},
-    territory::TerritoryVisual,
-};
+use super::{CompetitorVisual, materials::RenderAssets, territory::TerritoryVisual};
 
 const CAP_SEGMENTS: usize = 10;
 
-/// Render-only trail polyline. Gameplay collision continues to use its own unsimplified data.
+pub const MAX_RENDER_TRAIL_POINTS: usize = 512;
+
+/// Render-only trail polyline. Gameplay collision continues to use its own
+/// exact sampled path and head. The visual path has a fixed budget.
 #[derive(Component, Debug, Clone, Default)]
 pub struct TrailVisual {
     pub points: Vec<Vec2>,
+    pub length: f32,
+    pub source_samples: usize,
     pub revision: u64,
     pub dangerous: bool,
 }
@@ -26,34 +25,64 @@ pub(super) struct TrailProxy {
     revision: u64,
 }
 
+#[derive(Component)]
+pub(super) struct TrailPipelineWarmup;
+
+pub(super) fn spawn_trail_pipeline_warmup(
+    mut commands: Commands,
+    assets: Res<RenderAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    commands.spawn((
+        Name::new("Trail Pipeline Warmup"),
+        TrailPipelineWarmup,
+        Mesh3d(meshes.add(ribbon_mesh(
+            &[Vec2::new(-0.01, 0.0), Vec2::new(0.01, 0.0)],
+            0.01,
+            &TerritoryVisual::default(),
+        ))),
+        MeshMaterial3d(assets.trail_materials[0].clone()),
+        Transform::from_xyz(0.0, -1.0, 0.0),
+    ));
+}
+
+pub(super) fn cleanup_trail_pipeline_warmup(
+    mut commands: Commands,
+    warmups: Query<Entity, With<TrailPipelineWarmup>>,
+) {
+    for entity in &warmups {
+        commands.entity(entity).despawn();
+    }
+}
+
 pub(super) fn sync_trail_visuals(
     mut commands: Commands,
     assets: Option<Res<RenderAssets>>,
     territory: Res<TerritoryVisual>,
-    mut retired: ResMut<RetiredMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
     sources: Query<(Entity, &CompetitorVisual, &TrailVisual)>,
     mut proxies: Query<(Entity, &mut TrailProxy, &Mesh3d)>,
 ) {
     let Some(assets) = assets else { return };
-    let source_map: HashMap<Entity, (&CompetitorVisual, &TrailVisual)> =
-        sources.iter().map(|(e, c, t)| (e, (c, t))).collect();
-    let mut rendered = HashSet::new();
+    let mut rendered = [false; 12];
     for (entity, mut proxy, mesh_handle) in &mut proxies {
-        let Some((_, trail)) = source_map.get(&proxy.source) else {
+        let Some((_, visual, trail)) = sources
+            .iter()
+            .find(|(source, _, _)| *source == proxy.source)
+        else {
             commands.entity(entity).despawn();
             continue;
         };
-        rendered.insert(proxy.source);
-        if proxy.revision != trail.revision || territory.is_changed() {
-            let replacement = meshes.add(ribbon_mesh(&trail.points, 0.65, &territory));
-            retired.0.push_back((mesh_handle.0.clone(), 0));
-            commands.entity(entity).insert(Mesh3d(replacement));
+        rendered[visual.id as usize] = true;
+        if proxy.revision != trail.revision {
+            if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+                *mesh = ribbon_mesh(&trail.points, 0.65, &territory);
+            }
             proxy.revision = trail.revision;
         }
     }
     for (source, visual, trail) in &sources {
-        if rendered.contains(&source) || trail.points.len() < 2 {
+        if rendered[visual.id as usize] || trail.points.len() < 2 {
             continue;
         }
         let palette = visual.color_id as usize % assets.trail_materials.len();
@@ -64,7 +93,7 @@ pub(super) fn sync_trail_visuals(
                 revision: trail.revision,
             },
             Mesh3d(meshes.add(ribbon_mesh(&trail.points, 0.65, &territory))),
-            MeshMaterial3d::<TrailMaterial>(assets.trail_materials[palette].clone()),
+            MeshMaterial3d(assets.trail_materials[palette].clone()),
             Transform::default(),
         ));
     }
@@ -170,19 +199,7 @@ fn append_round_cap(
 }
 
 fn surface_height(territory: &TerritoryVisual, point: Vec2) -> f32 {
-    if !territory.is_valid() {
-        return 0.015;
-    }
-    let relative = (point - territory.origin) / territory.cell_size;
-    let x = relative.x.floor() as i32;
-    let y = relative.y.floor() as i32;
-    if x >= 0 && y >= 0 && x < territory.width as i32 && y < territory.height as i32 {
-        let index = y as usize * territory.width as usize + x as usize;
-        if territory.owners[index] != 0 {
-            return 0.115;
-        }
-    }
-    0.015
+    territory.surface_height(point)
 }
 
 #[cfg(test)]
@@ -224,7 +241,6 @@ mod tests {
             height: 1,
             cell_size: 1.0,
             owners: vec![0, 1],
-            playable: vec![true; 2],
             ..default()
         };
         let mesh = ribbon_mesh(
@@ -237,7 +253,13 @@ mod tests {
             .unwrap()
             .as_float3()
             .unwrap();
-        assert_eq!(positions[0][1], 0.015);
-        assert_eq!(positions[2][1], 0.115);
+        assert_eq!(
+            positions[0][1],
+            super::super::territory::FIELD_SURFACE_HEIGHT
+        );
+        assert_eq!(
+            positions[2][1],
+            super::super::territory::TERRITORY_SURFACE_HEIGHT
+        );
     }
 }

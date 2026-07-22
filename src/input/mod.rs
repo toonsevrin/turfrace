@@ -112,7 +112,7 @@ impl Plugin for InputPlugin {
             .add_message::<DeviceDisconnected>()
             .add_systems(
                 PreUpdate,
-                (track_gamepads, poll_keyboard_and_mouse, poll_gamepad_menus).chain(),
+                (track_gamepads, poll_keyboard_menu_input, poll_gamepad_menus).chain(),
             )
             .add_systems(Update, build_human_steering_intents);
     }
@@ -133,10 +133,8 @@ fn track_gamepads(
     connected.gamepads = now;
 }
 
-fn poll_keyboard_and_mouse(
+fn poll_keyboard_menu_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    buttons: Query<&Interaction, With<Button>>,
     mut input: MessageWriter<MenuInput>,
     mut last: ResMut<LastActiveDevice>,
 ) {
@@ -165,16 +163,6 @@ fn poll_keyboard_and_mouse(
             send(InputDeviceId::KeyboardPrimary, action);
         }
     }
-    let mouse_over_ui = buttons
-        .iter()
-        .any(|interaction| matches!(interaction, Interaction::Hovered | Interaction::Pressed));
-    if mouse_click_should_join(mouse.just_pressed(MouseButton::Left), mouse_over_ui) {
-        send(InputDeviceId::Mouse, MenuAction::Join);
-    }
-}
-
-fn mouse_click_should_join(mouse_pressed: bool, mouse_over_ui: bool) -> bool {
-    mouse_pressed && !mouse_over_ui
 }
 
 fn poll_gamepad_menus(
@@ -264,13 +252,7 @@ fn build_human_steering_intents(
                 }),
                 ControlSource::Gamepad,
             ),
-            InputDeviceId::KeyboardPrimary => {
-                let x = i8::from(keys.pressed(KeyCode::KeyD)) as f32
-                    - i8::from(keys.pressed(KeyCode::KeyA)) as f32;
-                let y = i8::from(keys.pressed(KeyCode::KeyS)) as f32
-                    - i8::from(keys.pressed(KeyCode::KeyW)) as f32;
-                (Vec2::new(x, y).normalize_or_zero(), ControlSource::Keyboard)
-            }
+            InputDeviceId::KeyboardPrimary => (keyboard_direction(&keys), ControlSource::Keyboard),
             InputDeviceId::Mouse => (mouse_aim.0.unwrap_or(Vec2::ZERO), ControlSource::Mouse),
         };
         let processed = if source == ControlSource::Gamepad {
@@ -284,6 +266,14 @@ fn build_human_steering_intents(
         intent.magnitude = processed.length();
         intent.source = source;
     }
+}
+
+fn keyboard_direction(keys: &ButtonInput<KeyCode>) -> Vec2 {
+    let x = i8::from(keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight)) as f32
+        - i8::from(keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft)) as f32;
+    let y = i8::from(keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown)) as f32
+        - i8::from(keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp)) as f32;
+    Vec2::new(x, y).normalize_or_zero()
 }
 
 pub fn radial_deadzone(input: Vec2, deadzone: f32) -> Vec2 {
@@ -320,9 +310,16 @@ mod tests {
     }
 
     #[test]
-    fn clicks_on_ui_controls_do_not_toggle_mouse_lobby_readiness() {
-        assert!(mouse_click_should_join(true, false));
-        assert!(!mouse_click_should_join(true, true));
-        assert!(!mouse_click_should_join(false, false));
+    fn keyboard_steering_accepts_wasd_and_arrow_keys() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::ArrowUp);
+        keys.press(KeyCode::ArrowRight);
+        assert_eq!(keyboard_direction(&keys), Vec2::new(1.0, -1.0).normalize());
+
+        keys.release(KeyCode::ArrowUp);
+        keys.release(KeyCode::ArrowRight);
+        keys.press(KeyCode::KeyA);
+        keys.press(KeyCode::KeyS);
+        assert_eq!(keyboard_direction(&keys), Vec2::new(-1.0, 1.0).normalize());
     }
 }

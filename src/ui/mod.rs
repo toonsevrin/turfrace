@@ -113,9 +113,6 @@ struct UiActivated(UiAction);
 struct LobbyFingerprint(String);
 
 #[derive(Component)]
-struct LobbyCountdownText;
-
-#[derive(Component)]
 struct SettingsValueText(SettingField);
 
 #[derive(Component)]
@@ -214,6 +211,8 @@ impl Plugin for UiPlugin {
             .add_systems(OnExit(AppState::Home), cleanup_screen)
             .add_systems(OnEnter(AppState::Lobby), spawn_lobby)
             .add_systems(OnExit(AppState::Lobby), cleanup_screen)
+            .add_systems(OnEnter(AppState::MatchLoading), spawn_match_loading)
+            .add_systems(OnExit(AppState::MatchLoading), cleanup_screen)
             .add_systems(OnEnter(AppState::LocalLeaderboard), spawn_leaderboard)
             .add_systems(OnExit(AppState::LocalLeaderboard), cleanup_screen)
             .add_systems(OnEnter(AppState::Settings), spawn_settings)
@@ -243,7 +242,6 @@ impl Plugin for UiPlugin {
                     pause_input,
                     scroll_lobby.run_if(in_state(AppState::Lobby)),
                     update_lobby_screen.run_if(in_state(AppState::Lobby)),
-                    update_lobby_countdown.run_if(in_state(AppState::Lobby)),
                     refresh_settings_labels.run_if(in_state(AppState::Settings)),
                     edit_profile_name,
                     tick_confirmation,
@@ -258,14 +256,6 @@ impl Plugin for UiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lobby_fingerprint_excludes_subsecond_countdown_churn() {
-        let mut lobby = Lobby::default();
-        let before = lobby_fingerprint(&lobby, false);
-        lobby.countdown_remaining = Some(1.25);
-        assert_eq!(before, lobby_fingerprint(&lobby, false));
-    }
 
     #[test]
     fn settings_values_are_clamped_by_dispatch_contract() {

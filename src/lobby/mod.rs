@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -35,7 +35,6 @@ pub struct LobbyPlayer {
 pub struct Lobby {
     pub players: Vec<LobbyPlayer>,
     pub total_competitors: u8,
-    pub countdown_remaining: Option<f32>,
     pub shared_focus_owner: Option<InputDeviceId>,
 }
 
@@ -44,7 +43,6 @@ impl Default for Lobby {
         Self {
             players: Vec::new(),
             total_competitors: DEFAULT_COMPETITORS,
-            countdown_remaining: None,
             shared_focus_owner: None,
         }
     }
@@ -57,7 +55,7 @@ impl Lobby {
     }
 
     pub fn can_start(&self) -> bool {
-        self.players.len() >= 2
+        !self.players.is_empty()
             && self
                 .players
                 .iter()
@@ -108,14 +106,12 @@ impl Lobby {
         });
         self.total_competitors = self.total_competitors.max(self.players.len() as u8);
         self.shared_focus_owner = Some(device);
-        self.countdown_remaining = None;
         true
     }
 
     pub fn leave(&mut self, device: InputDeviceId) -> bool {
         let before = self.players.len();
         self.players.retain(|player| player.device != device);
-        self.countdown_remaining = None;
         before != self.players.len()
     }
 
@@ -251,7 +247,6 @@ pub enum LobbyCommand {
     CycleProfile(InputDeviceId, i8),
     CyclePattern(InputDeviceId, i8),
     Start,
-    Cancel,
 }
 
 #[derive(Message, Debug, Clone, Copy)]
@@ -274,6 +269,12 @@ impl Default for LastLobbySettings {
 
 pub struct LobbyPlugin;
 
+#[derive(SystemParam)]
+struct LobbyLaunch<'w> {
+    setup: ResMut<'w, MatchSetup>,
+    next: ResMut<'w, NextState<AppState>>,
+}
+
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Lobby>()
@@ -288,7 +289,6 @@ impl Plugin for LobbyPlugin {
                     translate_menu_input,
                     handle_disconnections,
                     apply_lobby_commands,
-                    advance_lobby_countdown,
                 )
                     .chain()
                     .run_if(in_state(AppState::Lobby)),
@@ -412,7 +412,6 @@ fn replace_disconnected_with_npc(
 
 fn restore_lobby_settings(last: Res<LastLobbySettings>, mut lobby: ResMut<Lobby>) {
     lobby.set_total_competitors(i16::from(last.total_competitors));
-    lobby.countdown_remaining = None;
 }
 
 fn translate_menu_input(
@@ -433,13 +432,19 @@ fn lobby_command_for_input(lobby: &Lobby, input: MenuInput) -> Option<LobbyComma
     match (slot, input.action) {
         (
             None,
-            MenuAction::Join | MenuAction::Confirm | MenuAction::Secondary | MenuAction::Pause,
+            MenuAction::Join
+            | MenuAction::Confirm
+            | MenuAction::Secondary
+            | MenuAction::Pause
+            | MenuAction::Up
+            | MenuAction::Down
+            | MenuAction::Left
+            | MenuAction::Right
+            | MenuAction::ColorPrevious
+            | MenuAction::ColorNext,
         ) => Some(LobbyCommand::Join(input.device)),
         (Some(_), MenuAction::Join | MenuAction::Confirm) => {
             Some(LobbyCommand::ToggleReady(input.device))
-        }
-        (Some(_), MenuAction::Back) if lobby.countdown_remaining.is_some() => {
-            Some(LobbyCommand::Cancel)
         }
         (Some(_), MenuAction::Back) => Some(LobbyCommand::Leave(input.device)),
         (Some(_), MenuAction::Pause) => Some(LobbyCommand::Start),
@@ -457,7 +462,6 @@ fn handle_disconnections(
         if let Some(slot) = lobby.slot_for_device(event.0) {
             lobby.players[slot].connected = false;
             lobby.players[slot].ready = false;
-            lobby.countdown_remaining = None;
         }
     }
 }
@@ -469,6 +473,7 @@ fn apply_lobby_commands(
     mut last: ResMut<LastLobbySettings>,
     mut persistence: ResMut<PersistenceStatus>,
     mut audio: MessageWriter<PlayAudioCue>,
+    mut launch: LobbyLaunch,
 ) {
     for message in messages.read() {
         match message.0 {
@@ -483,7 +488,6 @@ fn apply_lobby_commands(
             LobbyCommand::ToggleReady(device) => {
                 if let Some(slot) = lobby.slot_for_device(device) {
                     lobby.players[slot].ready = !lobby.players[slot].ready;
-                    lobby.countdown_remaining = None;
                     audio.write(PlayAudioCue::human(AudioCue::Ready));
                 }
             }
@@ -511,28 +515,16 @@ fn apply_lobby_commands(
                 }
             }
             LobbyCommand::Start if lobby.can_start() => {
-                lobby.countdown_remaining = Some(3.0);
+                prepare_match_setup(&lobby, &mut launch.setup);
                 audio.write(PlayAudioCue::human(AudioCue::MenuConfirm));
+                launch.next.set(AppState::MatchLoading);
             }
-            LobbyCommand::Cancel => lobby.countdown_remaining = None,
             LobbyCommand::Start => {}
         }
     }
 }
 
-fn advance_lobby_countdown(
-    time: Res<Time>,
-    mut lobby: ResMut<Lobby>,
-    mut setup: ResMut<MatchSetup>,
-    mut next: ResMut<NextState<AppState>>,
-) {
-    let Some(remaining) = &mut lobby.countdown_remaining else {
-        return;
-    };
-    *remaining -= time.delta_secs();
-    if *remaining > 0.0 {
-        return;
-    }
+fn prepare_match_setup(lobby: &Lobby, setup: &mut MatchSetup) {
     let previous_seed = setup.seed;
     *setup = MatchSetup {
         seed: previous_seed
@@ -552,8 +544,6 @@ fn advance_lobby_countdown(
             .collect(),
         replay_same_field: false,
     };
-    lobby.countdown_remaining = None;
-    next.set(AppState::MatchLoading);
 }
 
 #[cfg(test)]
@@ -573,18 +563,30 @@ mod tests {
     }
 
     #[test]
-    fn start_requires_two_connected_ready_humans() {
+    fn start_requires_one_connected_ready_human() {
         let profiles = ProfileStore::default();
         let mut lobby = Lobby::default();
         lobby.join(InputDeviceId::Mouse, &profiles);
         assert!(!lobby.can_start());
-        lobby.join(InputDeviceId::Gamepad(1), &profiles);
-        for player in &mut lobby.players {
-            player.ready = true;
-        }
+        lobby.players[0].ready = true;
         assert!(lobby.can_start());
-        lobby.players[1].connected = false;
+        lobby.players[0].connected = false;
         assert!(!lobby.can_start());
+    }
+
+    #[test]
+    fn preparing_a_match_commits_players_without_a_second_lobby_countdown() {
+        let profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        lobby.join(InputDeviceId::Mouse, &profiles);
+        lobby.players[0].ready = true;
+        let mut setup = MatchSetup::default();
+
+        prepare_match_setup(&lobby, &mut setup);
+
+        assert_eq!(setup.humans.len(), 1);
+        assert_eq!(setup.humans[0].device, InputDeviceId::Mouse);
+        assert_eq!(setup.total_competitors, lobby.total_competitors);
     }
 
     #[test]
@@ -598,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn an_assigned_mouse_can_toggle_ready_with_the_same_click_used_to_join() {
+    fn an_assigned_mouse_can_toggle_ready_with_join_action() {
         let profiles = ProfileStore::default();
         let mut lobby = Lobby::default();
         let device = InputDeviceId::Mouse;
@@ -622,6 +624,60 @@ mod tests {
                 },
             ),
             Some(LobbyCommand::ToggleReady(device))
+        );
+    }
+
+    #[test]
+    fn unassigned_keyboard_movement_joins_without_consuming_back() {
+        let lobby = Lobby::default();
+        assert_eq!(
+            lobby_command_for_input(
+                &lobby,
+                MenuInput {
+                    device: InputDeviceId::KeyboardPrimary,
+                    action: MenuAction::Up,
+                },
+            ),
+            Some(LobbyCommand::Join(InputDeviceId::KeyboardPrimary))
+        );
+        assert_eq!(
+            lobby_command_for_input(
+                &lobby,
+                MenuInput {
+                    device: InputDeviceId::KeyboardPrimary,
+                    action: MenuAction::Back,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn keyboard_and_mouse_can_join_separate_slots() {
+        let profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        assert!(lobby.join(InputDeviceId::KeyboardPrimary, &profiles));
+        assert!(lobby.join(InputDeviceId::Mouse, &profiles));
+        assert_eq!(
+            lobby.slot_for_device(InputDeviceId::KeyboardPrimary),
+            Some(0)
+        );
+        assert_eq!(lobby.slot_for_device(InputDeviceId::Mouse), Some(1));
+    }
+
+    #[test]
+    fn unassigned_controller_navigation_joins() {
+        let lobby = Lobby::default();
+        let device = InputDeviceId::Gamepad(3);
+        assert_eq!(
+            lobby_command_for_input(
+                &lobby,
+                MenuInput {
+                    device,
+                    action: MenuAction::Right,
+                },
+            ),
+            Some(LobbyCommand::Join(device))
         );
     }
 }

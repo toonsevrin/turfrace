@@ -1110,7 +1110,8 @@ The lobby is the primary device-registration screen.
 It contains:
 
 * Up to eight human player cards.
-* “Press any button or click to join.”
+* “Press any input to join.”
+* A visible `Join with Mouse` control.
 * Total competitor selector.
 * NPC count preview.
 * Start control.
@@ -1121,8 +1122,8 @@ It contains:
 An unassigned device joins by:
 
 * Pressing a gamepad face button or Start.
-* Clicking with the mouse.
-* Pressing a keyboard confirm key in fallback mode.
+* Clicking `Join with Mouse`.
+* Pressing a keyboard confirm or movement key.
 
 A new player card receives:
 
@@ -1556,7 +1557,7 @@ The field SHOULD have a very faint procedural dot or paper-grid shader at 2–3%
 Claimed territory top surface:
 
 ```text
-Y = 0.10
+Y = 0.17
 ```
 
 Color:
@@ -1569,10 +1570,10 @@ Territory is opaque.
 
 Rendering details:
 
-* Vertical side walls appear where claimed territory meets unclaimed field.
-* Side-wall color is approximately 15% darker.
+* A dark antialiased rim suggests a shallow vertical side where claimed territory meets unclaimed field.
+* Rim color is approximately 15% darker.
 * Boundaries between two owners use a thin darkened seam rather than overlapping side walls.
-* Territory mesh updates only in dirty chunks.
+* Ownership updates rebuild bounded smooth owner meshes with an elevated top and explicit side wall.
 * Captures replace previous colors; territory is not stacked.
 
 ## 18.4 Trail rendering
@@ -2180,11 +2181,12 @@ Although there may be up to eight cameras, their viewports partition one window,
 
 * Disable real-time shadow maps by default.
 * Use blob shadows.
-* Chunk territory meshes.
+* Rebuild bounded territory meshes and upload ownership only when its revision changes.
 * Pool particles.
 * Keep NPC thinking below the fixed simulation rate.
 * Use trail bitmasks for broad-phase collision.
-* Rebuild only dirty meshes.
+* Smooth and triangulate territory boundaries during ownership updates; steady-state shading uses
+  opaque owner meshes with no filtered alpha coverage.
 * Cap browser device-pixel ratio.
 * Hide or cull effects outside each camera.
 * Avoid one entity per territory cell.

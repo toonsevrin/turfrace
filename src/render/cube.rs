@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
-
 use bevy::prelude::*;
 
 use crate::camera::ViewportSubject;
 
-use super::{PresentationSettings, TrailVisual, materials::RenderAssets};
+use super::{
+    PresentationSettings, TerritoryVisual, TrailVisual, materials::RenderAssets,
+    territory::FIELD_SURFACE_HEIGHT,
+};
 
 /// Complete render snapshot for one competitor. Simulation may update this at fixed rate;
 /// presentation interpolates it in ordinary `Update`.
@@ -57,6 +58,7 @@ pub(super) fn sync_competitor_visuals(
     mut commands: Commands,
     time: Res<Time>,
     settings: Res<PresentationSettings>,
+    territory: Res<TerritoryVisual>,
     assets: Option<Res<RenderAssets>>,
     sources: Query<(Entity, &CompetitorVisual, Option<&TrailVisual>)>,
     mut proxies: Query<
@@ -81,25 +83,29 @@ pub(super) fn sync_competitor_visuals(
         (&mut Visibility, &mut Transform),
         (With<SpawnShield>, Without<CompetitorProxy>),
     >,
+    mut subjects: Query<&mut ViewportSubject>,
 ) {
     let Some(assets) = assets else { return };
-    let source_map: HashMap<Entity, (&CompetitorVisual, Option<&TrailVisual>)> = sources
-        .iter()
-        .map(|(entity, visual, trail)| (entity, (visual, trail)))
-        .collect();
-    let mut rendered = HashSet::new();
+    let mut rendered = [false; 12];
     for (entity, mut proxy, mut transform, mut root_visibility, children) in &mut proxies {
-        let Some((visual, trail)) = source_map.get(&proxy.source) else {
+        let Some((_, visual, trail)) = sources
+            .iter()
+            .find(|(source, _, _)| *source == proxy.source)
+        else {
             commands.entity(entity).despawn();
             continue;
         };
-        rendered.insert(proxy.source);
+        rendered[visual.id as usize] = true;
         *root_visibility = if visual.alive {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
-        let target = Vec3::new(visual.position.x, 0.0, visual.position.y);
+        let target = Vec3::new(
+            visual.position.x,
+            player_base_height(&territory, visual.position),
+            visual.position.y,
+        );
         let alpha = 1.0 - 2.0_f32.powf(-time.delta_secs().min(0.1) / 0.045);
         transform.translation = transform.translation.lerp(target, alpha);
         let heading = visual
@@ -142,47 +148,51 @@ pub(super) fn sync_competitor_visuals(
                 shield_transform.scale = Vec3::splat(pulse);
             }
         }
-        commands
-            .entity(proxy.source)
-            .insert(if let Some(slot) = visual.human_slot {
-                ViewportSubject {
-                    slot,
-                    color_id: visual.color_id,
-                    position: visual.position,
-                    heading,
-                    trail_length: trail_length(*trail),
-                    awareness: visual.awareness,
-                    alive: visual.alive,
-                }
+        let next_subject = if let Some(slot) = visual.human_slot {
+            ViewportSubject {
+                slot,
+                color_id: visual.color_id,
+                position: visual.position,
+                heading,
+                trail_length: trail.map_or(0.0, |trail| trail.length),
+                awareness: visual.awareness,
+                alive: visual.alive,
+            }
+        } else {
+            // NPC entities do not retain stale local viewport ownership.
+            ViewportSubject {
+                slot: u8::MAX,
+                color_id: visual.color_id,
+                position: visual.position,
+                heading,
+                trail_length: 0.0,
+                awareness: 0.0,
+                alive: false,
+            }
+        };
+        if let Ok(mut subject) = subjects.get_mut(proxy.source) {
+            if visual.human_slot.is_some() {
+                *subject = next_subject;
             } else {
-                // NPC entities do not retain stale local viewport ownership.
-                ViewportSubject {
-                    slot: u8::MAX,
-                    color_id: visual.color_id,
-                    position: visual.position,
-                    heading,
-                    trail_length: 0.0,
-                    awareness: 0.0,
-                    alive: false,
-                }
-            });
-        if visual.human_slot.is_none() {
-            commands.entity(proxy.source).remove::<ViewportSubject>();
+                commands.entity(proxy.source).remove::<ViewportSubject>();
+            }
+        } else if visual.human_slot.is_some() {
+            commands.entity(proxy.source).insert(next_subject);
         }
     }
 
     for (source, visual, trail) in &sources {
-        if rendered.contains(&source) {
+        if rendered[visual.id as usize] {
             continue;
         }
-        spawn_proxy(&mut commands, &assets, source, visual);
+        spawn_proxy(&mut commands, &assets, &territory, source, visual);
         if let Some(slot) = visual.human_slot {
             commands.entity(source).insert(ViewportSubject {
                 slot,
                 color_id: visual.color_id,
                 position: visual.position,
                 heading: visual.heading,
-                trail_length: trail_length(trail),
+                trail_length: trail.map_or(0.0, |trail| trail.length),
                 awareness: visual.awareness,
                 alive: visual.alive,
             });
@@ -190,19 +200,10 @@ pub(super) fn sync_competitor_visuals(
     }
 }
 
-fn trail_length(trail: Option<&TrailVisual>) -> f32 {
-    trail.map_or(0.0, |trail| {
-        trail
-            .points
-            .windows(2)
-            .map(|pair| pair[0].distance(pair[1]))
-            .sum()
-    })
-}
-
 fn spawn_proxy(
     commands: &mut Commands,
     assets: &RenderAssets,
+    territory: &TerritoryVisual,
     source: Entity,
     visual: &CompetitorVisual,
 ) {
@@ -214,7 +215,11 @@ fn spawn_proxy(
             rendered_heading: visual.heading,
             lean_radians: 0.0,
         },
-        Transform::from_xyz(visual.position.x, 0.0, visual.position.y),
+        Transform::from_xyz(
+            visual.position.x,
+            player_base_height(territory, visual.position),
+            visual.position.y,
+        ),
         Visibility::default(),
         children![
             (
@@ -269,6 +274,10 @@ fn spawn_proxy(
     ));
 }
 
+fn player_base_height(territory: &TerritoryVisual, position: Vec2) -> f32 {
+    territory.surface_height(position) - FIELD_SURFACE_HEIGHT
+}
+
 fn smooth_heading(current: Vec2, target: Vec2, alpha: f32) -> (Vec2, f32) {
     let current = current.normalize_or(Vec2::NEG_Y);
     let target = target.normalize_or(current);
@@ -303,5 +312,21 @@ mod tests {
         assert!(step.abs() > 0.0);
         assert!(eased.angle_to(target).abs() < before);
         assert!(eased.angle_to(target).abs() > 0.0);
+    }
+
+    #[test]
+    fn cube_rises_with_claimed_territory() {
+        let territory = TerritoryVisual {
+            width: 1,
+            height: 1,
+            cell_size: 1.0,
+            owners: vec![1],
+            ..default()
+        };
+        assert_eq!(
+            player_base_height(&territory, Vec2::splat(0.5)),
+            super::super::territory::TERRITORY_SURFACE_HEIGHT - FIELD_SURFACE_HEIGHT
+        );
+        assert_eq!(player_base_height(&territory, Vec2::splat(2.0)), 0.0);
     }
 }

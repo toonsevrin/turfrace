@@ -6,6 +6,10 @@ ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR" || exit 1
 
 export CARGO_TERM_COLOR=never
+# Bevy's all-target test link is large enough that parallel Cargo jobs can
+# exceed the memory limit on constrained runners. Keep the default conservative
+# while allowing a caller with more headroom to opt into more jobs.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 
 usage() {
     printf 'usage: %s [--quick]\n' "${BASH_SOURCE[0]}" >&2

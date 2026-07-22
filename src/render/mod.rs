@@ -12,13 +12,14 @@ mod trail;
 
 pub use cube::CompetitorVisual;
 pub use field::FieldVisual;
+pub use materials::FlatMaterial;
 pub use territory::TerritoryVisual;
 pub use trail::TrailVisual;
 
 use bevy::prelude::*;
 use std::collections::VecDeque;
 
-use crate::palette::{PLAYER_COLORS, palette_color};
+use crate::palette::PLAYER_COLORS;
 
 pub(crate) fn mix_with_white(color: Color, amount: f32) -> Color {
     let c = color.to_srgba();
@@ -84,16 +85,22 @@ impl Plugin for RenderPlugin {
                 (materials::setup_render_assets, field::setup_stage).chain(),
             )
             .add_systems(
+                OnEnter(crate::app_state::AppState::MatchLoading),
+                trail::spawn_trail_pipeline_warmup,
+            )
+            .add_systems(
+                OnExit(crate::app_state::AppState::MatchLoading),
+                trail::cleanup_trail_pipeline_warmup,
+            )
+            .add_systems(
                 Update,
                 (
                     sync::sync_board_visuals,
                     sync::sync_competitor_snapshots,
                     field::sync_field_mesh,
-                    territory::sync_territory_meshes,
-                    territory::animate_territory_meshes,
+                    territory::sync_territory_surface,
                     cube::sync_competitor_visuals,
                     trail::sync_trail_visuals,
-                    materials::sync_material_settings,
                 )
                     .chain(),
             );

@@ -187,7 +187,8 @@ impl NpcBrain for DefaultNpcBrain {
         let s = c.self_state;
         if s.protected {
             return NpcIntent {
-                desired_direction: (-s.position).try_normalize().unwrap_or(s.heading),
+                desired_direction: (s.heading + perpendicular(s.heading) * self.side * 0.22)
+                    .normalize_or(s.heading),
                 debug_state: NpcDebugState::Recovering,
             };
         }
@@ -236,15 +237,54 @@ impl NpcBrain for DefaultNpcBrain {
                 debug_state: NpcDebugState::Expanding,
             };
         }
-        // Stable seed-derived radial spokes spread bots around the irregular board.
-        let outward = Vec2::from_angle(self.phase);
-        let desired = (outward + perpendicular(outward) * self.side * 0.18).normalize_or_zero();
+        if self.personality != NpcPersonality::Cautious
+            && let Some(target) = c
+                .nearby_trails
+                .iter()
+                .min_by(|a, b| a.distance.total_cmp(&b.distance))
+            && target.distance
+                < if self.personality == NpcPersonality::Raider {
+                    7.0
+                } else {
+                    4.0
+                }
+        {
+            return NpcIntent {
+                desired_direction: (target.nearest_point - s.position).normalize_or(s.heading),
+                debug_state: NpcDebugState::Hunting,
+            };
+        }
+
         NpcIntent {
-            desired_direction: desired,
+            desired_direction: patrol_direction(s, c.nearby_competitors, self.side, self.phase),
             debug_state: NpcDebugState::Patrolling,
         }
     }
 }
+
+fn patrol_direction(
+    state: NpcSelfState,
+    nearby: &[PerceivedCompetitor],
+    side: f32,
+    phase: f32,
+) -> Vec2 {
+    let outward = state.position.normalize_or(Vec2::from_angle(phase));
+    let mut desired = outward + perpendicular(outward) * side * 0.24;
+    if let Some(enemy) = nearby.iter().filter(|enemy| enemy.alive).min_by(|a, b| {
+        a.position
+            .distance_squared(state.position)
+            .total_cmp(&b.position.distance_squared(state.position))
+    }) {
+        let distance = enemy.position.distance(state.position);
+        if distance < 4.5 {
+            desired += (state.position - enemy.position).normalize_or_zero()
+                * (1.0 - distance / 4.5)
+                * 1.8;
+        }
+    }
+    desired.normalize_or(state.heading)
+}
+
 fn perpendicular(v: Vec2) -> Vec2 {
     Vec2::new(-v.y, v.x)
 }
@@ -280,5 +320,26 @@ mod tests {
             deterministic_personality(42, CompetitorId(3)),
             deterministic_personality(42, CompetitorId(3))
         );
+    }
+
+    #[test]
+    fn patrol_steering_avoids_a_close_competitor() {
+        let state = NpcSelfState {
+            id: CompetitorId(0),
+            position: Vec2::new(8.0, 0.0),
+            heading: Vec2::X,
+            protected: false,
+            trail_length: 0.0,
+            owns_current_cell: true,
+        };
+        let enemy = PerceivedCompetitor {
+            id: CompetitorId(1),
+            position: Vec2::new(8.5, 0.0),
+            alive: true,
+            territory_cells: 1,
+        };
+        let unopposed = patrol_direction(state, &[], 1.0, 0.0);
+        let avoiding = patrol_direction(state, &[enemy], 1.0, 0.0);
+        assert!(avoiding.x < unopposed.x);
     }
 }

@@ -5,22 +5,13 @@ set -euo pipefail
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
-MODE=${1:-vector}
-OUTPUT=${2:-target/visual-feedback/territory-${MODE}.png}
-
-case "$MODE" in
-    vector|raster) ;;
-    *)
-        printf 'usage: %s [vector|raster] [output.png]\n' "$0" >&2
-        exit 2
-        ;;
-esac
+OUTPUT=${1:-target/visual-feedback/territory-review.png}
 
 mkdir -p "$(dirname -- "$OUTPUT")"
 VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json} \
     WGPU_BACKEND=${WGPU_BACKEND:-vulkan} \
     WGPU_SETTINGS_PRIO=${WGPU_SETTINGS_PRIO:-webgl2} \
     xvfb-run -a cargo run --quiet --example territory_review -- \
-    --mode "$MODE" --output "$OUTPUT"
+    --output "$OUTPUT"
 
-printf 'CAPTURED territory review (%s): %s\n' "$MODE" "$OUTPUT"
+printf 'CAPTURED territory review: %s\n' "$OUTPUT"

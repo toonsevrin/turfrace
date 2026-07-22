@@ -33,6 +33,22 @@ pub(super) fn spawn_home(mut commands: Commands, theme: Res<UiTheme>) {
         });
 }
 
+pub(super) fn spawn_match_loading(mut commands: Commands, theme: Res<UiTheme>) {
+    commands
+        .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
+        .with_children(|root| {
+            root.spawn((
+                panel_node(percent(90)),
+                BackgroundColor(Color::NONE),
+                BorderColor::all(INK),
+            ))
+            .with_children(|panel| {
+                spawn_title(panel, &theme, "TURFRACE", 56.0);
+                spawn_subtitle(panel, &theme, "PREPARING FIELD");
+            });
+        });
+}
+
 // Lobby screen systems live in `screens::lobby`.
 pub(super) fn spawn_leaderboard(
     mut commands: Commands,

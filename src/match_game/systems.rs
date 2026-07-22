@@ -6,7 +6,7 @@ use crate::{
     capture::{apply_equal_time_captures, calculate_capture},
     combat::{CollisionBody, collect_collision_intents},
     config::GameConfig,
-    ids::CompetitorId,
+    ids::{CompetitorId, MAX_COMPETITORS},
     input::{ControlSource, SteeringIntent},
     movement::{CompetitorMotion, advance_motion, segment_cell_entry_time},
     npc::{
@@ -16,7 +16,10 @@ use crate::{
     trail::{ActiveTrail, clear_trail_bits, update_trail_raster},
 };
 
-use super::lifecycle::{advance_countdown, advance_result_hold, begin_from_lobby, cleanup_match};
+use super::lifecycle::{
+    MatchLoadingFrames, advance_countdown, advance_result_hold, begin_from_lobby, cleanup_match,
+    finish_match_loading,
+};
 use super::model::*;
 
 type NpcSnapshot = (
@@ -68,6 +71,7 @@ type RespawnControl = (
     &'static mut SpawnProtection,
     &'static mut TerritoryRecord,
     &'static mut MatchStatistics,
+    &'static mut LastOwnedCell,
 );
 
 #[derive(SystemParam)]
@@ -106,10 +110,15 @@ impl Plugin for MatchPlugin {
             .init_resource::<PendingDeaths>()
             .init_resource::<PendingCaptures>()
             .init_resource::<DisplacementCredits>()
+            .init_resource::<MatchLoadingFrames>()
             .init_resource::<Time<Fixed>>()
             .configure_sets(FixedUpdate, sets)
             .add_systems(Startup, configure_fixed_timestep)
             .add_systems(OnEnter(AppState::MatchLoading), begin_from_lobby)
+            .add_systems(
+                Update,
+                finish_match_loading.run_if(in_state(AppState::MatchLoading)),
+            )
             .add_systems(OnEnter(AppState::Lobby), cleanup_match)
             .add_systems(OnEnter(AppState::Home), cleanup_match)
             .add_systems(
@@ -200,6 +209,20 @@ fn npc_think(
     rankings: Res<Rankings>,
     mut queries: ParamSet<(Query<NpcSnapshot>, Query<NpcControl>)>,
 ) {
+    let should_build_snapshot = queries
+        .p1()
+        .iter()
+        .any(|(_, _, life, _, _, controller, _)| {
+            life.is_alive() && controller.think_remaining <= time.delta_secs()
+        });
+    if !should_build_snapshot {
+        for (_, _, life, _, _, mut controller, _) in queries.p1().iter_mut() {
+            if life.is_alive() {
+                controller.think_remaining -= time.delta_secs();
+            }
+        }
+        return;
+    }
     let people: Vec<PerceivedCompetitor> = queries
         .p0()
         .iter()
@@ -210,11 +233,34 @@ fn npc_think(
             territory_cells: t.current_cells,
         })
         .collect();
-    let trail_snapshots: Vec<(CompetitorId, Vec<Vec2>)> = queries
-        .p0()
-        .iter()
-        .filter_map(|(c, _, _, _, t)| t.map(|t| (c.id, t.points.clone())))
-        .collect();
+    let mut trail_perceptions: [Vec<PerceivedTrail>; MAX_COMPETITORS] =
+        std::array::from_fn(|_| Vec::new());
+    {
+        let snapshots = queries.p0();
+        for viewer in &people {
+            for (owner, _, _, _, trail) in snapshots.iter() {
+                let Some(trail) = trail.filter(|_| owner.id != viewer.id) else {
+                    continue;
+                };
+                let nearest = trail
+                    .points
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(trail.head))
+                    .min_by(|a, b| {
+                        a.distance_squared(viewer.position)
+                            .total_cmp(&b.distance_squared(viewer.position))
+                    });
+                if let Some(nearest_point) = nearest {
+                    trail_perceptions[viewer.id.index()].push(PerceivedTrail {
+                        owner: owner.id,
+                        nearest_point,
+                        distance: nearest_point.distance(viewer.position),
+                    });
+                }
+            }
+        }
+    }
     let ranking = RankingSnapshot {
         ordered: rankings.entries.iter().map(|e| e.id).collect(),
     };
@@ -235,23 +281,9 @@ fn npc_think(
             .copied()
             .filter(|p| p.id != competitor.id && p.position.distance(motion.position) <= radius)
             .collect();
-        let nearby_trails: Vec<_> = trail_snapshots
+        let nearby_trails: Vec<_> = trail_perceptions[competitor.id.index()]
             .iter()
-            .filter(|(owner, _)| *owner != competitor.id)
-            .filter_map(|(owner, points)| {
-                points
-                    .iter()
-                    .copied()
-                    .min_by(|a, b| {
-                        a.distance_squared(motion.position)
-                            .total_cmp(&b.distance_squared(motion.position))
-                    })
-                    .map(|p| PerceivedTrail {
-                        owner: *owner,
-                        nearest_point: p,
-                        distance: p.distance(motion.position),
-                    })
-            })
+            .copied()
             .filter(|t| t.distance <= radius)
             .collect();
         let query = BoardQuery::new(&board, competitor.id);
@@ -367,8 +399,12 @@ fn extend_trails(
         };
         let currently_owned = board.owns(current, competitor.id);
         if let Some(mut trail) = trail {
-            trail.append_exact(motion.position);
-            trail.last_sample_heading = motion.heading;
+            trail.append(
+                motion.position,
+                motion.heading,
+                config.trail_sample_distance,
+                config.trail_sample_angle_radians,
+            );
             update_trail_raster(&mut board, &mut trail, config.trail_width);
         } else if currently_owned {
             last_owned.0 = current;
@@ -383,7 +419,12 @@ fn extend_trails(
             };
             let boundary = boundary_crossing(&board, competitor.id, from, motion.position);
             let mut trail = ActiveTrail::new(competitor.id, last_owned.0, boundary, motion.heading);
-            trail.append_exact(motion.position);
+            trail.append(
+                motion.position,
+                motion.heading,
+                config.trail_sample_distance,
+                config.trail_sample_angle_radians,
+            );
             update_trail_raster(&mut board, &mut trail, config.trail_width);
             commands.entity(entity).insert(trail);
             events.0.push(SimulationEvent::TrailStarted {
@@ -395,6 +436,7 @@ fn extend_trails(
 
 fn detect_trail_collisions(
     config: Res<GameConfig>,
+    board: Res<BoardGrid>,
     bodies: Query<(&Competitor, &CompetitorMotion, &LifeState, &SpawnProtection)>,
     trails: Query<&ActiveTrail>,
     mut pending: ResMut<PendingDeaths>,
@@ -411,6 +453,7 @@ fn detect_trail_collisions(
         .collect();
     let trails: Vec<&ActiveTrail> = trails.iter().collect();
     pending.0 = collect_collision_intents(
+        &board,
         &snapshots,
         &trails,
         config.collision_radius,
@@ -688,17 +731,12 @@ fn choose_respawn(
     id: CompetitorId,
     seed: u64,
     living: &[(CompetitorId, Vec2)],
-    trail_points: &[Vec2],
     reserved: &[Vec2],
     config: &GameConfig,
 ) -> Vec2 {
     let mut rng = DeterministicRng::new(seed ^ (id.0 as u64 + 1).wrapping_mul(0x9e37_79b9));
     let leader = living.first().map(|p| p.1).unwrap_or(Vec2::ZERO);
-    let candidates: Vec<usize> = (0..board.len())
-        .filter(|&i| {
-            board.field_mask[i] && board.signed_distance[i] >= config.spawn_boundary_clearance
-        })
-        .collect();
+    let candidates = &board.spawn_candidates;
     let mut best = None;
     for relax in [1.0, 0.65, 0.0] {
         for _ in 0..256.min(candidates.len()) {
@@ -708,10 +746,7 @@ fn choose_respawn(
                 .iter()
                 .map(|(_, q)| q.distance(p))
                 .fold(f32::INFINITY, f32::min);
-            let trail = trail_points
-                .iter()
-                .map(|q| q.distance(p))
-                .fold(f32::INFINITY, f32::min);
+            let trail = nearest_active_trail_distance(board, p, config.spawn_trail_clearance);
             if cube < config.spawn_cube_clearance * relax
                 || trail < config.spawn_trail_clearance * relax
                 || reserved.iter().any(|q| {
@@ -756,14 +791,34 @@ fn choose_respawn(
     })
 }
 
+fn nearest_active_trail_distance(board: &BoardGrid, point: Vec2, limit: f32) -> f32 {
+    let Some((min, max)) =
+        board.clamped_cell_bounds(point - Vec2::splat(limit), point + Vec2::splat(limit))
+    else {
+        return f32::INFINITY;
+    };
+    let cell_radius = board.cell_size * std::f32::consts::FRAC_1_SQRT_2;
+    let mut nearest = f32::INFINITY;
+    for y in min.y..=max.y {
+        for x in min.x..=max.x {
+            let index = board.index(crate::board::Cell::new(x, y)).unwrap();
+            if board.active_trail_bits[index] != 0 {
+                nearest = nearest.min(
+                    (board.cell_center(board.cell(index)).distance(point) - cell_radius).max(0.0),
+                );
+            }
+        }
+    }
+    nearest
+}
+
 fn spawn_disk_unclaimed_ratio(board: &BoardGrid, center: Vec2, radius: f32) -> f32 {
     let radius_squared = radius * radius;
     let mut playable = 0_u32;
     let mut unclaimed = 0_u32;
-    let Some(min) = board.world_to_cell(center - Vec2::splat(radius)) else {
-        return 0.0;
-    };
-    let Some(max) = board.world_to_cell(center + Vec2::splat(radius)) else {
+    let Some((min, max)) =
+        board.clamped_cell_bounds(center - Vec2::splat(radius), center + Vec2::splat(radius))
+    else {
         return 0.0;
     };
     for y in min.y..=max.y {
@@ -810,14 +865,8 @@ fn advance_respawns(
             .cmp(&board.owner_counts[a.index()])
             .then_with(|| a.cmp(b))
     });
-    let trail_points: Vec<_> = queries
-        .p0()
-        .iter()
-        .filter_map(|(_, _, _, t)| t)
-        .flat_map(|t| t.points.iter().copied())
-        .collect();
     let mut reserved = Vec::new();
-    for (c, mut motion, mut life, mut protection, mut territory, mut stats) in
+    for (c, mut motion, mut life, mut protection, mut territory, mut stats, mut last_owned) in
         queries.p1().iter_mut()
     {
         if life.is_alive() {
@@ -832,7 +881,6 @@ fn advance_respawns(
             c.id,
             session.seed ^ stats.deaths as u64,
             &living,
-            &trail_points,
             &reserved,
             &config,
         );
@@ -844,9 +892,7 @@ fn advance_respawns(
             c.id,
             &mut displacement_credits,
         );
-        motion.position = position;
-        motion.previous_position = position;
-        motion.heading = (-position).try_normalize().unwrap_or(Vec2::Y);
+        reset_respawn_anchor(&board, &mut motion, &mut last_owned, position);
         life.status = LifeStatus::Alive;
         protection.remaining = config.spawn_protection_seconds;
         protection.elapsed = 0.0;
@@ -855,6 +901,20 @@ fn advance_respawns(
         stats.peak_territory_cells = stats.peak_territory_cells.max(territory.current_cells);
         events.0.push(SimulationEvent::Respawn { player: c.id });
     }
+}
+
+fn reset_respawn_anchor(
+    board: &BoardGrid,
+    motion: &mut CompetitorMotion,
+    last_owned: &mut LastOwnedCell,
+    position: Vec2,
+) {
+    motion.position = position;
+    motion.previous_position = position;
+    motion.heading = (-position).try_normalize().unwrap_or(Vec2::Y);
+    last_owned.0 = board
+        .world_to_cell(position)
+        .expect("respawn candidates are playable board cells");
 }
 
 fn claim_respawn_seed(

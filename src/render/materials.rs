@@ -1,49 +1,113 @@
 use bevy::{
     asset::Asset,
-    pbr::Material,
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     reflect::TypePath,
-    render::render_resource::{AsBindGroup, Face},
+    render::render_resource::{
+        AsBindGroup, Face, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    },
     shader::ShaderRef,
 };
 
-use super::{PLAYER_COLORS, PresentationSettings, mix_with_white};
+use super::{PLAYER_COLORS, mix_with_white};
 
-const TRAIL_SHADER: &str = "shaders/trail.wgsl";
 const TERRITORY_SHADER: &str = "shaders/territory.wgsl";
 const PAPER_SHADER: &str = "shaders/paper.wgsl";
+const FLAT_SHADER: &str = "shaders/flat.wgsl";
 
 pub(super) struct PresentationMaterialPlugin;
 
 impl Plugin for PresentationMaterialPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            MaterialPlugin::<TrailMaterial>::default(),
             MaterialPlugin::<TerritoryMaterial>::default(),
             MaterialPlugin::<PaperMaterial>::default(),
+            MaterialPlugin::<FlatMaterial>::default(),
         ));
     }
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct TrailMaterial {
+#[bind_group_data(FlatMaterialKey)]
+pub struct FlatMaterial {
     #[uniform(0)]
     pub color: LinearRgba,
     #[uniform(0)]
     pub parameters: Vec4,
+    pub alpha_mode: AlphaMode,
+    pub cull_front: bool,
 }
 
-impl Material for TrailMaterial {
-    fn fragment_shader() -> ShaderRef {
-        TRAIL_SHADER.into()
+impl FlatMaterial {
+    pub fn new(color: Color, lighting: f32) -> Self {
+        Self {
+            color: color.into(),
+            parameters: Vec4::new(lighting.clamp(0.0, 1.0), 0.0, 0.0, 0.0),
+            alpha_mode: AlphaMode::Opaque,
+            cull_front: false,
+        }
     }
+
+    pub fn transparent(color: Color) -> Self {
+        Self {
+            color: color.into(),
+            parameters: Vec4::ZERO,
+            alpha_mode: AlphaMode::Premultiplied,
+            cull_front: false,
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Hash, Copy, Clone)]
+pub struct FlatMaterialKey {
+    cull_front: bool,
+}
+
+impl From<&FlatMaterial> for FlatMaterialKey {
+    fn from(material: &FlatMaterial) -> Self {
+        Self {
+            cull_front: material.cull_front,
+        }
+    }
+}
+
+impl Material for FlatMaterial {
+    fn fragment_shader() -> ShaderRef {
+        FLAT_SHADER.into()
+    }
+
     fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Premultiplied
+        self.alpha_mode
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = Some(if key.bind_group_data.cull_front {
+            Face::Front
+        } else {
+            Face::Back
+        });
+        Ok(())
     }
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct TerritoryMaterial {
+    #[uniform(0)]
+    pub color: LinearRgba,
     #[uniform(0)]
     pub parameters: Vec4,
 }
@@ -51,6 +115,30 @@ pub struct TerritoryMaterial {
 impl Material for TerritoryMaterial {
     fn fragment_shader() -> ShaderRef {
         TERRITORY_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Opaque
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // Owner loops can be outer contours or holes. Rendering both winding
+        // directions keeps the capture-time triangulation robust at seams.
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }
 
@@ -76,22 +164,19 @@ pub(super) struct RenderAssets {
     pub icon_mesh: Handle<Mesh>,
     pub ring_mesh: Handle<Mesh>,
     pub crown_mesh: Handle<Mesh>,
-    pub black_outline: Handle<StandardMaterial>,
-    pub charcoal: Handle<StandardMaterial>,
-    pub shadow: Handle<StandardMaterial>,
-    pub cube_materials: Vec<Handle<StandardMaterial>>,
-    pub accent_materials: Vec<Handle<StandardMaterial>>,
-    pub trail_materials: Vec<Handle<TrailMaterial>>,
-    pub territory_material: Handle<TerritoryMaterial>,
+    pub black_outline: Handle<FlatMaterial>,
+    pub charcoal: Handle<FlatMaterial>,
+    pub shadow: Handle<FlatMaterial>,
+    pub cube_materials: Vec<Handle<FlatMaterial>>,
+    pub accent_materials: Vec<Handle<FlatMaterial>>,
+    pub trail_materials: Vec<Handle<FlatMaterial>>,
     pub paper_material: Handle<PaperMaterial>,
 }
 
 pub(super) fn setup_render_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
-    mut trails: ResMut<Assets<TrailMaterial>>,
-    mut territories: ResMut<Assets<TerritoryMaterial>>,
+    mut flat: ResMut<Assets<FlatMaterial>>,
     mut papers: ResMut<Assets<PaperMaterial>>,
 ) {
     let cube_mesh = meshes.add(Cuboid::from_size(Vec3::splat(1.50)));
@@ -100,52 +185,25 @@ pub(super) fn setup_render_assets(
     let icon_mesh = meshes.add(Circle::new(0.26));
     let ring_mesh = meshes.add(Torus::new(0.76, 0.055));
     let crown_mesh = meshes.add(Cone::new(0.24, 0.48));
-    let black_outline = standard.add(StandardMaterial {
-        base_color: Color::srgb_u8(23, 25, 29),
-        unlit: true,
-        cull_mode: Some(Face::Front),
-        ..default()
+    let black_outline = flat.add(FlatMaterial {
+        cull_front: true,
+        ..FlatMaterial::new(Color::srgb_u8(23, 25, 29), 0.0)
     });
-    let charcoal = standard.add(StandardMaterial {
-        base_color: Color::srgb_u8(23, 25, 29),
-        perceptual_roughness: 0.92,
-        ..default()
-    });
-    let shadow = standard.add(StandardMaterial {
-        base_color: Color::srgba(0.06, 0.07, 0.09, 0.18),
-        alpha_mode: AlphaMode::Premultiplied,
-        unlit: true,
-        ..default()
-    });
+    let charcoal = flat.add(FlatMaterial::new(Color::srgb_u8(23, 25, 29), 0.28));
+    let shadow = flat.add(FlatMaterial::transparent(Color::srgba(
+        0.06, 0.07, 0.09, 0.18,
+    )));
 
     let mut cube_materials = Vec::with_capacity(PLAYER_COLORS.len());
     let mut accent_materials = Vec::with_capacity(PLAYER_COLORS.len());
     let mut trail_materials = Vec::with_capacity(PLAYER_COLORS.len());
     for color in PLAYER_COLORS {
         let base = Color::Srgba(color);
-        cube_materials.push(standard.add(StandardMaterial {
-            base_color: mix_with_white(base, 0.16),
-            perceptual_roughness: 0.74,
-            reflectance: 0.20,
-            ..default()
-        }));
-        accent_materials.push(standard.add(StandardMaterial {
-            base_color: mix_with_white(base, 0.08),
-            emissive: LinearRgba::from(base) * 0.12,
-            ..default()
-        }));
-        let linear = LinearRgba::from(base);
-        trail_materials.push(trails.add(TrailMaterial {
-            // Premultiplied blending used to make trails look like washed-out
-            // string: the colour was halved before the shader halved it again.
-            color: LinearRgba::new(
-                linear.red * 0.96,
-                linear.green * 0.96,
-                linear.blue * 0.96,
-                0.78,
-            ),
-            parameters: Vec4::new(0.0, 1.0, 0.0, 0.0),
-        }));
+        cube_materials.push(flat.add(FlatMaterial::new(mix_with_white(base, 0.16), 0.32)));
+        accent_materials.push(flat.add(FlatMaterial::new(mix_with_white(base, 0.08), 0.10)));
+        trail_materials.push(flat.add(FlatMaterial::transparent(
+            mix_with_white(base, 0.08).with_alpha(0.72),
+        )));
     }
 
     commands.insert_resource(RenderAssets {
@@ -161,9 +219,6 @@ pub(super) fn setup_render_assets(
         cube_materials,
         accent_materials,
         trail_materials,
-        territory_material: territories.add(TerritoryMaterial {
-            parameters: Vec4::new(1.0, 0.0, 0.0, 0.0),
-        }),
         paper_material: papers.add(PaperMaterial {
             // Warm paper keeps the arena from reading as a blank white debug
             // canvas and gives the player colors a stable high-contrast field.
@@ -171,29 +226,4 @@ pub(super) fn setup_render_assets(
             parameters: Vec4::new(0.035, 0.0, 0.0, 0.0),
         }),
     });
-}
-
-/// Synchronize the small set of material switches only when presentation
-/// settings actually change.  Mutating custom-material assets every frame can
-/// force WebGL2 uniform re-preparation and, on some drivers, trips the slab
-/// allocator while an old bind group is still in flight.  Motion is generated
-/// in the shader from stable world coordinates instead.
-pub(super) fn sync_material_settings(
-    settings: Res<PresentationSettings>,
-    assets: Option<Res<RenderAssets>>,
-    mut trails: ResMut<Assets<TrailMaterial>>,
-    mut territories: ResMut<Assets<TerritoryMaterial>>,
-) {
-    if !settings.is_changed() {
-        return;
-    }
-    let Some(assets) = assets else { return };
-    for handle in &assets.trail_materials {
-        if let Some(mut material) = trails.get_mut(handle) {
-            material.parameters.y = if settings.reduced_motion { 0.0 } else { 1.0 };
-        }
-    }
-    if let Some(mut material) = territories.get_mut(&assets.territory_material) {
-        material.parameters.x = f32::from(settings.territory_patterns);
-    }
 }

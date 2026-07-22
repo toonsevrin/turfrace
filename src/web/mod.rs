@@ -14,7 +14,6 @@ use crate::{
     profiles::{PersistenceStatus, ProfileStore, UserSettings},
 };
 
-#[cfg(target_arch = "wasm32")]
 use crate::profiles::GraphicsQualitySetting;
 
 #[cfg(target_arch = "wasm32")]
@@ -207,11 +206,7 @@ fn apply_fullscreen(
     {
         window
             .resolution
-            .set_scale_factor_override(Some(match settings.graphics_quality {
-                GraphicsQualitySetting::Low => 1.0,
-                GraphicsQualitySetting::Medium => 1.5,
-                GraphicsQualitySetting::High => 2.0,
-            }));
+            .set_scale_factor_override(Some(render_scale(settings.graphics_quality)));
         turfrace_set_fullscreen(settings.fullscreen);
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -221,6 +216,19 @@ fn apply_fullscreen(
         } else {
             WindowMode::Windowed
         };
+    }
+}
+
+/// Browser quality controls physical render resolution as well as the visual
+/// treatment. Medium deliberately targets one physical pixel per CSS pixel;
+/// rendering the default game at 1.5× made a 1280×720 canvas submit 2.25× the
+/// pixels without improving gameplay readability.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn render_scale(quality: GraphicsQualitySetting) -> f32 {
+    match quality {
+        GraphicsQualitySetting::Low => 0.75,
+        GraphicsQualitySetting::Medium => 1.0,
+        GraphicsQualitySetting::High => 1.25,
     }
 }
 
@@ -242,5 +250,12 @@ mod tests {
         assert!(should_auto_pause(AppState::Playing, true, true));
         assert!(!should_auto_pause(AppState::Home, false, true));
         assert!(!should_auto_pause(AppState::Playing, true, false));
+    }
+
+    #[test]
+    fn browser_quality_scales_are_bounded_for_split_screen() {
+        assert_eq!(render_scale(GraphicsQualitySetting::Low), 0.75);
+        assert_eq!(render_scale(GraphicsQualitySetting::Medium), 1.0);
+        assert_eq!(render_scale(GraphicsQualitySetting::High), 1.25);
     }
 }

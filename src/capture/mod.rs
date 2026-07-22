@@ -1,7 +1,4 @@
-use std::{
-    cmp::Ordering,
-    collections::{BTreeSet, BinaryHeap},
-};
+use std::{cmp::Ordering, collections::BinaryHeap};
 
 use bevy::prelude::*;
 
@@ -150,10 +147,7 @@ pub fn polygon_fill_cells(board: &BoardGrid, polygon: &[Vec2]) -> Vec<usize> {
     }
     let min = polygon.iter().copied().reduce(Vec2::min).unwrap();
     let max = polygon.iter().copied().reduce(Vec2::max).unwrap();
-    let Some(a) = board.world_to_cell(min) else {
-        return Vec::new();
-    };
-    let Some(b) = board.world_to_cell(max) else {
+    let Some((a, b)) = board.clamped_cell_bounds(min, max) else {
         return Vec::new();
     };
     let mut cells = Vec::new();
@@ -178,19 +172,29 @@ pub fn calculate_capture(
     trail: &ActiveTrail,
     end: Cell,
 ) -> CaptureResult {
-    let mut claimed: BTreeSet<usize> = trail
+    let mut claimed: Vec<usize> = trail
         .cells
         .iter()
         .copied()
         .filter(|&i| board.field_mask[i])
         .collect();
+    claimed.sort_unstable();
+    claimed.dedup();
     let mut used_loop_fill = false;
     if let Some(path) = find_owned_path(board, player, trail.start_owned_cell, end) {
         let mut polygon = trail.points.clone();
+        if polygon
+            .last()
+            .is_none_or(|point| point.distance_squared(trail.head) > 1e-8)
+        {
+            polygon.push(trail.head);
+        }
         let mut owned = simplify_cell_path(board, &path);
         owned.reverse();
         polygon.extend(owned);
         claimed.extend(polygon_fill_cells(board, &polygon));
+        claimed.sort_unstable();
+        claimed.dedup();
         used_loop_fill = true;
     }
     CaptureResult {
@@ -224,9 +228,14 @@ pub fn apply_equal_time_captures(
 ) {
     // Snapshot calculations are already complete. Stable ID wins every contested cell.
     captures.sort_by_key(|(id, _)| *id);
-    let mut claimed = BTreeSet::new();
+    let mut claimed = vec![false; board.len()];
     for (id, result) in captures {
-        result.claimed_cells.retain(|cell| claimed.insert(*cell));
+        result.claimed_cells.retain(|cell| {
+            !claimed[*cell] && {
+                claimed[*cell] = true;
+                true
+            }
+        });
         apply_capture(board, *id, result);
     }
 }
@@ -265,7 +274,7 @@ mod tests {
         b.set_owner(a, p.owner());
         b.set_owner(z, p.owner());
         let mut trail = ActiveTrail::new(p, a, b.cell_center(a), Vec2::X);
-        trail.points.push(b.cell_center(z));
+        trail.append_exact(b.cell_center(z));
         trail.cells = crate::trail::rasterize_trail(&b, &trail.points, 0.65);
         let result = calculate_capture(&b, p, &trail, z);
         assert!(!result.used_loop_fill);
@@ -284,11 +293,9 @@ mod tests {
         let start_position = board.cell_center(start);
         let end_position = board.cell_center(end);
         let mut trail = ActiveTrail::new(player, start, start_position, Vec2::Y);
-        trail.points.extend([
-            Vec2::new(start_position.x, 2.0),
-            Vec2::new(end_position.x, 2.0),
-            end_position,
-        ]);
+        trail.append_exact(Vec2::new(start_position.x, 2.0));
+        trail.append_exact(Vec2::new(end_position.x, 2.0));
+        trail.append_exact(end_position);
         trail.cells = crate::trail::rasterize_trail(&board, &trail.points, 0.65);
 
         let first = calculate_capture(&board, player, &trail, end);

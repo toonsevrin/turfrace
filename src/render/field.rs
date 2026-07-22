@@ -4,7 +4,7 @@ use bevy::{
 
 use super::{
     RetiredMeshes,
-    materials::{PaperMaterial, RenderAssets},
+    materials::{FlatMaterial, PaperMaterial, RenderAssets},
 };
 
 /// Render snapshot of the generated star-shaped field contour.
@@ -27,30 +27,12 @@ pub(super) struct FieldBorder;
 pub(super) fn setup_stage(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FlatMaterial>>,
 ) {
-    commands.spawn(AmbientLight {
-        color: Color::WHITE,
-        brightness: 310.0,
-        affects_lightmapped_meshes: true,
-    });
-    commands.spawn((
-        Name::new("Soft Key Light"),
-        DirectionalLight {
-            illuminance: 3_600.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(-20.0, 35.0, 24.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
     commands.spawn((
         Name::new("Outside Canvas"),
         Mesh3d(meshes.add(Plane3d::default().mesh().size(260.0, 260.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(10, 18, 31),
-            perceptual_roughness: 1.0,
-            ..default()
-        })),
+        MeshMaterial3d(materials.add(FlatMaterial::new(Color::srgb_u8(10, 18, 31), 0.0))),
         Transform::from_xyz(0.0, -0.055, 0.0),
     ));
 }
@@ -62,7 +44,7 @@ pub(super) fn sync_field_mesh(
     render_assets: Option<Res<RenderAssets>>,
     mut retired: ResMut<RetiredMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
+    mut flat: ResMut<Assets<FlatMaterial>>,
     surface: Query<(Entity, &Mesh3d), With<FieldSurface>>,
     shadow: Query<(Entity, &Mesh3d), With<FieldShadow>>,
     border: Query<(Entity, &Mesh3d), With<FieldBorder>>,
@@ -102,12 +84,9 @@ pub(super) fn sync_field_mesh(
             Name::new("Field Drop Shadow"),
             FieldShadow,
             Mesh3d(meshes.add(shadow_mesh)),
-            MeshMaterial3d(standard.add(StandardMaterial {
-                base_color: Color::srgba(0.01, 0.02, 0.04, 0.48),
-                alpha_mode: AlphaMode::Premultiplied,
-                unlit: true,
-                ..default()
-            })),
+            MeshMaterial3d(flat.add(FlatMaterial::transparent(Color::srgba(
+                0.01, 0.02, 0.04, 0.48,
+            )))),
             Transform::from_xyz(0.28, 0.0, 0.38),
         ));
     }
@@ -123,11 +102,7 @@ pub(super) fn sync_field_mesh(
             Name::new("Field Contour Line"),
             FieldBorder,
             Mesh3d(meshes.add(border_mesh)),
-            MeshMaterial3d(standard.add(StandardMaterial {
-                base_color: Color::srgb_u8(19, 30, 47),
-                unlit: true,
-                ..default()
-            })),
+            MeshMaterial3d(flat.add(FlatMaterial::new(Color::srgb_u8(19, 30, 47), 0.0))),
         ));
     }
 }

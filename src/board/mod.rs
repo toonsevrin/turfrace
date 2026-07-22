@@ -25,6 +25,25 @@ pub struct FieldContour {
     pub radial_samples: Vec<f32>,
 }
 
+/// A conservative spatial reference to one authoritative trail segment.
+///
+/// References are kept in the board cells touched by a segment. They let
+/// collision detection reject distant trail history before entering the
+/// continuous narrow phase. A segment may occur in more than one cell, so
+/// callers must deduplicate references before testing them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrailSegmentRef {
+    pub owner: CompetitorId,
+    pub segment: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnershipChange {
+    pub index: usize,
+    pub old: OwnerId,
+    pub new: OwnerId,
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct BoardGrid {
     pub width: u32,
@@ -34,13 +53,20 @@ pub struct BoardGrid {
     pub field_mask: Vec<bool>,
     pub owner: Vec<OwnerId>,
     pub active_trail_bits: Vec<u16>,
+    pub trail_segment_buckets: Vec<Vec<TrailSegmentRef>>,
     pub signed_distance: Vec<f32>,
     pub owner_counts: [u32; MAX_COMPETITORS],
+    pub owned_cells: [Vec<usize>; MAX_COMPETITORS],
+    pub owner_cell_slots: Vec<u32>,
+    pub spawn_candidates: Vec<usize>,
     pub dirty_chunks: Vec<bool>,
     pub contour: FieldContour,
     pub playable_cells: u32,
     /// Changes only when authoritative ownership changes, never for trail-bit updates.
     pub ownership_revision: u64,
+    /// Changes are consumed by presentation once per ordinary update. Keeping
+    /// the compact change set here avoids a second full-board comparison.
+    pub ownership_changes: Vec<OwnershipChange>,
     /// Stable generation identity for contour/field-mask presentation caches.
     pub generation_revision: u64,
 }
@@ -55,12 +81,17 @@ impl Default for BoardGrid {
             field_mask: Vec::new(),
             owner: Vec::new(),
             active_trail_bits: Vec::new(),
+            trail_segment_buckets: Vec::new(),
             signed_distance: Vec::new(),
             owner_counts: [0; MAX_COMPETITORS],
+            owned_cells: std::array::from_fn(|_| Vec::new()),
+            owner_cell_slots: Vec::new(),
+            spawn_candidates: Vec::new(),
             dirty_chunks: Vec::new(),
             contour: FieldContour::default(),
             playable_cells: 0,
             ownership_revision: 0,
+            ownership_changes: Vec::new(),
             generation_revision: 0,
         }
     }
@@ -153,18 +184,11 @@ impl BoardGrid {
                         (x as f32 + 0.5) * config.cell_size,
                         (y as f32 + 0.5) * config.cell_size,
                     );
-                let inside = point_in_polygon(position, &contour.points);
+                let (inside, edge_distance) = radial_polygon_sample(position, &contour.points);
                 field_mask[idx] = inside;
                 if inside {
                     playable_cells += 1;
                 }
-                let edge_distance = contour
-                    .points
-                    .iter()
-                    .zip(contour.points.iter().cycle().skip(1))
-                    .take(contour.points.len())
-                    .map(|(a, b)| point_segment_distance(position, *a, *b))
-                    .fold(f32::INFINITY, f32::min);
                 signed_distance[idx] = if inside {
                     edge_distance
                 } else {
@@ -172,6 +196,11 @@ impl BoardGrid {
                 };
             }
         }
+        let spawn_candidates = (0..len)
+            .filter(|&index| {
+                field_mask[index] && signed_distance[index] >= config.spawn_boundary_clearance
+            })
+            .collect();
         Self {
             width,
             height,
@@ -180,12 +209,17 @@ impl BoardGrid {
             field_mask,
             owner: vec![OwnerId::UNCLAIMED; len],
             active_trail_bits: vec![0; len],
+            trail_segment_buckets: vec![Vec::new(); len],
             signed_distance,
             owner_counts: [0; MAX_COMPETITORS],
+            owned_cells: std::array::from_fn(|_| Vec::new()),
+            owner_cell_slots: vec![u32::MAX; len],
+            spawn_candidates,
             dirty_chunks: vec![true; len.div_ceil(1024)],
             contour,
             playable_cells,
             ownership_revision: 1,
+            ownership_changes: Vec::new(),
             generation_revision: seed ^ (count as u64).rotate_left(32),
         }
     }
@@ -210,6 +244,29 @@ impl BoardGrid {
         let relative = (position - self.world_origin) / self.cell_size;
         let cell = Cell::new(relative.x.floor() as i32, relative.y.floor() as i32);
         self.index(cell).map(|_| cell)
+    }
+
+    /// Returns the board-clamped cell rectangle covering a world-space AABB.
+    /// Unlike `world_to_cell`, this remains useful when the AABB crosses the
+    /// edge of the board.
+    pub fn clamped_cell_bounds(&self, min: Vec2, max: Vec2) -> Option<(Cell, Cell)> {
+        if self.is_empty() {
+            return None;
+        }
+        let min_relative = (min - self.world_origin) / self.cell_size;
+        let max_relative = (max - self.world_origin) / self.cell_size;
+        let last_x = self.width as i32 - 1;
+        let last_y = self.height as i32 - 1;
+        Some((
+            Cell::new(
+                (min_relative.x.floor() as i32).clamp(0, last_x),
+                (min_relative.y.floor() as i32).clamp(0, last_y),
+            ),
+            Cell::new(
+                (max_relative.x.floor() as i32).clamp(0, last_x),
+                (max_relative.y.floor() as i32).clamp(0, last_y),
+            ),
+        ))
     }
     pub fn cell_center(&self, cell: Cell) -> Vec2 {
         self.world_origin + Vec2::new(cell.x as f32 + 0.5, cell.y as f32 + 0.5) * self.cell_size
@@ -306,15 +363,27 @@ impl BoardGrid {
         if !self.field_mask[index] || self.owner[index] == owner {
             return false;
         }
-        if let Some(old) = self.owner[index].competitor() {
+        let old_owner = self.owner[index];
+        if let Some(old) = old_owner.competitor() {
             self.owner_counts[old.index()] -= 1;
+            self.remove_owned_cell(old, index);
         }
         self.owner[index] = owner;
         if let Some(new) = owner.competitor() {
             self.owner_counts[new.index()] += 1;
+            let slot = self.owned_cells[new.index()].len() as u32;
+            self.owned_cells[new.index()].push(index);
+            self.owner_cell_slots[index] = slot;
+        } else {
+            self.owner_cell_slots[index] = u32::MAX;
         }
         self.dirty_chunks[index / 1024] = true;
         self.ownership_revision = self.ownership_revision.wrapping_add(1);
+        self.ownership_changes.push(OwnershipChange {
+            index,
+            old: old_owner,
+            new: owner,
+        });
         true
     }
     pub fn set_owner(&mut self, cell: Cell, owner: OwnerId) -> bool {
@@ -323,12 +392,20 @@ impl BoardGrid {
     }
     pub fn clear_owner(&mut self, player: CompetitorId) -> u32 {
         let mut changed = 0;
-        for i in 0..self.len() {
-            if self.owner[i] == player.owner() {
-                self.owner[i] = OwnerId::UNCLAIMED;
-                self.dirty_chunks[i / 1024] = true;
-                changed += 1;
+        let owned = std::mem::take(&mut self.owned_cells[player.index()]);
+        for i in owned {
+            if self.owner[i] != player.owner() {
+                continue;
             }
+            self.owner[i] = OwnerId::UNCLAIMED;
+            self.owner_cell_slots[i] = u32::MAX;
+            self.dirty_chunks[i / 1024] = true;
+            self.ownership_changes.push(OwnershipChange {
+                index: i,
+                old: player.owner(),
+                new: OwnerId::UNCLAIMED,
+            });
+            changed += 1;
         }
         self.owner_counts[player.index()] = 0;
         if changed > 0 {
@@ -339,15 +416,37 @@ impl BoardGrid {
     pub fn claim_disk(&mut self, center: Vec2, radius: f32, player: CompetitorId) -> u32 {
         let r2 = radius * radius;
         let mut count = 0;
-        for i in 0..self.len() {
-            if self.field_mask[i]
-                && self.cell_center(self.cell(i)).distance_squared(center) <= r2
-                && self.set_owner_index(i, player.owner())
-            {
-                count += 1;
+        let Some((min, max)) =
+            self.clamped_cell_bounds(center - Vec2::splat(radius), center + Vec2::splat(radius))
+        else {
+            return 0;
+        };
+        for y in min.y..=max.y {
+            for x in min.x..=max.x {
+                let i = self.index(Cell::new(x, y)).unwrap();
+                if self.field_mask[i]
+                    && self.cell_center(self.cell(i)).distance_squared(center) <= r2
+                    && self.set_owner_index(i, player.owner())
+                {
+                    count += 1;
+                }
             }
         }
         count
+    }
+
+    fn remove_owned_cell(&mut self, owner: CompetitorId, index: usize) {
+        let slot = self.owner_cell_slots[index];
+        let cells = &mut self.owned_cells[owner.index()];
+        if slot == u32::MAX || slot as usize >= cells.len() || cells[slot as usize] != index {
+            return;
+        }
+        let last = cells.pop().unwrap();
+        if last != index {
+            cells[slot as usize] = last;
+            self.owner_cell_slots[last] = slot;
+        }
+        self.owner_cell_slots[index] = u32::MAX;
     }
     pub fn connected_playable(&self) -> bool {
         let Some(start) = self.field_mask.iter().position(|inside| *inside) else {
@@ -392,6 +491,55 @@ impl BoardGrid {
         }
         actual == self.owner_counts
     }
+}
+
+/// Samples a star-shaped radial polygon without scanning every edge.
+///
+/// Generated fields have evenly spaced polar vertices. A ray from the origin
+/// therefore intersects the edge for its angular sector, and the nearest
+/// boundary for points close enough to affect gameplay lies in that sector or
+/// one of its immediate neighbours. Deep interior/exterior points only need a
+/// conservative distance because callers compare it with small clearances.
+fn radial_polygon_sample(position: Vec2, points: &[Vec2]) -> (bool, f32) {
+    debug_assert!(points.len() >= 3);
+    if position.length_squared() <= f32::EPSILON {
+        return (
+            true,
+            points
+                .iter()
+                .map(|point| point.length())
+                .fold(f32::INFINITY, f32::min),
+        );
+    }
+
+    let count = points.len();
+    let angle = position
+        .y
+        .atan2(position.x)
+        .rem_euclid(std::f32::consts::TAU);
+    let scaled = angle * count as f32 / std::f32::consts::TAU;
+    let sector = scaled.floor() as usize % count;
+    let start = points[sector];
+    let end = points[(sector + 1) % count];
+    let direction = position.normalize();
+    let edge = end - start;
+    let boundary_radius = cross(start, edge) / cross(direction, edge);
+    let inside = position.length() <= boundary_radius;
+
+    let mut distance = f32::INFINITY;
+    for offset in -2..=2 {
+        let index = (sector as isize + offset).rem_euclid(count as isize) as usize;
+        distance = distance.min(point_segment_distance(
+            position,
+            points[index],
+            points[(index + 1) % count],
+        ));
+    }
+    (inside, distance)
+}
+
+fn cross(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.y - a.y * b.x
 }
 
 pub fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
@@ -492,6 +640,19 @@ mod tests {
             assert!(a.playable_cells > 16_000);
         }
     }
+
+    #[test]
+    fn radial_sampling_matches_polygon_classification() {
+        let board = BoardGrid::generate(91, 12, &GameConfig::default());
+        for index in 0..board.len() {
+            let position = board.cell_center(board.cell(index));
+            assert_eq!(
+                board.field_mask[index],
+                point_in_polygon(position, &board.contour.points),
+                "classification differs at {position:?}"
+            );
+        }
+    }
     #[test]
     fn initial_seeds_do_not_overlap() {
         let cfg = GameConfig::default();
@@ -509,6 +670,22 @@ mod tests {
         b.claim_disk(Vec2::new(10_000.0, 0.0), 100.0, CompetitorId(0));
         b.claim_disk(Vec2::ZERO, 5.0, CompetitorId(1));
         assert!(b.verify_counts());
+    }
+
+    #[test]
+    fn owner_index_tracks_reassignments_and_death_clears_only_owned_cells() {
+        let mut board = BoardGrid::generate(12, 2, &GameConfig::default());
+        let first = board.world_to_cell(Vec2::ZERO).unwrap();
+        let second = Cell::new(first.x + 2, first.y);
+        board.set_owner(first, CompetitorId(0).owner());
+        board.set_owner(second, CompetitorId(0).owner());
+        board.set_owner(first, CompetitorId(1).owner());
+        assert_eq!(board.owner_counts[0], 1);
+        assert_eq!(board.owner_counts[1], 1);
+        board.clear_owner(CompetitorId(0));
+        assert_eq!(board.owner_at(second), OwnerId::UNCLAIMED);
+        assert_eq!(board.owner_at(first), CompetitorId(1).owner());
+        assert!(board.verify_counts());
     }
     #[test]
     fn inward_direction_increases_distance() {

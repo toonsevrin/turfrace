@@ -2,6 +2,7 @@
 
 use super::*;
 use bevy::ecs::system::SystemParam;
+use std::fmt::Write;
 
 type CompetitorHudQuery<'w, 's> = Query<
     'w,
@@ -37,6 +38,8 @@ type HudTextQuery<'w, 's> = Query<
         Option<&'static HumanHudRank>,
         Option<&'static HumanRespawnText>,
         Option<&'static mut BackgroundColor>,
+        Option<&'static mut BorderColor>,
+        Option<&'static mut TextColor>,
     ),
     Or<(
         With<GlobalRankingText>,
@@ -85,24 +88,24 @@ pub(super) fn spawn_gameplay_hud(
                 Node {
                     position_type: PositionType::Absolute,
                     left: percent(50),
-                    top: px(104),
-                    width: px(220),
-                    max_width: px(220),
-                    margin: UiRect::left(px(-110)),
-                    padding: UiRect::axes(px(10), px(8)),
+                    top: px(72),
+                    width: px(240),
+                    max_width: px(240),
+                    margin: UiRect::left(px(-120)),
+                    padding: UiRect::axes(px(12), px(9)),
                     border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(0)),
+                    border_radius: BorderRadius::all(px(6)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.94)),
-                BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.20)),
+                BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.80)),
+                BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.13)),
             ))
             .with_children(|panel| {
                 panel.spawn((
                     Text::new("LEADERS"),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(15.0 * text_scale),
+                        font_size: FontSize::Px(13.0 * text_scale),
                         ..default()
                     },
                     TextColor(CREAM),
@@ -125,12 +128,12 @@ pub(super) fn spawn_gameplay_hud(
                 Node {
                     position_type: PositionType::Absolute,
                     right: px(18),
-                    top: px(196),
-                    width: px(280),
-                    padding: UiRect::axes(px(10), px(7)),
-                    max_width: px(280),
+                    top: px(170),
+                    width: px(260),
+                    padding: UiRect::axes(px(10), px(6)),
+                    max_width: px(260),
                     border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(0)),
+                    border_radius: BorderRadius::all(px(5)),
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.0)),
@@ -207,10 +210,10 @@ pub(super) fn reconcile_human_huds(
             ))
             .with_children(|root| {
                 root.spawn((
-                    Text::new("PLAYER"),
+                    Text::new("PLAYER   0.0%"),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(15.0 * text_scale),
+                        font_size: FontSize::Px(14.0 * text_scale),
                         ..default()
                     },
                     TextColor(CREAM),
@@ -220,26 +223,26 @@ pub(super) fn reconcile_human_huds(
                     },
                     Node {
                         position_type: PositionType::Absolute,
-                        top: px(24),
-                        left: px(12),
-                        width: percent(90),
-                        max_width: px(380),
-                        min_width: px(180),
+                        top: px(16),
+                        left: px(16),
+                        width: percent(78),
+                        max_width: px(310),
+                        min_width: px(170),
                         overflow: Overflow::clip(),
-                        padding: UiRect::axes(px(9), px(7)),
-                        border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(0)),
+                        padding: UiRect::axes(px(11), px(8)),
+                        border: UiRect::left(px(4)),
+                        border_radius: BorderRadius::all(px(5)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.90)),
-                    BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.20)),
+                    BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.78)),
+                    BorderColor::all(CREAM),
                     HumanHudSummary(player_camera.subject),
                 ));
                 root.spawn((
                     Text::new("#1 / 8"),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(15.0 * text_scale),
+                        font_size: FontSize::Px(13.0 * text_scale),
                         ..default()
                     },
                     TextColor(CREAM),
@@ -249,24 +252,24 @@ pub(super) fn reconcile_human_huds(
                     },
                     Node {
                         position_type: PositionType::Absolute,
-                        bottom: px(22),
-                        left: px(12),
-                        width: px(88),
+                        bottom: px(16),
+                        left: px(16),
+                        width: px(78),
                         overflow: Overflow::clip(),
-                        padding: UiRect::axes(px(9), px(7)),
+                        padding: UiRect::axes(px(9), px(6)),
                         border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(0)),
+                        border_radius: BorderRadius::all(px(5)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.90)),
-                    BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.20)),
+                    BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.74)),
+                    BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.13)),
                     HumanHudRank(player_camera.subject),
                 ));
                 root.spawn((
                     Text::new(""),
                     TextFont {
                         font: theme.display_font.clone(),
-                        font_size: FontSize::Px(29.0 * text_scale),
+                        font_size: FontSize::Px(25.0 * text_scale),
                         ..default()
                     },
                     TextColor(CORAL),
@@ -277,25 +280,25 @@ pub(super) fn reconcile_human_huds(
                     TextLayout::justify(Justify::Center),
                     Node {
                         position_type: PositionType::Absolute,
-                        top: percent(44),
-                        left: percent(25),
-                        width: percent(50),
-                        min_width: px(160),
-                        max_width: px(260),
-                        padding: UiRect::axes(px(14), px(8)),
-                        border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(0)),
+                        top: percent(46),
+                        left: percent(27),
+                        width: percent(46),
+                        min_width: px(140),
+                        max_width: px(230),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.0)),
-                    BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.0)),
                     HumanRespawnText(player_camera.subject),
                 ));
             });
     }
 }
 
-pub(super) fn update_gameplay_hud(data: HudData, mut texts: HudTextQuery) {
+pub(super) fn update_gameplay_hud(
+    data: HudData,
+    time: Res<Time>,
+    mut refresh_remaining: Local<f32>,
+    mut texts: HudTextQuery,
+) {
     let HudData {
         state,
         session,
@@ -304,24 +307,30 @@ pub(super) fn update_gameplay_hud(data: HudData, mut texts: HudTextQuery) {
         eliminations,
         competitors,
     } = data;
-    let mut lines = vec!["RACE ORDER".to_owned()];
+    *refresh_remaining -= time.delta_secs();
+    if *refresh_remaining > 0.0 {
+        return;
+    }
+    *refresh_remaining = 0.1;
+
+    let mut ranking_text = "TOP TURF".to_owned();
     for entry in rankings.entries.iter().take(3) {
         if let Some((competitor, ..)) = competitors
             .iter()
             .find(|(competitor, ..)| competitor.id == entry.id)
         {
             let npc = if competitor.kind == CompetitorKind::Npc {
-                " [NPC]"
+                " CPU"
             } else {
                 ""
             };
-            lines.push(format!(
-                "{}  {}{}  {:>5.1}%",
+            let _ = write!(
+                ranking_text,
+                "\n{}  {}{}   {:>4.1}%",
                 entry.rank, competitor.display_name, npc, entry.territory_percent
-            ));
+            );
         }
     }
-    let ranking_text = lines.join("\n");
     let announcement_text = match *state.get() {
         AppState::Countdown => format!("{}", session.countdown_remaining.ceil().max(1.0) as u8),
         AppState::Playing if session.elapsed_seconds < 0.8 => "GO!".to_owned(),
@@ -347,15 +356,25 @@ pub(super) fn update_gameplay_hud(data: HudData, mut texts: HudTextQuery) {
             .join("\n")
     });
 
-    for (mut text, global, announcement, kill_feed, summary, rank, respawn, background) in
-        &mut texts
+    for (
+        mut text,
+        global,
+        announcement,
+        kill_feed,
+        summary,
+        rank,
+        respawn,
+        background,
+        border,
+        text_color,
+    ) in &mut texts
     {
         if global.is_some() {
-            text.0.clone_from(&ranking_text);
+            update_text(&mut text, &ranking_text);
         } else if announcement.is_some() {
-            text.0.clone_from(&announcement_text);
+            update_text(&mut text, &announcement_text);
         } else if kill_feed.is_some() {
-            text.0.clone_from(&elimination_text);
+            update_text(&mut text, &elimination_text);
             if let Some(mut background) = background {
                 background.0 = Color::srgba(
                     0.035,
@@ -375,15 +394,24 @@ pub(super) fn update_gameplay_hud(data: HudData, mut texts: HudTextQuery) {
                 territory.current_cells as f32 * 100.0 / board.playable_cells as f32
             };
             let status = if !life.is_alive() {
-                "  /  RESPAWNING"
+                "   RESPAWNING"
             } else if protection.active() {
-                "  /  SHIELDED"
+                "   SHIELDED"
             } else if trail.is_some() {
-                "  /  TRAIL ACTIVE"
+                "   DRAWING"
             } else {
                 ""
             };
-            text.0 = format!("{}  {:.1}%{}", competitor.display_name, percent, status);
+            update_text(
+                &mut text,
+                &format!(
+                    "{}   TURF {:.1}%{}",
+                    competitor.display_name, percent, status
+                ),
+            );
+            if let Some(mut border) = border {
+                border.set_all(palette_color(competitor.color_id));
+            }
         } else if let Some(marker) = rank {
             let Ok((competitor, ..)) = competitors.get(marker.0) else {
                 continue;
@@ -391,27 +419,30 @@ pub(super) fn update_gameplay_hud(data: HudData, mut texts: HudTextQuery) {
             let rank = rankings
                 .rank_of(competitor.id)
                 .map_or(0, |entry| entry.rank);
-            text.0 = format!("#{rank} / {}", rankings.entries.len());
+            update_text(&mut text, &format!("#{rank} OF {}", rankings.entries.len()));
         } else if let Some(marker) = respawn {
             let Ok((_, _, life, protection, _)) = competitors.get(marker.0) else {
                 continue;
             };
-            text.0 = if !life.is_alive() {
-                format!("RESPAWN\n{:.1}", life.respawn_remaining.max(0.0))
+            let next = if !life.is_alive() {
+                format!("BACK IN {:.1}", life.respawn_remaining.max(0.0))
             } else if protection.active() {
-                format!("SHIELD {:.1}", protection.remaining)
+                format!("SHIELDED {:.1}", protection.remaining)
             } else {
                 String::new()
             };
-            if let Some(mut background) = background {
-                background.0 = Color::srgba(
-                    0.035,
-                    0.055,
-                    0.09,
-                    if text.0.is_empty() { 0.0 } else { 0.90 },
-                );
+            update_text(&mut text, &next);
+            if let Some(mut text_color) = text_color {
+                text_color.0 = if next.is_empty() { Color::NONE } else { CORAL };
             }
         }
+    }
+}
+
+fn update_text(text: &mut Text, next: &str) {
+    if text.0 != next {
+        text.0.clear();
+        text.0.push_str(next);
     }
 }
 

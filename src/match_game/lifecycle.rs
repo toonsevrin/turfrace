@@ -16,9 +16,22 @@ use super::model::*;
 pub(super) fn begin_from_lobby(world: &mut World) {
     let setup = world.resource::<MatchSetup>().clone();
     start_match(world, &setup);
-    world
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::Countdown);
+    world.resource_mut::<MatchLoadingFrames>().0 = 0;
+}
+
+#[derive(Resource, Default)]
+pub(super) struct MatchLoadingFrames(pub u8);
+
+const MATCH_LOADING_MIN_FRAMES: u8 = 6;
+
+pub(super) fn finish_match_loading(
+    mut frames: ResMut<MatchLoadingFrames>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    frames.0 = frames.0.saturating_add(1);
+    if frames.0 >= MATCH_LOADING_MIN_FRAMES {
+        next.set(AppState::Countdown);
+    }
 }
 
 /// Fully resets authoritative state using a lobby composition. Useful for rematches and tests.

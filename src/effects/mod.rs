@@ -7,6 +7,7 @@ use bevy::{prelude::*, sprite::Text2dShadow};
 use crate::{
     camera::PlayerCamera,
     palette::{PLAYER_COLORS, palette_color},
+    render::FlatMaterial,
 };
 
 #[derive(Message, Debug, Clone)]
@@ -59,7 +60,7 @@ struct EffectAssets {
     fragment: Handle<Mesh>,
     ring: Handle<Mesh>,
     popup_font: FontSource,
-    materials: Vec<Handle<StandardMaterial>>,
+    materials: Vec<Handle<FlatMaterial>>,
 }
 
 #[derive(Component)]
@@ -81,19 +82,11 @@ fn setup_effect_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FlatMaterial>>,
 ) {
     let materials = PLAYER_COLORS
         .iter()
-        .map(|color| {
-            materials.add(StandardMaterial {
-                base_color: Color::Srgba(*color),
-                emissive: LinearRgba::from(Color::Srgba(*color)) * 0.22,
-                perceptual_roughness: 0.8,
-                unlit: true,
-                ..default()
-            })
-        })
+        .map(|color| materials.add(FlatMaterial::new(Color::Srgba(*color), 0.12)))
         .collect();
     commands.insert_resource(EffectAssets {
         fragment: meshes.add(Cuboid::from_size(Vec3::splat(0.16))),

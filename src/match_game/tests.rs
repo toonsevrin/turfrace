@@ -132,7 +132,7 @@ fn death_immediately_clears_territory_and_active_trail() {
     board.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
     let anchor = board.world_to_cell(Vec2::ZERO).unwrap();
     let mut trail = ActiveTrail::new(id, anchor, Vec2::ZERO, Vec2::X);
-    trail.points.push(Vec2::X);
+    trail.append_exact(Vec2::X);
     update_trail_raster(&mut board, &mut trail, config.trail_width);
 
     let mut app = App::new();
@@ -207,6 +207,20 @@ fn respawn_seed_displacement_is_credited() {
     );
     assert_eq!(board.owner_counts[victim.index()], 0);
     assert_eq!(credits.0, vec![(victim, respawning)]);
+}
+
+#[test]
+fn respawn_resets_the_next_trail_anchor_to_the_new_seed() {
+    let board = BoardGrid::generate(17, 2, &GameConfig::default());
+    let position = board.cell_center(board.cell(board.spawn_candidates[0]));
+    let mut motion = CompetitorMotion::new(Vec2::new(99.0, 99.0), Vec2::X);
+    let mut last_owned = LastOwnedCell(crate::board::Cell::new(-1, -1));
+
+    reset_respawn_anchor(&board, &mut motion, &mut last_owned, position);
+
+    assert_eq!(motion.position, position);
+    assert_eq!(motion.previous_position, position);
+    assert_eq!(last_owned.0, board.world_to_cell(position).unwrap());
 }
 
 #[test]
@@ -317,7 +331,7 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
         Vec2::new(0.0, -2.0),
         Vec2::Y,
     );
-    forced_trail.points.push(Vec2::new(0.0, 2.0));
+    forced_trail.append_exact(Vec2::new(0.0, 2.0));
     {
         let mut board = app.world_mut().resource_mut::<BoardGrid>();
         update_trail_raster(&mut board, &mut forced_trail, config.trail_width);

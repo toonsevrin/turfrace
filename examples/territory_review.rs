@@ -1,11 +1,10 @@
 //! Fast, deterministic territory-only renderer review.
 //!
 //! This intentionally bypasses match simulation. It can render the same
-//! predefined shapes either as exact rings or as the current ownership raster:
+//! predefined shapes through the production ownership-texture renderer:
 //!
 //! ```text
-//! cargo run --example territory_review -- --mode vector --output target/territory-vector.png
-//! cargo run --example territory_review -- --mode raster --output target/territory-raster.png
+//! cargo run --example territory_review -- --output target/territory-review.png
 //! ```
 
 use std::path::PathBuf;
@@ -21,32 +20,15 @@ use bevy::{
 };
 use turfrace::render::{FieldVisual, RenderPlugin, TerritoryVisual};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReviewMode {
-    Vector,
-    Raster,
-}
-
-impl ReviewMode {
-    fn parse(value: &str) -> Self {
-        match value {
-            "vector" => Self::Vector,
-            "raster" => Self::Raster,
-            other => panic!("unknown review mode `{other}`; use vector or raster"),
-        }
-    }
-}
-
 #[derive(Resource)]
 struct ReviewState {
-    mode: ReviewMode,
     output: PathBuf,
     frame: u32,
     screenshot: Option<Entity>,
 }
 
 fn main() {
-    let (mode, output) = arguments();
+    let output = arguments();
     let field = FieldVisual {
         contour: vec![
             Vec2::new(-24.0, -15.0),
@@ -67,27 +49,17 @@ fn main() {
         cell_size: 0.5,
         origin: Vec2::new(-24.0, -18.0),
         owners: vec![0; 96 * 72],
-        playable: vec![true; 96 * 72],
         ..default()
     };
     territory.color_ids[..3].copy_from_slice(&[0, 4, 2]);
     territory.pattern_ids[..3].copy_from_slice(&[2, 7, 4]);
-    territory.layer_order[..3].copy_from_slice(&[1, 2, 3]);
     rasterize_shapes(&mut territory, &shapes);
-    if mode == ReviewMode::Vector {
-        territory.contours[0] = vec![shapes[0].outer.clone()];
-        territory.contours[1] = vec![shapes[1].outer.clone(), shapes[1].holes[0].clone()];
-        territory.contours[2] = vec![shapes[2].outer.clone()];
-        territory.resolve_contour_layers();
-    } else {
-        territory.rebuild_contours();
-    }
+    territory.revision = 1;
     App::new()
         .insert_resource(ClearColor(Color::srgb_u8(10, 18, 31)))
         .insert_resource(field)
         .insert_resource(territory)
         .insert_resource(ReviewState {
-            mode,
             output,
             frame: 0,
             screenshot: None,
@@ -96,7 +68,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: format!("Turfrace Territory Review — {mode:?}"),
+                        title: "Turfrace Territory Review".to_owned(),
                         resolution: WindowResolution::new(1280, 720),
                         present_mode: PresentMode::Immediate,
                         ..default()
@@ -114,27 +86,20 @@ fn main() {
         .run();
 }
 
-fn arguments() -> (ReviewMode, PathBuf) {
-    let mut mode = ReviewMode::Vector;
+fn arguments() -> PathBuf {
     let mut output = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
-            "--mode" => mode = ReviewMode::parse(&args.next().expect("--mode needs a value")),
             "--output" => output = Some(PathBuf::from(args.next().expect("--output needs a path"))),
             "--help" | "-h" => {
-                println!("usage: territory_review [--mode vector|raster] [--output PATH.png]");
+                println!("usage: territory_review [--output PATH.png]");
                 std::process::exit(0);
             }
             other => panic!("unknown argument `{other}`; use --help"),
         }
     }
-    (
-        mode,
-        output.unwrap_or_else(|| {
-            PathBuf::from(format!("target/visual-feedback/territory-{:?}.png", mode))
-        }),
-    )
+    output.unwrap_or_else(|| PathBuf::from("target/visual-feedback/territory-review.png"))
 }
 
 fn setup_camera(mut commands: Commands) {
@@ -172,7 +137,7 @@ fn capture_review(
     if review.frame < 120 {
         return;
     }
-    info!(mode = ?review.mode, output = ?review.output, "capturing territory review");
+    info!(output = ?review.output, "capturing territory review");
     let entity = commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(review.output.clone()))
