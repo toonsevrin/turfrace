@@ -2,17 +2,17 @@ use bevy::prelude::*;
 
 use crate::{
     audio::{AudioCue, PlayAudioCue},
-    board::BoardGrid,
     effects::VisualEffect,
     ids::CompetitorId,
     match_game::{
         Competitor, CompetitorKind, DeathCause, Rankings, SimulationEvent, SimulationEvents,
     },
     movement::CompetitorMotion,
+    territory_map::TerritoryMap,
 };
 
 pub(super) fn bridge_simulation_events(
-    board: Option<Res<BoardGrid>>,
+    territory: Option<Res<TerritoryMap>>,
     rankings: Option<Res<Rankings>>,
     events: Option<ResMut<SimulationEvents>>,
     competitors: Query<(Entity, &Competitor, &CompetitorMotion)>,
@@ -42,10 +42,14 @@ pub(super) fn bridge_simulation_events(
                     intensity: 0.3,
                 });
             }
-            SimulationEvent::Capture { player, cells, .. } => {
+            SimulationEvent::Capture { player, area, .. } => {
                 if let Some((entity, competitor, motion)) = lookup(&competitors, player) {
-                    let percent = board.as_ref().map_or(0.0, |board| {
-                        cells as f32 * 100.0 / board.playable_cells.max(1) as f32
+                    let percent = territory.as_ref().map_or(0.0, |map| {
+                        if map.arena_area > 0.0 {
+                            area * 100.0 / map.arena_area
+                        } else {
+                            0.0
+                        }
                     });
                     visual_writer.write(VisualEffect::Capture {
                         source: entity,

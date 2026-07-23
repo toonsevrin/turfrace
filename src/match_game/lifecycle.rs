@@ -9,6 +9,7 @@ use crate::{
     lobby::MatchSetup,
     movement::CompetitorMotion,
     npc::{NpcController, NpcDifficulty, deterministic_npc_name, deterministic_personality},
+    territory_map::TerritoryMap,
 };
 
 use super::model::*;
@@ -40,16 +41,21 @@ pub fn start_match(world: &mut World, setup: &MatchSetup) {
     let config = world.resource::<GameConfig>().clone();
     let count = usize::from(setup.total_competitors.clamp(2, 12));
     let mut board = BoardGrid::generate(setup.seed, count, &config);
+    let mut territory = TerritoryMap::from_board(&board);
     let spawns = choose_initial_spawns(&board, count, 8.0, setup.seed);
     for (index, &spawn) in spawns.iter().enumerate() {
-        board.claim_disk(
+        territory.claim_disk(
             spawn,
             config.starting_territory_radius,
             CompetitorId(index as u8),
         );
     }
+    // The grid is now a derived sample cache used by broadphase and legacy
+    // integrations. Gameplay ownership remains in the vector map.
+    territory.rebuild_sample_cache(&mut board);
     let counts = board.owner_counts;
     world.insert_resource(board);
+    world.insert_resource(territory);
     world.insert_resource(MatchSession {
         seed: setup.seed,
         phase: MatchPhase::Countdown,
@@ -62,7 +68,17 @@ pub fn start_match(world: &mut World, setup: &MatchSetup) {
     world.resource_mut::<SimulationEvents>().0.clear();
     world.insert_resource(EliminationFeed::default());
     for (index, &position) in spawns.iter().enumerate() {
-        spawn_competitor(world, setup, &config, counts[index], index, position);
+        spawn_competitor(
+            world,
+            setup,
+            &config,
+            counts[index],
+            world
+                .resource::<TerritoryMap>()
+                .area(CompetitorId(index as u8)),
+            index,
+            position,
+        );
     }
 }
 
@@ -71,6 +87,7 @@ fn spawn_competitor(
     setup: &MatchSetup,
     config: &GameConfig,
     territory_cells: u32,
+    territory_area: f32,
     index: usize,
     position: Vec2,
 ) {
@@ -85,10 +102,13 @@ fn spawn_competitor(
             elapsed: 0.0,
         },
         TerritoryRecord {
+            current_area: territory_area,
+            peak_area: territory_area,
             current_cells: territory_cells,
             peak_cells: territory_cells,
         },
         MatchStatistics {
+            peak_territory_area: territory_area,
             peak_territory_cells: territory_cells,
             ..default()
         },
@@ -144,10 +164,12 @@ fn despawn_competitors(world: &mut World) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn cleanup_match(
     mut commands: Commands,
     competitors: Query<Entity, With<Competitor>>,
     mut board: ResMut<BoardGrid>,
+    mut territory: ResMut<TerritoryMap>,
     mut session: ResMut<MatchSession>,
     mut rankings: ResMut<Rankings>,
     mut events: ResMut<SimulationEvents>,
@@ -157,6 +179,7 @@ pub(super) fn cleanup_match(
         commands.entity(entity).despawn();
     }
     *board = BoardGrid::default();
+    *territory = TerritoryMap::default();
     *session = MatchSession::default();
     rankings.entries.clear();
     events.0.clear();

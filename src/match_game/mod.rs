@@ -1,3 +1,4 @@
+mod capture_systems;
 mod lifecycle;
 mod model;
 mod systems;

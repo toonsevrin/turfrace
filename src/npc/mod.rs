@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::{board::BoardGrid, ids::CompetitorId};
+use crate::{board::BoardGrid, ids::CompetitorId, territory_map::TerritoryMap};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NpcDifficulty {
@@ -65,6 +65,7 @@ pub struct PerceivedCompetitor {
     pub position: Vec2,
     pub alive: bool,
     pub territory_cells: u32,
+    pub territory_area: f32,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PerceivedTrail {
@@ -79,25 +80,28 @@ pub struct RankingSnapshot {
 
 pub struct BoardQuery<'a> {
     board: &'a BoardGrid,
+    territory: &'a TerritoryMap,
     player: CompetitorId,
 }
 impl<'a> BoardQuery<'a> {
-    pub fn new(board: &'a BoardGrid, player: CompetitorId) -> Self {
-        Self { board, player }
+    pub fn new(board: &'a BoardGrid, territory: &'a TerritoryMap, player: CompetitorId) -> Self {
+        Self {
+            board,
+            territory,
+            player,
+        }
     }
     pub fn signed_distance(&self, p: Vec2) -> f32 {
-        self.board.signed_distance_at(p)
+        self.territory.arena_signed_distance(p)
     }
     pub fn owns(&self, p: Vec2) -> bool {
-        self.board
-            .world_to_cell(p)
-            .is_some_and(|c| self.board.owns(c, self.player))
+        self.territory.owns(p, self.player)
     }
     pub fn nearest_owned(&self, p: Vec2) -> Option<Vec2> {
         self.board.nearest_owned_cell_center(p, self.player)
     }
     pub fn inward_normal(&self, p: Vec2) -> Vec2 {
-        self.board.inward_normal(p)
+        self.territory.arena_inward_normal(p)
     }
     pub fn playable_cells(&self) -> u32 {
         self.board.playable_cells
@@ -337,6 +341,7 @@ mod tests {
             position: Vec2::new(8.5, 0.0),
             alive: true,
             territory_cells: 1,
+            territory_area: 1.0,
         };
         let unopposed = patrol_direction(state, &[], 1.0, 0.0);
         let avoiding = patrol_direction(state, &[enemy], 1.0, 0.0);

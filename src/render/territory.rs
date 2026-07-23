@@ -5,7 +5,7 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
 };
 
-use crate::palette::palette_color;
+use crate::{geometry::MultiPolygon, palette::palette_color};
 
 use super::{PresentationSettings, RetiredMeshes, materials::TerritoryMaterial, mix_with_white};
 
@@ -14,7 +14,7 @@ pub const TERRITORY_SURFACE_HEIGHT: f32 = 0.17;
 const TERRITORY_WALL_BASE: f32 = 0.025;
 
 /// Compact render snapshot of the authoritative board. The simulation grid is
-/// never shown directly: ownership is rebuilt into a small number of smooth
+/// never shown directly: ownership is rebuilt into a small number of exact
 /// owner surfaces only when this revision changes.
 #[derive(Resource, Debug, Clone)]
 pub struct TerritoryVisual {
@@ -23,6 +23,9 @@ pub struct TerritoryVisual {
     pub cell_size: f32,
     pub origin: Vec2,
     pub owners: Vec<u8>,
+    /// Exact vector geometry copied from `TerritoryMap` on revision changes.
+    pub polygons: [MultiPolygon; 12],
+    pub arena: MultiPolygon,
     pub pattern_ids: [u8; 12],
     pub color_ids: [u8; 12],
     pub revision: u64,
@@ -36,6 +39,8 @@ impl Default for TerritoryVisual {
             cell_size: 0.5,
             origin: Vec2::ZERO,
             owners: Vec::new(),
+            polygons: std::array::from_fn(|_| MultiPolygon::empty()),
+            arena: MultiPolygon::empty(),
             pattern_ids: [0; 12],
             color_ids: std::array::from_fn(|index| index as u8),
             revision: 0,
@@ -45,13 +50,19 @@ impl Default for TerritoryVisual {
 
 impl TerritoryVisual {
     pub fn is_valid(&self) -> bool {
-        self.width > 0
+        (self.width > 0
             && self.height > 0
             && self.cell_size > 0.0
-            && self.owners.len() == self.width as usize * self.height as usize
+            && self.owners.len() == self.width as usize * self.height as usize)
+            || !self.arena.is_empty()
     }
 
     pub fn owner_at(&self, point: Vec2) -> u8 {
+        for (index, polygon) in self.polygons.iter().enumerate() {
+            if polygon.contains_world(point) {
+                return index as u8 + 1;
+            }
+        }
         if !self.is_valid() {
             return 0;
         }
@@ -67,6 +78,14 @@ impl TerritoryVisual {
             FIELD_SURFACE_HEIGHT
         } else {
             TERRITORY_SURFACE_HEIGHT
+        }
+    }
+
+    pub fn arena_contains(&self, point: Vec2) -> bool {
+        if !self.arena.is_empty() {
+            self.arena.contains_world(point)
+        } else {
+            self.is_valid()
         }
     }
 }
@@ -91,7 +110,7 @@ pub(super) struct TerritoryAssets<'w> {
 
 type ExistingSurface = (Entity, Handle<Mesh>, Handle<TerritoryMaterial>);
 
-/// Rebuilds at most one smooth mesh per owner on ownership changes. The board
+/// Rebuilds at most one exact mesh per owner on ownership changes. The board
 /// has no entity per cell, and ordinary frames do no territory work.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sync_territory_surface(
@@ -180,8 +199,8 @@ fn territory_material(
 }
 
 fn build_owner_mesh(territory: &TerritoryVisual, owner: u8) -> Option<Mesh> {
-    let loops = boundary_loops(territory, owner);
-    if loops.is_empty() {
+    let vector_geometry = &territory.polygons[owner as usize - 1];
+    if vector_geometry.is_empty() && boundary_loops(territory, owner).is_empty() {
         return None;
     }
 
@@ -190,34 +209,61 @@ fn build_owner_mesh(territory: &TerritoryVisual, owner: u8) -> Option<Mesh> {
     let mut uvs = Vec::new();
     let mut wall_uvs = Vec::new();
     let mut indices = Vec::new();
-    // Deterministic tie-break for smoothed owner seams: lower owner slots sit
-    // above higher slots, so overlapping visual contours read as occlusion.
-    let layer_bias = f32::from(12_u8.saturating_sub(owner)) * 0.00015;
-    let surface_height = TERRITORY_SURFACE_HEIGHT + layer_bias;
-    let wall_base = TERRITORY_WALL_BASE + layer_bias;
-    let mut outer_loops = Vec::new();
-    let mut hole_loops = Vec::new();
-    for loop_points in loops {
-        let smooth = smooth_loop(&loop_points, territory.cell_size);
-        if polygon_area(&smooth) >= 0.0 {
-            outer_loops.push(smooth);
-        } else {
-            hole_loops.push(smooth);
-        }
-    }
+    let surface_height = TERRITORY_SURFACE_HEIGHT;
+    let wall_base = TERRITORY_WALL_BASE;
 
-    for outer in outer_loops {
-        let holes: Vec<_> = hole_loops
-            .iter()
-            .filter(|hole| {
-                hole.first()
-                    .is_some_and(|point| point_in_polygon(*point, &outer))
+    let vector_polygons: Vec<_> = vector_geometry
+        .polygons
+        .iter()
+        .map(|polygon| {
+            (
+                polygon
+                    .outer
+                    .iter()
+                    .map(|point| point.world())
+                    .collect::<Vec<_>>(),
+                polygon
+                    .holes
+                    .iter()
+                    .map(|hole| hole.iter().map(|point| point.world()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let polygons = if vector_polygons.is_empty() {
+        let loops = boundary_loops(territory, owner);
+        let mut outers = Vec::new();
+        let mut holes = Vec::new();
+        for loop_points in loops {
+            if polygon_area(&loop_points) >= 0.0 {
+                outers.push(loop_points);
+            } else {
+                holes.push(loop_points);
+            }
+        }
+        outers
+            .into_iter()
+            .map(|outer| {
+                let matching = holes
+                    .iter()
+                    .filter(|hole| {
+                        hole.first()
+                            .is_some_and(|point| point_in_polygon(*point, &outer))
+                    })
+                    .cloned()
+                    .collect();
+                (outer, matching)
             })
-            .collect();
+            .collect()
+    } else {
+        vector_polygons
+    };
+
+    for (outer, holes) in polygons {
         let mut coordinates = Vec::new();
         append_coordinates(&mut coordinates, &outer);
         let mut hole_indices = Vec::new();
-        for hole in holes {
+        for hole in &holes {
             hole_indices.push(coordinates.len() / 2);
             append_coordinates(&mut coordinates, hole);
         }
@@ -235,15 +281,39 @@ fn build_owner_mesh(territory: &TerritoryVisual, owner: u8) -> Option<Mesh> {
         indices.extend(triangles.into_iter().map(|index| base + index as u32));
     }
 
-    for loop_points in boundary_loops(territory, owner)
-        .into_iter()
-        .map(|points| smooth_loop(&points, territory.cell_size))
-    {
+    let wall_loops: Vec<(Vec<Vec2>, bool)> = if vector_geometry.is_empty() {
+        boundary_loops(territory, owner)
+            .into_iter()
+            .map(|points| (points.clone(), polygon_area(&points) < 0.0))
+            .collect()
+    } else {
+        vector_geometry
+            .polygons
+            .iter()
+            .flat_map(|polygon| {
+                std::iter::once((
+                    polygon.outer.iter().map(|point| point.world()).collect(),
+                    false,
+                ))
+                .chain(
+                    polygon
+                        .holes
+                        .iter()
+                        .map(|hole| (hole.iter().map(|point| point.world()).collect(), true)),
+                )
+            })
+            .collect()
+    };
+    for (loop_points, is_hole) in wall_loops {
         let base = positions.len() as u32;
         for (index, point) in loop_points.iter().copied().enumerate() {
             let next = loop_points[(index + 1) % loop_points.len()];
             let direction = (next - point).normalize_or_zero();
-            let outward = Vec2::new(direction.y, -direction.x);
+            let outward = if is_hole {
+                Vec2::new(-direction.y, direction.x)
+            } else {
+                Vec2::new(direction.y, -direction.x)
+            };
             positions.push([point.x, surface_height, point.y]);
             positions.push([point.x, wall_base, point.y]);
             normals.push([outward.x, 0.0, outward.y]);
@@ -347,70 +417,6 @@ fn boundary_loops(territory: &TerritoryVisual, owner: u8) -> Vec<Vec<Vec2>> {
     loops
 }
 
-fn chaikin(points: &[Vec2]) -> Vec<Vec2> {
-    if points.len() < 4 {
-        return points.to_vec();
-    }
-    // Five capture-time passes turn cell-step contours into a smooth,
-    // organic silhouette while keeping the runtime renderer completely idle.
-    let mut current = points.to_vec();
-    for _ in 0..5 {
-        let mut result = Vec::with_capacity(current.len() * 2);
-        for index in 0..current.len() {
-            let a = current[index];
-            let b = current[(index + 1) % current.len()];
-            result.push(a.lerp(b, 0.25));
-            result.push(a.lerp(b, 0.75));
-        }
-        current = result;
-    }
-    current
-}
-
-fn smooth_loop(points: &[Vec2], cell_size: f32) -> Vec<Vec2> {
-    let simplified = simplify_closed(points, cell_size * 0.76);
-    chaikin(&simplified)
-}
-
-fn simplify_closed(points: &[Vec2], tolerance: f32) -> Vec<Vec2> {
-    if points.len() < 5 {
-        return points.to_vec();
-    }
-    let tolerance_squared = tolerance * tolerance;
-    let mut result = points.to_vec();
-    loop {
-        if result.len() < 5 {
-            break;
-        }
-        let mut removed = false;
-        let original_len = result.len();
-        for index in 0..original_len {
-            let previous = result[(index + original_len - 1) % original_len];
-            let current = result[index];
-            let next = result[(index + 1) % original_len];
-            if point_segment_distance_squared(current, previous, next) <= tolerance_squared {
-                result.remove(index);
-                removed = true;
-                break;
-            }
-        }
-        if !removed {
-            break;
-        }
-    }
-    result
-}
-
-fn point_segment_distance_squared(point: Vec2, start: Vec2, end: Vec2) -> f32 {
-    let direction = end - start;
-    let denominator = direction.length_squared();
-    if denominator <= f32::EPSILON {
-        return point.distance_squared(start);
-    }
-    let t = ((point - start).dot(direction) / denominator).clamp(0.0, 1.0);
-    point.distance_squared(start + direction * t)
-}
-
 fn append_coordinates(coordinates: &mut Vec<f64>, points: &[Vec2]) {
     coordinates.extend(
         points
@@ -463,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_mesh_has_smooth_top_and_elevated_wall() {
+    fn owner_mesh_has_exact_top_and_elevated_wall() {
         let mesh = build_owner_mesh(&territory(), 1).expect("owner mesh");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -506,5 +512,33 @@ mod tests {
             board.surface_height(Vec2::splat(20.0)),
             FIELD_SURFACE_HEIGHT
         );
+    }
+
+    #[test]
+    fn vector_surface_keeps_exact_edges_and_holes() {
+        let mut visual = TerritoryVisual::default();
+        visual.polygons[0] = crate::geometry::MultiPolygon::from_outer(&[
+            Vec2::new(-4.0, -4.0),
+            Vec2::new(4.0, -4.0),
+            Vec2::new(4.0, 4.0),
+            Vec2::new(-4.0, 4.0),
+        ])
+        .difference(&crate::geometry::MultiPolygon::from_outer(&[
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(-1.0, 1.0),
+        ]));
+        let mesh = build_owner_mesh(&visual, 1).expect("vector owner mesh");
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert!(positions.iter().any(|point| {
+            (point[0].abs() - 4.0).abs() < 0.001 && (point[2].abs() - 4.0).abs() < 0.001
+        }));
+        assert!(visual.polygons[0].contains_world(Vec2::new(3.0, 0.0)));
+        assert!(!visual.polygons[0].contains_world(Vec2::ZERO));
     }
 }

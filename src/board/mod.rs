@@ -51,10 +51,14 @@ pub struct BoardGrid {
     pub cell_size: f32,
     pub world_origin: Vec2,
     pub field_mask: Vec<bool>,
+    /// Derived sample ownership for broadphase, rendering compatibility, and
+    /// legacy integrations. Exact gameplay ownership lives in `TerritoryMap`.
     pub owner: Vec<OwnerId>,
     pub active_trail_bits: Vec<u16>,
     pub trail_segment_buckets: Vec<Vec<TrailSegmentRef>>,
     pub signed_distance: Vec<f32>,
+    /// Counts and reverse indexes derived from `owner`; never use them for
+    /// exact capture, elimination, ranking, or containment decisions.
     pub owner_counts: [u32; MAX_COMPETITORS],
     pub owned_cells: [Vec<usize>; MAX_COMPETITORS],
     pub owner_cell_slots: Vec<u32>,

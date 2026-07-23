@@ -261,7 +261,7 @@ pub fn swept_self_active_trail_impact(
     candidates: &[usize],
 ) -> Option<f32> {
     let count = trail.segment_count();
-    if count == 0 {
+    if count == 0 || candidates.is_empty() {
         return None;
     }
     let mut excluded = excluded_distance;
@@ -284,6 +284,9 @@ pub fn swept_self_active_trail_impact(
     candidates
         .iter()
         .filter_map(|&index| {
+            if index >= count {
+                return None;
+            }
             let (start, mut end) = trail.segment(index)?;
             if index > cutoff_segment {
                 return None;
@@ -423,6 +426,22 @@ mod tests {
         trail.head = Vec2::new(1e-5, 0.0);
         assert_eq!(trail.segment_count(), 0);
         assert!(trail.segment(0).is_none());
+    }
+
+    #[test]
+    fn stale_spatial_bucket_reference_is_ignored() {
+        let trail = ActiveTrail::new(CompetitorId(0), Cell::new(0, 0), Vec2::ZERO, Vec2::X);
+        assert!(
+            swept_self_active_trail_impact(
+                Vec2::new(-1.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                0.1,
+                &trail,
+                0.0,
+                &[usize::MAX],
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::{
     board::BoardGrid,
     match_game::{Competitor, CompetitorKind, LifeState, Rankings, SpawnProtection},
     movement::CompetitorMotion,
+    territory_map::TerritoryMap,
     trail::ActiveTrail,
 };
 
@@ -14,17 +15,22 @@ use super::{CompetitorVisual, FieldVisual, TerritoryVisual, TrailVisual};
 
 pub(super) fn sync_board_visuals(
     board: Option<ResMut<BoardGrid>>,
+    vector_map: Option<Res<TerritoryMap>>,
     mut field: ResMut<FieldVisual>,
     mut territory: ResMut<TerritoryVisual>,
     mut last_generation_revision: Local<u64>,
     mut last_ownership_revision: Local<u64>,
+    mut last_vector_revision: Local<u64>,
 ) {
     let Some(mut board) = board else { return };
+    let vector_changed = vector_map
+        .as_ref()
+        .is_some_and(|map| map.revision != *last_vector_revision && !map.arena.is_empty());
     let generation_changed = *last_generation_revision != board.generation_revision;
     let mut ownership_changes = std::mem::take(&mut board.ownership_changes);
     let ownership_changed =
         *last_ownership_revision != board.ownership_revision || !ownership_changes.is_empty();
-    if !generation_changed && !ownership_changed {
+    if !generation_changed && !ownership_changed && !vector_changed {
         return;
     }
     if generation_changed {
@@ -68,7 +74,7 @@ pub(super) fn sync_board_visuals(
             }
         }
     }
-    if !geometry_changed && !ownership_changed {
+    if !geometry_changed && !ownership_changed && !vector_changed {
         return;
     }
     territory.width = board.width;
@@ -80,6 +86,13 @@ pub(super) fn sync_board_visuals(
         territory
             .owners
             .extend(board.owner.iter().map(|owner| owner.0));
+    }
+    if vector_changed && let Some(map) = vector_map.as_ref() {
+        territory.arena.clone_from(&map.arena);
+        for index in 0..territory.polygons.len() {
+            territory.polygons[index].clone_from(&map.territories[index]);
+        }
+        *last_vector_revision = map.revision;
     }
     territory.revision = territory.revision.wrapping_add(1);
     *last_ownership_revision = board.ownership_revision;

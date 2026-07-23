@@ -5,17 +5,16 @@ Scope: authoritative simulation, startup, dynamic geometry, WebAssembly/WebGL2, 
 
 ## Executive summary
 
-The pending implementation fixed several real hot paths but retained its largest architectural
-problem: territory ownership was converted into global contours, clipped between owners,
-triangulated, and uploaded as replacement meshes. A cold browser trace also reproduced a
-4.04-second main-thread block while Bevy compiled full StandardMaterial/PBR variants for a flat
-cartoon presentation.
+The previous implementation fixed several render hot paths but retained a correctness and
+performance trap: a sampled ownership grid was still the authority, then converted back into
+smoothed contours for presentation. That made territory look blurred and made exact captures
+dependent on cell resolution.
 
-The territory pipeline is now capture-time vector geometry: at most one smooth opaque mesh per
-owner, with an elevated top and a shallow side wall. Ownership is converted to boundary loops,
-smoothed, and triangulated only when the revision changes; ordinary frames submit the existing
-meshes without CPU work or texture filtering. The old 1,700-line contour implementation was
-replaced by a focused bounded builder.
+The refactor now uses deterministic fixed-point vector multipolygons as the sole ownership
+authority. `i_overlay` performs union/difference/intersection at capture time; a small uniform
+AABB index accelerates point ownership queries; the old board grid is rebuilt only as a derived
+sample cache for broadphase and compatibility. Rendering consumes exact outer contours and holes
+and triangulates them once per geometry revision, with an elevated top and explicit walls.
 
 StandardMaterial was removed from gameplay presentation. Cubes, trails, borders, shadows, and
 effects share a small directional-flat shader with lighting baked from mesh normals; real-time
@@ -28,9 +27,12 @@ software rasterization and is not representative of physical GPU throughput.
 
 ### Territory and field
 
-- Territory ownership remains grid-authoritative but the grid is never rendered directly.
-- Capture-time boundary extraction emits smooth owner surfaces and explicit side walls. The board
-  grid remains authoritative but is never visible as a grid.
+- Territory ownership is fixed-point vector multipolygon state. The sample grid is derived data and
+  is never consulted for gameplay containment, capture, ranking, or elimination decisions.
+- Boolean capture uses exact segment geometry and arena clipping. Loop captures fill the smaller
+  valid boundary lobe; bridge captures claim only the stroked trail corridor.
+- Exact outer contours and holes are triangulated directly. No Chaikin smoothing, raster contour
+  extraction, owner-layer bias, or blurred edge coverage remains.
 - Meshes are rebuilt only after capture, death, respawn, or a presentation-setting change; ordinary
   frames perform no territory CPU work or asset mutation.
 - Owner meshes are bounded to the twelve competitor slots and use opaque materials, so there is no
@@ -55,7 +57,9 @@ software rasterization and is not representative of physical GPU throughput.
 
 - Trails retain an exact head while sampling bounded history for raster/collision/render work.
 - Trail rasterization is incremental and collision uses per-cell segment buckets grouped by owner.
-- Ownership maintains per-owner cell indexes; death and seed claims avoid unrelated board cells.
+- A uniform territory AABB index narrows exact polygon containment queries. The sample grid keeps
+  per-owner indexes only as a derived broadphase cache; death and seed claims update it once per
+  committed vector change.
 - Board generation uses exact radial-sector classification instead of testing every contour edge
   for every cell.
 - NPC perception no longer clones every active trail polyline. It builds compact nearest-point
@@ -77,11 +81,11 @@ software rasterization and is not representative of physical GPU throughput.
 
 ### Resolved blockers
 
-1. **Global territory work:** the renderer mixed snapshot invalidation, contour extraction, boolean
-   clipping, triangulation, mesh lifecycle, and tests in one 1,700-line file. It is now a focused,
-   bounded vector-surface module of roughly 450 lines.
-2. **Misleading optimization:** affected-owner invalidation still triggered cross-owner clipping and
-   large allocations. The entire contour architecture, not just its invalidation flags, was removed.
+1. **Grid-authoritative ownership:** raster cells could produce visible steps, blurred smoothing,
+  and inconsistent collision decisions. Fixed-point multipolygons now own all territory state.
+2. **Global territory work:** the renderer mixed snapshot invalidation, contour extraction, boolean
+  clipping, triangulation, mesh lifecycle, and tests. It now receives exact vector contours and
+  performs only bounded revision-time triangulation.
 3. **Cold PBR compilation:** unlit StandardMaterial still compiled the general PBR shader family.
    Gameplay now uses a purpose-built flat material with prepass and shadows disabled.
 4. **Trail lifecycle:** respawn retained a stale trail anchor. The anchor, current position, previous
@@ -93,14 +97,16 @@ software rasterization and is not representative of physical GPU throughput.
 
 ### Residual risks
 
-- A very large loop closure still allocates A* cost/parent arrays and synchronously scans its polygon
-  bounds. This is bursty capture work rather than startup or steady-state work; generation-stamped
-  scratch buffers are the next justified simulation optimization if physical profiles show spikes.
+- A very large loop closure still allocates boolean intermediate contours. This is bursty
+  capture-time work rather than startup or steady-state work; reusable overlay buffers and a
+  segment-level spatial index are the next justified optimization if physical profiles show p95
+  spikes.
 - Independent split-screen cameras repeat scene traversal and draw submission even though their
   pixels partition the window. Physical 1/2/4/8-player profiles should set effect and visibility
   budgets before reducing visual clarity.
-- Revision-time contour smoothing and triangulation are intentionally paid on ownership changes.
-  They are bounded to owner meshes; capture-heavy mobile traces should verify their p95 cost.
+- Revision-time boolean normalization and triangulation are intentionally paid on ownership
+  changes. They are bounded to owner meshes; capture-heavy mobile traces should verify their p95
+  cost.
 
 ## Measurements
 
@@ -121,8 +127,9 @@ software rasterization and is not representative of physical GPU throughput.
 - No full historical trail rasterization or collision scan occurs in a fixed update.
 - Render trail history and territory geometry remain bounded.
 - Trail-bit changes never invalidate territory presentation.
-- Ownership changes invoke only bounded contour extraction, smoothing, triangulation, and mesh swaps.
-- No full-board scan occurs on death, seed claim, or respawn-candidate construction.
+- Ownership changes invoke only fixed-point booleans, bounded vector triangulation, and mesh swaps.
+- No full-board scan occurs for gameplay containment or capture decisions; the sample cache is
+  rebuilt once after a committed geometry mutation.
 - Release deployment rejects debug artifacts and records raw/gzip size.
 - Physical-hardware gates should target p95 fixed-update and presentation CPU below 8 ms for eight
   competitors at the agreed viewport configuration.

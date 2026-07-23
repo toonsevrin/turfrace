@@ -5,6 +5,7 @@ use bevy::{
 use super::{CompetitorVisual, materials::RenderAssets, territory::TerritoryVisual};
 
 const CAP_SEGMENTS: usize = 10;
+const TRAIL_CLEARANCE: f32 = 0.03;
 
 pub const MAX_RENDER_TRAIL_POINTS: usize = 512;
 
@@ -199,7 +200,7 @@ fn append_round_cap(
 }
 
 fn surface_height(territory: &TerritoryVisual, point: Vec2) -> f32 {
-    territory.surface_height(point)
+    territory.surface_height(point) + TRAIL_CLEARANCE
 }
 
 #[cfg(test)]
@@ -255,11 +256,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             positions[0][1],
-            super::super::territory::FIELD_SURFACE_HEIGHT
+            super::super::territory::FIELD_SURFACE_HEIGHT + TRAIL_CLEARANCE
         );
         assert_eq!(
             positions[2][1],
-            super::super::territory::TERRITORY_SURFACE_HEIGHT
+            super::super::territory::TERRITORY_SURFACE_HEIGHT + TRAIL_CLEARANCE
         );
     }
 }

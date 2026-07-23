@@ -49,8 +49,12 @@ impl SpawnProtection {
     }
 }
 
-#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct TerritoryRecord {
+    /// Exact vector area in world units. `*_cells` remains a sampled telemetry
+    /// value for compatibility with older HUD/replay consumers.
+    pub current_area: f32,
+    pub peak_area: f32,
     pub current_cells: u32,
     pub peak_cells: u32,
 }
@@ -60,6 +64,10 @@ pub struct MatchStatistics {
     pub kills: u32,
     pub deaths: u32,
     pub captures_completed: u32,
+    pub area_captured_total: f32,
+    pub area_stolen_total: f32,
+    pub largest_capture_area: f32,
+    pub peak_territory_area: f32,
     pub cells_captured_total: u32,
     pub cells_stolen_total: u32,
     pub largest_capture_cells: u32,
@@ -104,6 +112,7 @@ pub enum MatchPhase {
 pub struct RankingEntry {
     pub id: CompetitorId,
     pub rank: u8,
+    pub territory_area: f32,
     pub territory_cells: u32,
     pub territory_percent: f32,
     pub alive: bool,
@@ -137,6 +146,8 @@ pub enum SimulationEvent {
     },
     Capture {
         player: CompetitorId,
+        area: f32,
+        stolen_area: f32,
         cells: u32,
         stolen: u32,
         loop_fill: bool,
@@ -211,7 +222,6 @@ pub(crate) struct PendingCapture {
     pub entity: Entity,
     pub time: f32,
     pub trail: crate::trail::ActiveTrail,
-    pub end: crate::board::Cell,
 }
 #[derive(Resource, Default)]
 pub(crate) struct PendingCaptures(pub Vec<PendingCapture>);

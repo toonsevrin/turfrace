@@ -3,19 +3,20 @@ use bevy::{ecs::system::SystemParam, prelude::*, time::Fixed};
 use crate::{
     app_state::AppState,
     board::{BoardGrid, DeterministicRng},
-    capture::{apply_equal_time_captures, calculate_capture},
     combat::{CollisionBody, collect_collision_intents},
     config::GameConfig,
     ids::{CompetitorId, MAX_COMPETITORS},
     input::{ControlSource, SteeringIntent},
-    movement::{CompetitorMotion, advance_motion, segment_cell_entry_time},
+    movement::{CompetitorMotion, advance_motion},
     npc::{
         BoardQuery, NpcContext, NpcController, NpcSelfState, PerceivedCompetitor, PerceivedTrail,
         RankingSnapshot,
     },
+    territory_map::TerritoryMap,
     trail::{ActiveTrail, clear_trail_bits, update_trail_raster},
 };
 
+use super::capture_systems::{detect_closures, resolve_captures};
 use super::lifecycle::{
     MatchLoadingFrames, advance_countdown, advance_result_hold, begin_from_lobby, cleanup_match,
     finish_match_loading,
@@ -65,6 +66,7 @@ type RespawnSnapshot = (
     Option<&'static ActiveTrail>,
 );
 type RespawnControl = (
+    Entity,
     &'static Competitor,
     &'static mut CompetitorMotion,
     &'static mut LifeState,
@@ -72,6 +74,7 @@ type RespawnControl = (
     &'static mut TerritoryRecord,
     &'static mut MatchStatistics,
     &'static mut LastOwnedCell,
+    Option<&'static ActiveTrail>,
 );
 
 #[derive(SystemParam)]
@@ -103,6 +106,7 @@ impl Plugin for MatchPlugin {
             .chain();
         app.init_resource::<GameConfig>()
             .init_resource::<BoardGrid>()
+            .init_resource::<TerritoryMap>()
             .init_resource::<MatchSession>()
             .init_resource::<Rankings>()
             .init_resource::<SimulationEvents>()
@@ -205,6 +209,7 @@ fn configure_fixed_timestep(config: Res<GameConfig>, mut fixed_time: ResMut<Time
 fn npc_think(
     time: Res<Time<Fixed>>,
     board: Res<BoardGrid>,
+    territory: Res<TerritoryMap>,
     session: Res<MatchSession>,
     rankings: Res<Rankings>,
     mut queries: ParamSet<(Query<NpcSnapshot>, Query<NpcControl>)>,
@@ -231,6 +236,7 @@ fn npc_think(
             position: m.position,
             alive: l.is_alive(),
             territory_cells: t.current_cells,
+            territory_area: t.current_area,
         })
         .collect();
     let mut trail_perceptions: [Vec<PerceivedTrail>; MAX_COMPETITORS] =
@@ -286,7 +292,7 @@ fn npc_think(
             .copied()
             .filter(|t| t.distance <= radius)
             .collect();
-        let query = BoardQuery::new(&board, competitor.id);
+        let query = BoardQuery::new(&board, &territory, competitor.id);
         let context = NpcContext {
             self_state: NpcSelfState {
                 id: competitor.id,
@@ -319,7 +325,7 @@ fn npc_think(
 fn move_competitors(
     time: Res<Time<Fixed>>,
     config: Res<GameConfig>,
-    board: Res<BoardGrid>,
+    territory: Res<TerritoryMap>,
     mut session: ResMut<MatchSession>,
     mut query: Query<(
         &Competitor,
@@ -336,12 +342,12 @@ fn move_competitors(
             continue;
         }
         let desired = (intent.magnitude > 0.0).then_some(intent.desired_direction);
-        advance_motion(&mut motion, desired, &board, &config, dt);
+        advance_motion(&mut motion, desired, &territory, &config, dt);
         advance_spawn_protection(
             &mut protection,
             competitor.id,
             motion.position,
-            &board,
+            &territory,
             &config,
             dt,
         );
@@ -352,7 +358,7 @@ fn advance_spawn_protection(
     protection: &mut SpawnProtection,
     competitor: CompetitorId,
     position: Vec2,
-    board: &BoardGrid,
+    territory: &TerritoryMap,
     config: &GameConfig,
     delta_seconds: f32,
 ) {
@@ -362,31 +368,17 @@ fn advance_spawn_protection(
     protection.elapsed += delta_seconds;
     protection.remaining = (protection.remaining - delta_seconds).max(0.0);
     if protection.elapsed >= config.spawn_protection_minimum_seconds
-        && board
-            .world_to_cell(position)
-            .is_some_and(|cell| !board.owns(cell, competitor))
+        && !territory.owns(position, competitor)
     {
         protection.remaining = 0.0;
     }
-}
-
-fn boundary_crossing(board: &BoardGrid, player: CompetitorId, from: Vec2, to: Vec2) -> Vec2 {
-    let mut lo = 0.0;
-    let mut hi = 1.0;
-    for _ in 0..14 {
-        let mid = (lo + hi) * 0.5;
-        let owned = board
-            .world_to_cell(from.lerp(to, mid))
-            .is_some_and(|c| board.owns(c, player));
-        if owned { lo = mid } else { hi = mid }
-    }
-    from.lerp(to, hi)
 }
 
 fn extend_trails(
     mut commands: Commands,
     config: Res<GameConfig>,
     mut board: ResMut<BoardGrid>,
+    territory: Res<TerritoryMap>,
     mut events: ResMut<SimulationEvents>,
     mut query: Query<TrailExtension>,
 ) {
@@ -397,7 +389,7 @@ fn extend_trails(
         let Some(current) = board.world_to_cell(motion.position) else {
             continue;
         };
-        let currently_owned = board.owns(current, competitor.id);
+        let currently_owned = territory.owns(motion.position, competitor.id);
         if let Some(mut trail) = trail {
             trail.append(
                 motion.position,
@@ -409,15 +401,12 @@ fn extend_trails(
         } else if currently_owned {
             last_owned.0 = current;
         } else {
-            let from = if board
-                .world_to_cell(motion.previous_position)
-                .is_some_and(|c| board.owns(c, competitor.id))
-            {
+            let from = if territory.owns(motion.previous_position, competitor.id) {
                 motion.previous_position
             } else {
                 board.cell_center(last_owned.0)
             };
-            let boundary = boundary_crossing(&board, competitor.id, from, motion.position);
+            let boundary = territory.boundary_crossing(competitor.id, from, motion.position);
             let mut trail = ActiveTrail::new(competitor.id, last_owned.0, boundary, motion.heading);
             trail.append(
                 motion.position,
@@ -466,6 +455,7 @@ fn resolve_deaths(
     mut commands: Commands,
     config: Res<GameConfig>,
     mut board: ResMut<BoardGrid>,
+    mut territory: ResMut<TerritoryMap>,
     mut pending: ResMut<PendingDeaths>,
     mut eliminations: EliminationResources,
     mut query: Query<(
@@ -497,7 +487,9 @@ fn resolve_deaths(
                 clear_trail_bits(&mut board, competitor.id, &trail.cells);
                 commands.entity(entity).remove::<ActiveTrail>();
             }
-            board.clear_owner(competitor.id);
+            if territory.clear_owner(competitor.id) > 1e-5 {
+                territory.rebuild_sample_cache(&mut board);
+            }
             stats.deaths += 1;
             life.status = LifeStatus::Respawning;
             life.respawn_remaining = config.respawn_delay(stats.deaths);
@@ -530,110 +522,13 @@ fn resolve_deaths(
     }
 }
 
-fn detect_closures(
-    board: Res<BoardGrid>,
-    mut pending: ResMut<PendingCaptures>,
-    query: Query<(
-        Entity,
-        &Competitor,
-        &CompetitorMotion,
-        &LifeState,
-        &ActiveTrail,
-    )>,
-) {
-    pending.0.clear();
-    for (entity, c, m, l, trail) in &query {
-        if !l.is_alive() {
-            continue;
-        }
-        let Some(end) = board.world_to_cell(m.position) else {
-            continue;
-        };
-        if board.owns(end, c.id) {
-            let time = segment_cell_entry_time(&board, m.previous_position, m.position, |cell| {
-                board.owns(cell, c.id)
-            })
-            .unwrap_or(1.0);
-            pending.0.push(PendingCapture {
-                player: c.id,
-                entity,
-                time,
-                trail: trail.clone(),
-                end,
-            });
-        }
-    }
-}
-
-fn resolve_captures(
-    mut commands: Commands,
-    mut board: ResMut<BoardGrid>,
-    mut pending: ResMut<PendingCaptures>,
-    mut displaced: ResMut<DisplacementCredits>,
-    mut events: ResMut<SimulationEvents>,
-    mut query: Query<(&Competitor, &mut MatchStatistics)>,
-) {
-    pending.0.sort_by(|a, b| {
-        a.time
-            .total_cmp(&b.time)
-            .then_with(|| a.player.cmp(&b.player))
-    });
-    let items = std::mem::take(&mut pending.0);
-    let mut offset = 0;
-    while offset < items.len() {
-        let mut end = offset + 1;
-        while end < items.len() && (items[end].time - items[offset].time).abs() <= 1e-5 {
-            end += 1
-        }
-        let group = &items[offset..end];
-        let mut captures: Vec<_> = group
-            .iter()
-            .map(|p| {
-                (
-                    p.player,
-                    calculate_capture(&board, p.player, &p.trail, p.end),
-                )
-            })
-            .collect();
-        apply_equal_time_captures(&mut board, &mut captures);
-        for pending in group {
-            clear_trail_bits(&mut board, pending.player, &pending.trail.cells);
-            commands.entity(pending.entity).remove::<ActiveTrail>();
-            let result = captures
-                .iter()
-                .find(|(id, _)| *id == pending.player)
-                .unwrap()
-                .1
-                .clone();
-            let stolen: u32 = result.stolen_by_owner.iter().map(|(_, n)| *n).sum();
-            for (victim, _) in &result.stolen_by_owner {
-                if board.owner_counts[victim.index()] == 0 {
-                    displaced.0.push((*victim, pending.player));
-                }
-            }
-            if let Some((_, mut stats)) = query.iter_mut().find(|(c, _)| c.id == pending.player) {
-                let cells = result.claimed_cells.len() as u32;
-                stats.captures_completed += 1;
-                stats.cells_captured_total += cells;
-                stats.cells_stolen_total += stolen;
-                stats.largest_capture_cells = stats.largest_capture_cells.max(cells);
-            }
-            events.0.push(SimulationEvent::Capture {
-                player: pending.player,
-                cells: result.claimed_cells.len() as u32,
-                stolen,
-                loop_fill: result.used_loop_fill,
-            });
-        }
-        offset = end;
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 fn resolve_territory_consequences(
     mut commands: Commands,
     time: Res<Time<Fixed>>,
     config: Res<GameConfig>,
     mut board: ResMut<BoardGrid>,
+    mut territory_map: ResMut<TerritoryMap>,
     mut displaced: ResMut<DisplacementCredits>,
     mut eliminations: EliminationResources,
     mut query: Query<TerritoryConsequences>,
@@ -649,7 +544,9 @@ fn resolve_territory_consequences(
                 clear_trail_bits(&mut board, victim, &trail.cells);
                 commands.entity(entity).remove::<ActiveTrail>();
             }
-            board.clear_owner(victim);
+            if territory_map.clear_owner(victim) > 1e-5 {
+                territory_map.rebuild_sample_cache(&mut board);
+            }
             stats.deaths += 1;
             life.status = LifeStatus::Respawning;
             life.respawn_remaining = config.respawn_delay(stats.deaths);
@@ -681,8 +578,12 @@ fn resolve_territory_consequences(
     for (entity, c, m, life, protection, mut territory, mut stats, last_owned, trail) in &mut query
     {
         let count = board.owner_counts[c.id.index()];
+        let area = territory_map.area(c.id);
+        territory.current_area = area;
+        territory.peak_area = territory.peak_area.max(area);
         territory.current_cells = count;
         territory.peak_cells = territory.peak_cells.max(count);
+        stats.peak_territory_area = stats.peak_territory_area.max(area);
         stats.peak_territory_cells = stats.peak_territory_cells.max(count);
         if life.is_alive() {
             stats.time_alive_seconds += time.delta_secs();
@@ -690,9 +591,7 @@ fn resolve_territory_consequences(
         if life.is_alive()
             && !protection.active()
             && trail.is_none()
-            && board
-                .world_to_cell(m.position)
-                .is_some_and(|cell| !board.owns(cell, c.id))
+            && !territory_map.owns(m.position, c.id)
         {
             let mut new = ActiveTrail::new(c.id, last_owned.0, m.position, m.heading);
             update_trail_raster(&mut board, &mut new, config.trail_width);
@@ -706,18 +605,25 @@ fn resolve_territory_consequences(
 }
 
 fn check_victory(
-    board: Res<BoardGrid>,
+    territory: Res<TerritoryMap>,
     mut session: ResMut<MatchSession>,
     mut events: ResMut<SimulationEvents>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    if let Some((index, _)) = board
-        .owner_counts
+    let winner = territory
+        .territories
         .iter()
         .enumerate()
-        .find(|(_, count)| **count == board.playable_cells)
-    {
-        let winner = CompetitorId(index as u8);
+        .find(|(index, shape)| {
+            shape.area_scaled() == territory.arena.area_scaled()
+                && territory
+                    .territories
+                    .iter()
+                    .enumerate()
+                    .all(|(other, candidate)| other == *index || candidate.is_empty())
+        })
+        .map(|(index, _)| CompetitorId(index as u8));
+    if let Some(winner) = winner {
         session.phase = MatchPhase::Finished;
         session.winner = Some(winner);
         session.result_hold_remaining = 3.0;
@@ -842,10 +748,13 @@ fn spawn_disk_unclaimed_ratio(board: &BoardGrid, center: Vec2, radius: f32) -> f
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn advance_respawns(
+    mut commands: Commands,
     time: Res<Time<Fixed>>,
     config: Res<GameConfig>,
     mut board: ResMut<BoardGrid>,
+    mut territory_map: ResMut<TerritoryMap>,
     session: Res<MatchSession>,
     mut events: ResMut<SimulationEvents>,
     mut displacement_credits: ResMut<DisplacementCredits>,
@@ -861,13 +770,23 @@ fn advance_respawns(
         .map(|(c, m, _, _)| (c.id, m.position))
         .collect();
     living.sort_by(|(a, _), (b, _)| {
-        board.owner_counts[b.index()]
-            .cmp(&board.owner_counts[a.index()])
+        territory_map
+            .area(*b)
+            .total_cmp(&territory_map.area(*a))
             .then_with(|| a.cmp(b))
     });
     let mut reserved = Vec::new();
-    for (c, mut motion, mut life, mut protection, mut territory, mut stats, mut last_owned) in
-        queries.p1().iter_mut()
+    for (
+        entity,
+        c,
+        mut motion,
+        mut life,
+        mut protection,
+        mut territory,
+        mut stats,
+        mut last_owned,
+        trail,
+    ) in queries.p1().iter_mut()
     {
         if life.is_alive() {
             continue;
@@ -885,8 +804,12 @@ fn advance_respawns(
             &config,
         );
         reserved.push(position);
+        if trail.is_some() {
+            commands.entity(entity).remove::<ActiveTrail>();
+        }
         claim_respawn_seed(
             &mut board,
+            &mut territory_map,
             position,
             config.starting_territory_radius,
             c.id,
@@ -896,8 +819,11 @@ fn advance_respawns(
         life.status = LifeStatus::Alive;
         protection.remaining = config.spawn_protection_seconds;
         protection.elapsed = 0.0;
+        territory.current_area = territory_map.area(c.id);
+        territory.peak_area = territory.peak_area.max(territory.current_area);
         territory.current_cells = board.owner_counts[c.id.index()];
         territory.peak_cells = territory.peak_cells.max(territory.current_cells);
+        stats.peak_territory_area = stats.peak_territory_area.max(territory.current_area);
         stats.peak_territory_cells = stats.peak_territory_cells.max(territory.current_cells);
         events.0.push(SimulationEvent::Respawn { player: c.id });
     }
@@ -919,16 +845,22 @@ fn reset_respawn_anchor(
 
 fn claim_respawn_seed(
     board: &mut BoardGrid,
+    territory_map: &mut TerritoryMap,
     position: Vec2,
     radius: f32,
     respawning: CompetitorId,
     credits: &mut DisplacementCredits,
 ) {
-    let previous_counts = board.owner_counts;
-    board.claim_disk(position, radius, respawning);
-    for (index, previous) in previous_counts.into_iter().enumerate() {
+    let previous_areas: [f32; MAX_COMPETITORS] =
+        std::array::from_fn(|index| territory_map.area(CompetitorId(index as u8)));
+    let revision = territory_map.revision;
+    territory_map.claim_disk(position, radius, respawning);
+    if territory_map.revision != revision {
+        territory_map.rebuild_sample_cache(board);
+    }
+    for (index, previous) in previous_areas.into_iter().enumerate() {
         let victim = CompetitorId(index as u8);
-        if victim != respawning && previous > 0 && board.owner_counts[index] == 0 {
+        if victim != respawning && previous > 1e-4 && territory_map.area(victim) <= 1e-4 {
             credits.0.push((victim, respawning));
         }
     }
@@ -936,6 +868,7 @@ fn claim_respawn_seed(
 
 fn update_rankings(
     board: Res<BoardGrid>,
+    territory_map: Res<TerritoryMap>,
     mut rankings: ResMut<Rankings>,
     mut events: ResMut<SimulationEvents>,
     query: Query<(&Competitor, &LifeState, &MatchStatistics)>,
@@ -943,17 +876,10 @@ fn update_rankings(
     let old: Vec<_> = rankings.entries.iter().map(|e| e.id).collect();
     let mut data: Vec<_> = query
         .iter()
-        .map(|(c, l, s)| {
-            (
-                c.id,
-                board.owner_counts[c.id.index()],
-                l.is_alive(),
-                s.kills,
-            )
-        })
+        .map(|(c, l, s)| (c.id, territory_map.area(c.id), l.is_alive(), s.kills))
         .collect();
     data.sort_by(|a, b| {
-        b.1.cmp(&a.1)
+        b.1.total_cmp(&a.1)
             .then_with(|| b.2.cmp(&a.2))
             .then_with(|| b.3.cmp(&a.3))
             .then_with(|| a.0.cmp(&b.0))
@@ -961,14 +887,15 @@ fn update_rankings(
     rankings.entries = data
         .into_iter()
         .enumerate()
-        .map(|(i, (id, cells, alive, kills))| RankingEntry {
+        .map(|(i, (id, area, alive, kills))| RankingEntry {
             id,
             rank: (i + 1) as u8,
-            territory_cells: cells,
-            territory_percent: if board.playable_cells == 0 {
+            territory_area: area,
+            territory_cells: board.owner_counts[id.index()],
+            territory_percent: if territory_map.arena_area <= 0.0 {
                 0.0
             } else {
-                cells as f32 * 100.0 / board.playable_cells as f32
+                area * 100.0 / territory_map.arena_area
             },
             alive,
             kills,

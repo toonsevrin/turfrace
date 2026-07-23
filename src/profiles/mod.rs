@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const PROFILE_SCHEMA_VERSION: u32 = 1;
+pub const PROFILE_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PROFILE_NAME_CHARS: usize = 16;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16,6 +16,7 @@ pub struct LifetimeStatistics {
     pub kills: u32,
     pub deaths: u32,
     pub total_captured_cells: u64,
+    pub total_captured_area: f32,
     pub best_territory_percent: f32,
     pub largest_capture_percent: f32,
     pub longest_trail_world_units: f32,
@@ -184,6 +185,10 @@ pub struct MatchStatistics {
     pub kills: u32,
     pub deaths: u32,
     pub captures_completed: u32,
+    pub area_captured_total: f32,
+    pub area_stolen_total: f32,
+    pub largest_capture_area: f32,
+    pub peak_territory_area: f32,
     pub cells_captured_total: u32,
     pub cells_stolen_total: u32,
     pub largest_capture_cells: u32,
@@ -197,7 +202,7 @@ pub fn apply_match_statistics(
     lifetime: &mut LifetimeStatistics,
     stats: &MatchStatistics,
     won: bool,
-    playable_cells: u32,
+    arena_area: f32,
 ) {
     lifetime.games_played = lifetime.games_played.saturating_add(1);
     lifetime.wins = lifetime.wins.saturating_add(u32::from(won));
@@ -206,14 +211,15 @@ pub fn apply_match_statistics(
     lifetime.total_captured_cells = lifetime
         .total_captured_cells
         .saturating_add(u64::from(stats.cells_captured_total));
-    if playable_cells > 0 {
-        let percent = |cells: u32| cells as f32 * 100.0 / playable_cells as f32;
+    lifetime.total_captured_area += stats.area_captured_total.max(0.0);
+    if arena_area > 0.0 {
+        let percent = |area: f32| area.max(0.0) * 100.0 / arena_area;
         lifetime.best_territory_percent = lifetime
             .best_territory_percent
-            .max(percent(stats.peak_territory_cells));
+            .max(percent(stats.peak_territory_area));
         lifetime.largest_capture_percent = lifetime
             .largest_capture_percent
-            .max(percent(stats.largest_capture_cells));
+            .max(percent(stats.largest_capture_area));
     }
     lifetime.longest_trail_world_units = lifetime
         .longest_trail_world_units
@@ -309,11 +315,13 @@ mod tests {
         let mut lifetime = LifetimeStatistics::default();
         let stats = MatchStatistics {
             kills: 3,
+            peak_territory_area: 25.0,
+            largest_capture_area: 10.0,
             peak_territory_cells: 25,
             largest_capture_cells: 10,
             ..default()
         };
-        apply_match_statistics(&mut lifetime, &stats, true, 100);
+        apply_match_statistics(&mut lifetime, &stats, true, 100.0);
         assert_eq!(lifetime.games_played, 1);
         assert_eq!(lifetime.wins, 1);
         assert_eq!(lifetime.best_territory_percent, 25.0);

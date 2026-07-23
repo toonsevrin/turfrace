@@ -5,26 +5,29 @@ use std::time::Duration;
 #[test]
 fn exact_victory_does_not_round() {
     let mut app = App::new();
+    let board = BoardGrid::generate(1, 2, &GameConfig::default());
+    let mut territory = TerritoryMap::from_board(&board);
     app.init_resource::<NextState<AppState>>()
-        .insert_resource(BoardGrid::generate(1, 2, &GameConfig::default()))
+        .insert_resource(board)
+        .insert_resource(territory.clone())
         .init_resource::<MatchSession>()
         .init_resource::<SimulationEvents>()
         .add_systems(Update, check_victory);
     {
-        let mut board = app.world_mut().resource_mut::<BoardGrid>();
-        let last = board.field_mask.iter().rposition(|inside| *inside).unwrap();
-        for index in 0..board.len() {
-            if board.field_mask[index] && index != last {
-                board.set_owner_index(index, CompetitorId(0).owner());
-            }
-        }
+        let sliver = crate::geometry::MultiPolygon::from_outer(&[
+            Vec2::new(-0.02, -100.0),
+            Vec2::new(0.02, -100.0),
+            Vec2::new(0.02, 100.0),
+            Vec2::new(-0.02, 100.0),
+        ]);
+        territory.territories[0] = territory.arena.difference(&sliver);
+        *app.world_mut().resource_mut::<TerritoryMap>() = territory.clone();
     }
     app.update();
     assert_eq!(app.world().resource::<MatchSession>().winner, None);
     {
-        let mut board = app.world_mut().resource_mut::<BoardGrid>();
-        let last = board.field_mask.iter().rposition(|inside| *inside).unwrap();
-        board.set_owner_index(last, CompetitorId(0).owner());
+        territory.territories[0] = territory.arena.clone();
+        *app.world_mut().resource_mut::<TerritoryMap>() = territory;
     }
     app.update();
     assert_eq!(
@@ -58,7 +61,9 @@ fn elimination_feed_is_bounded_and_keeps_the_newest_records() {
 #[test]
 fn rankings_follow_all_tie_breaks() {
     let mut app = App::new();
-    app.insert_resource(BoardGrid::generate(2, 2, &GameConfig::default()))
+    let board = BoardGrid::generate(2, 2, &GameConfig::default());
+    app.insert_resource(TerritoryMap::from_board(&board))
+        .insert_resource(board)
         .init_resource::<Rankings>()
         .init_resource::<SimulationEvents>()
         .add_systems(Update, update_rankings);
@@ -136,8 +141,11 @@ fn death_immediately_clears_territory_and_active_trail() {
     update_trail_raster(&mut board, &mut trail, config.trail_width);
 
     let mut app = App::new();
+    let mut territory = TerritoryMap::from_board(&board);
+    territory.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
     app.insert_resource(config)
         .insert_resource(board)
+        .insert_resource(territory)
         .insert_resource(PendingDeaths(vec![crate::combat::TrailCollisionIntent {
             victim: id,
             killer: None,
@@ -183,7 +191,11 @@ fn leaving_owned_seed_ends_protection_after_minimum_time() {
         &mut protection,
         id,
         Vec2::new(4.0, 0.0),
-        &board,
+        &{
+            let mut territory = TerritoryMap::from_board(&board);
+            territory.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
+            territory
+        },
         &config,
         0.02,
     );
@@ -197,9 +209,13 @@ fn respawn_seed_displacement_is_credited() {
     let victim = CompetitorId(0);
     let respawning = CompetitorId(1);
     board.claim_disk(Vec2::ZERO, 1.0, victim);
+    let mut territory = TerritoryMap::from_board(&board);
+    territory.clear_owner(victim);
+    territory.claim_disk(Vec2::ZERO, 1.0, victim);
     let mut credits = DisplacementCredits::default();
     claim_respawn_seed(
         &mut board,
+        &mut territory,
         Vec2::ZERO,
         config.starting_territory_radius,
         respawning,
@@ -233,6 +249,7 @@ fn cleanup_despawns_match_entities_but_preserves_setup() {
         replay_same_field: true,
     };
     app.insert_resource(BoardGrid::generate(11, 4, &GameConfig::default()))
+        .init_resource::<TerritoryMap>()
         .insert_resource(MatchSession::default())
         .insert_resource(Rankings::default())
         .insert_resource(SimulationEvents::default())

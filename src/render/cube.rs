@@ -7,6 +7,8 @@ use super::{
     territory::FIELD_SURFACE_HEIGHT,
 };
 
+const PLAYER_CLEARANCE: f32 = 0.035;
+
 /// Complete render snapshot for one competitor. Simulation may update this at fixed rate;
 /// presentation interpolates it in ordinary `Update`.
 #[derive(Component, Debug, Clone)]
@@ -275,7 +277,9 @@ fn spawn_proxy(
 }
 
 fn player_base_height(territory: &TerritoryVisual, position: Vec2) -> f32 {
-    territory.surface_height(position) - FIELD_SURFACE_HEIGHT
+    // Keep the black silhouette fully above the raised turf lip. Without a
+    // small clearance the territory top clips the lower outline faces.
+    territory.surface_height(position) - FIELD_SURFACE_HEIGHT + PLAYER_CLEARANCE
 }
 
 fn smooth_heading(current: Vec2, target: Vec2, alpha: f32) -> (Vec2, f32) {
@@ -326,7 +330,11 @@ mod tests {
         assert_eq!(
             player_base_height(&territory, Vec2::splat(0.5)),
             super::super::territory::TERRITORY_SURFACE_HEIGHT - FIELD_SURFACE_HEIGHT
+                + PLAYER_CLEARANCE
         );
-        assert_eq!(player_base_height(&territory, Vec2::splat(2.0)), 0.0);
+        assert_eq!(
+            player_base_height(&territory, Vec2::splat(2.0)),
+            PLAYER_CLEARANCE
+        );
     }
 }

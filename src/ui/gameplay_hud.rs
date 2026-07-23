@@ -20,7 +20,7 @@ type CompetitorHudQuery<'w, 's> = Query<
 pub(super) struct HudData<'w, 's> {
     state: Res<'w, State<AppState>>,
     session: Res<'w, MatchSession>,
-    board: Res<'w, BoardGrid>,
+    territory_map: Res<'w, crate::territory_map::TerritoryMap>,
     rankings: Res<'w, Rankings>,
     eliminations: Option<Res<'w, EliminationFeed>>,
     competitors: CompetitorHudQuery<'w, 's>,
@@ -54,7 +54,7 @@ type HudTextQuery<'w, 's> = Query<
 #[derive(SystemParam)]
 pub(super) struct ResultsResources<'w> {
     session: Res<'w, MatchSession>,
-    board: Res<'w, BoardGrid>,
+    territory_map: Res<'w, crate::territory_map::TerritoryMap>,
     setup: Res<'w, MatchSetup>,
     results: ResMut<'w, MatchResults>,
     profiles: ResMut<'w, ProfileStore>,
@@ -302,8 +302,8 @@ pub(super) fn update_gameplay_hud(
     let HudData {
         state,
         session,
-        board,
         rankings,
+        territory_map,
         eliminations,
         competitors,
     } = data;
@@ -384,15 +384,11 @@ pub(super) fn update_gameplay_hud(
                 );
             }
         } else if let Some(marker) = summary {
-            let Ok((competitor, territory, life, protection, trail)) = competitors.get(marker.0)
+            let Ok((competitor, _territory, life, protection, trail)) = competitors.get(marker.0)
             else {
                 continue;
             };
-            let percent = if board.playable_cells == 0 {
-                0.0
-            } else {
-                territory.current_cells as f32 * 100.0 / board.playable_cells as f32
-            };
+            let percent = territory_map.area_percent(competitor.id);
             let status = if !life.is_alive() {
                 "   RESPAWNING"
             } else if protection.active() {
@@ -476,7 +472,7 @@ pub(super) fn collect_match_results(
 ) {
     let ResultsResources {
         session,
-        board,
+        territory_map,
         setup,
         mut results,
         mut profiles,
@@ -488,17 +484,18 @@ pub(super) fn collect_match_results(
         .map(|(competitor, stats)| (competitor, *stats))
         .collect();
     rows.sort_by(|(a_competitor, a), (b_competitor, b)| {
-        b.peak_territory_cells
-            .cmp(&a.peak_territory_cells)
+        b.peak_territory_area
+            .total_cmp(&a.peak_territory_area)
+            .then_with(|| b.peak_territory_cells.cmp(&a.peak_territory_cells))
             .then_with(|| b.kills.cmp(&a.kills))
             .then_with(|| a.deaths.cmp(&b.deaths))
             .then_with(|| a_competitor.id.cmp(&b_competitor.id))
     });
-    let percent = |cells: u32| {
-        if board.playable_cells == 0 {
+    let percent = |area: f32| {
+        if territory_map.arena_area <= f32::EPSILON {
             0.0
         } else {
-            cells as f32 * 100.0 / board.playable_cells as f32
+            area.max(0.0) * 100.0 / territory_map.arena_area
         }
     };
     results.winner_name = session
@@ -518,10 +515,10 @@ pub(super) fn collect_match_results(
             name: competitor.display_name.clone(),
             color_id: competitor.color_id,
             placement: index as u8 + 1,
-            peak_percent: percent(stats.peak_territory_cells),
+            peak_percent: percent(stats.peak_territory_area),
             kills: stats.kills,
             deaths: stats.deaths,
-            largest_capture_percent: percent(stats.largest_capture_cells),
+            largest_capture_percent: percent(stats.largest_capture_area),
             total_cells_captured: stats.cells_captured_total,
             longest_trail: stats.longest_trail_length,
         })
@@ -548,6 +545,10 @@ pub(super) fn collect_match_results(
             continue;
         };
         let profile_stats = ProfileMatchStatistics {
+            area_captured_total: stats.area_captured_total,
+            area_stolen_total: stats.area_stolen_total,
+            largest_capture_area: stats.largest_capture_area,
+            peak_territory_area: stats.peak_territory_area,
             kills: stats.kills,
             deaths: stats.deaths,
             captures_completed: stats.captures_completed,
@@ -562,7 +563,7 @@ pub(super) fn collect_match_results(
             &mut profile.statistics,
             &profile_stats,
             session.winner == Some(competitor.id),
-            board.playable_cells,
+            territory_map.arena_area,
         );
     }
     persisted.0 = Some(session.seed);

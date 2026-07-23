@@ -18,7 +18,10 @@ use bevy::{
     render::view::screenshot::{Screenshot, save_to_disk},
     window::{PresentMode, WindowResolution},
 };
-use turfrace::render::{FieldVisual, RenderPlugin, TerritoryVisual};
+use turfrace::{
+    geometry::MultiPolygon,
+    render::{FieldVisual, RenderPlugin, TerritoryVisual},
+};
 
 #[derive(Resource)]
 struct ReviewState {
@@ -44,16 +47,21 @@ fn main() {
     };
     let shapes = predefined_shapes();
     let mut territory = TerritoryVisual {
-        width: 96,
-        height: 72,
-        cell_size: 0.5,
-        origin: Vec2::new(-24.0, -18.0),
-        owners: vec![0; 96 * 72],
+        arena: MultiPolygon::from_outer(&field.contour),
         ..default()
     };
     territory.color_ids[..3].copy_from_slice(&[0, 4, 2]);
     territory.pattern_ids[..3].copy_from_slice(&[2, 7, 4]);
-    rasterize_shapes(&mut territory, &shapes);
+    let mut claimed = MultiPolygon::empty();
+    for (owner, shape) in shapes.iter().enumerate() {
+        let mut polygon = MultiPolygon::from_outer(&shape.outer);
+        for hole in &shape.holes {
+            polygon = polygon.difference(&MultiPolygon::from_outer(hole));
+        }
+        polygon = polygon.difference(&claimed).intersection(&territory.arena);
+        claimed = claimed.union(&polygon);
+        territory.polygons[owner] = polygon;
+    }
     territory.revision = 1;
     App::new()
         .insert_resource(ClearColor(Color::srgb_u8(10, 18, 31)))
@@ -201,51 +209,4 @@ fn radial_shape_clockwise(center: Vec2, radius_x: f32, radius_y: f32, phase: f32
     let mut shape = radial_shape(center, radius_x, radius_y, phase);
     shape.reverse();
     shape
-}
-
-fn rasterize_shapes(territory: &mut TerritoryVisual, shapes: &[Shape; 3]) {
-    for index in 0..territory.owners.len() {
-        let cell = CellCoord::from_index(index, territory.width);
-        let point = territory.origin
-            + Vec2::new(cell.x as f32 + 0.5, cell.y as f32 + 0.5) * territory.cell_size;
-        for (owner, shape) in shapes.iter().enumerate() {
-            if point_in_polygon(point, &shape.outer)
-                && !shape.holes.iter().any(|hole| point_in_polygon(point, hole))
-            {
-                territory.owners[index] = (owner + 1) as u8;
-                break;
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct CellCoord {
-    x: u32,
-    y: u32,
-}
-
-impl CellCoord {
-    fn from_index(index: usize, width: u32) -> Self {
-        Self {
-            x: index as u32 % width,
-            y: index as u32 / width,
-        }
-    }
-}
-
-fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
-    polygon
-        .iter()
-        .copied()
-        .zip(polygon.iter().copied().cycle().skip(1))
-        .fold(false, |inside, (a, b)| {
-            if (a.y > point.y) != (b.y > point.y)
-                && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
-            {
-                !inside
-            } else {
-                inside
-            }
-        })
 }

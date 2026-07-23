@@ -31,7 +31,10 @@ extern "C" {
     fn turfrace_set_fullscreen(enabled: bool);
 }
 
-pub const PROFILES_KEY: &str = "turfrace.profiles.v1";
+// Territory statistics changed from cell counts to exact areas. Profiles are
+// intentionally reset for this pre-release schema instead of carrying stale
+// values through a migration; settings and lobby preferences remain intact.
+pub const PROFILES_KEY: &str = "turfrace.profiles.v2";
 pub const SETTINGS_KEY: &str = "turfrace.settings.v1";
 pub const LAST_LOBBY_KEY: &str = "turfrace.last_lobby.v1";
 
@@ -51,28 +54,32 @@ impl Plugin for WebPlugin {
     }
 }
 
+#[allow(unused_mut)]
 fn load_local_data(
-    profiles: ResMut<ProfileStore>,
+    mut profiles: ResMut<ProfileStore>,
     mut settings: ResMut<UserSettings>,
-    last_lobby: ResMut<LastLobbySettings>,
+    mut last_lobby: ResMut<LastLobbySettings>,
     mut status: ResMut<PersistenceStatus>,
 ) {
     #[cfg(target_arch = "wasm32")]
     {
-        let mut profiles = profiles;
-        let mut last_lobby = last_lobby;
+        let profiles = &mut *profiles;
+        let last_lobby = &mut *last_lobby;
         match browser_storage() {
             Ok(storage) => {
-                load_value(&storage, PROFILES_KEY, &mut *profiles, &mut status);
+                load_value(&storage, PROFILES_KEY, profiles, &mut status);
                 load_value(&storage, SETTINGS_KEY, &mut *settings, &mut status);
-                load_value(&storage, LAST_LOBBY_KEY, &mut *last_lobby, &mut status);
+                load_value(&storage, LAST_LOBBY_KEY, last_lobby, &mut status);
             }
             Err(error) => status.warning = Some(error),
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = (profiles, last_lobby);
+    let _ = &last_lobby;
     settings.normalize();
+    if profiles.schema_version != crate::profiles::PROFILE_SCHEMA_VERSION {
+        *profiles = ProfileStore::default();
+    }
     status.loaded = true;
     status.dirty = false;
 }
@@ -239,7 +246,8 @@ mod tests {
     #[test]
     fn persistence_keys_are_versioned_and_distinct() {
         let keys = [PROFILES_KEY, SETTINGS_KEY, LAST_LOBBY_KEY];
-        assert!(keys.iter().all(|key| key.ends_with(".v1")));
+        assert!(keys.iter().all(|key| key.rsplit_once('.').is_some()));
+        assert!(PROFILES_KEY.ends_with(".v2"));
         assert_ne!(keys[0], keys[1]);
         assert_ne!(keys[1], keys[2]);
     }

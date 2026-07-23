@@ -15,7 +15,6 @@ use bevy::{ecs::hierarchy::ChildSpawnerCommands, input::keyboard::KeyboardInput,
 use crate::{
     app_state::{AppState, SettingsReturn},
     audio::{AudioCue, PlayAudioCue},
-    board::BoardGrid,
     camera::PlayerCamera,
     input::{InputDeviceId, MenuAction, MenuInput},
     lobby::{Lobby, LobbyCommand, LobbyCommandMessage, MatchDisconnectNotice, MatchSetup},
