@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use bevy::{prelude::*, sprite::Text2dShadow};
 
 use crate::{
-    camera::PlayerCamera,
+    camera::{CameraFovPulse, CameraTuning, PlayerCamera},
+    match_game::KillProgress,
     palette::{PLAYER_COLORS, palette_color},
-    render::FlatMaterial,
+    render::{FlatMaterial, PresentationSettings},
 };
 
 #[derive(Message, Debug, Clone)]
@@ -22,6 +23,12 @@ pub enum VisualEffect {
         source: Entity,
         position: Vec2,
         color_id: u8,
+    },
+    Kill {
+        source: Entity,
+        position: Vec2,
+        color_id: u8,
+        progress: KillProgress,
     },
     Respawn {
         source: Entity,
@@ -103,6 +110,8 @@ fn spawn_effects(
     mut commands: Commands,
     mut events: MessageReader<VisualEffect>,
     assets: Res<EffectAssets>,
+    tuning: Res<CameraTuning>,
+    settings: Res<PresentationSettings>,
     cameras: Query<(Entity, &PlayerCamera)>,
 ) {
     let camera_by_subject: HashMap<Entity, Entity> =
@@ -115,6 +124,9 @@ fn spawn_effects(
             | VisualEffect::Death {
                 position, color_id, ..
             }
+            | VisualEffect::Kill {
+                position, color_id, ..
+            }
             | VisualEffect::Respawn {
                 position, color_id, ..
             }
@@ -124,6 +136,25 @@ fn spawn_effects(
         };
         let palette = color_id as usize % assets.materials.len();
         match *event {
+            VisualEffect::Kill {
+                source,
+                position,
+                color_id,
+                progress,
+            } => {
+                spawn_kill_effect(
+                    &mut commands,
+                    &assets,
+                    &tuning,
+                    &settings,
+                    &camera_by_subject,
+                    source,
+                    position,
+                    color_id,
+                    palette,
+                    progress,
+                );
+            }
             VisualEffect::Death { .. } | VisualEffect::TrailCut { .. } => {
                 for index in 0..14 {
                     let angle =
@@ -227,6 +258,124 @@ fn capture_popup_label(percent: f32) -> Option<String> {
     (percent.is_finite() && percent >= 0.5).then(|| format!("+{percent:.1}%"))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_kill_effect(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    tuning: &CameraTuning,
+    settings: &PresentationSettings,
+    camera_by_subject: &HashMap<Entity, Entity>,
+    source: Entity,
+    position: Vec2,
+    color_id: u8,
+    palette: usize,
+    progress: KillProgress,
+) {
+    let profile = kill_effect_profile(progress);
+    for index in 0..profile.particle_count {
+        let angle = index as f32 * std::f32::consts::TAU / profile.particle_count as f32;
+        let speed = profile.burst_speed * (0.82 + (index % 4) as f32 * 0.08);
+        commands.spawn((
+            Mesh3d(assets.fragment.clone()),
+            MeshMaterial3d(assets.materials[palette].clone()),
+            Transform::from_xyz(position.x, 0.72, position.y),
+            EffectVelocity(Vec3::new(
+                angle.cos() * speed,
+                2.45 + (index % 5) as f32 * 0.12,
+                angle.sin() * speed,
+            )),
+            EffectLifetime {
+                remaining: profile.particle_lifetime,
+                total: profile.particle_lifetime,
+            },
+        ));
+    }
+    commands.spawn((
+        Mesh3d(assets.ring.clone()),
+        MeshMaterial3d(assets.materials[palette].clone()),
+        ground_ring_transform(position).with_scale(Vec3::splat(profile.ring_scale)),
+        EffectLifetime {
+            remaining: profile.ring_lifetime,
+            total: profile.ring_lifetime,
+        },
+    ));
+    commands.spawn((
+        Text2d::new(kill_popup_label(progress)),
+        TextFont {
+            font: assets.popup_font.clone(),
+            font_size: FontSize::Px(25.0 + profile.tier as f32 * 3.0),
+            ..default()
+        },
+        TextColor(palette_color(color_id)),
+        Text2dShadow {
+            offset: Vec2::new(2.0, -2.0),
+            color: Color::srgba(0.01, 0.015, 0.025, 0.94),
+        },
+        Transform::from_xyz(position.x, 2.15, position.y),
+        RisingPopup,
+        EffectLifetime {
+            remaining: profile.popup_lifetime,
+            total: profile.popup_lifetime,
+        },
+    ));
+    if !settings.reduced_motion
+        && let Some(&camera) = camera_by_subject.get(&source)
+    {
+        commands.entity(camera).insert(CameraFovPulse {
+            remaining: profile.fov_pulse_duration,
+            total: profile.fov_pulse_duration,
+            amount_radians: tuning.kill_fov_pulse_radians * profile.fov_scale,
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct KillEffectProfile {
+    tier: u8,
+    particle_count: usize,
+    burst_speed: f32,
+    particle_lifetime: f32,
+    ring_scale: f32,
+    ring_lifetime: f32,
+    popup_lifetime: f32,
+    fov_pulse_duration: f32,
+    fov_scale: f32,
+}
+
+fn kill_effect_profile(progress: KillProgress) -> KillEffectProfile {
+    let tier = match progress.total {
+        0..=1 => 0,
+        2..=3 => 1,
+        4..=6 => 2,
+        _ => 3,
+    };
+    KillEffectProfile {
+        tier,
+        particle_count: 10 + tier as usize * 5 + progress.streak.min(4) as usize,
+        burst_speed: 2.7 + tier as f32 * 0.45,
+        particle_lifetime: 0.55 + tier as f32 * 0.06,
+        ring_scale: 1.0 + tier as f32 * 0.18,
+        ring_lifetime: 0.62 + tier as f32 * 0.12,
+        popup_lifetime: 0.9 + tier as f32 * 0.08,
+        fov_pulse_duration: 0.72 + tier as f32 * 0.05,
+        fov_scale: 1.0 + tier as f32 * 0.12,
+    }
+}
+
+fn kill_popup_label(progress: KillProgress) -> String {
+    let title = match progress.total {
+        0..=1 => "KILL",
+        2..=3 => "HOT",
+        4..=6 => "RAMPAGE",
+        _ => "UNSTOPPABLE",
+    };
+    if progress.streak >= 2 {
+        format!("{title} x{}", progress.streak)
+    } else {
+        format!("{title} +1")
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn update_effects(
     mut commands: Commands,
@@ -282,7 +431,11 @@ fn apply_camera_shake(
 mod tests {
     use bevy::prelude::{Vec2, Vec3};
 
-    use super::{capture_popup_label, ground_ring_transform};
+    use crate::match_game::KillProgress;
+
+    use super::{
+        capture_popup_label, ground_ring_transform, kill_effect_profile, kill_popup_label,
+    };
 
     #[test]
     fn capture_popup_suppresses_unreadable_micro_captures() {
@@ -296,5 +449,49 @@ mod tests {
         let transform = ground_ring_transform(Vec2::new(2.0, -3.0));
         assert!((transform.rotation * Vec3::Z).abs_diff_eq(Vec3::Y, 1.0e-6));
         assert_eq!(transform.translation, Vec3::new(2.0, 0.13, -3.0));
+    }
+
+    #[test]
+    fn kill_effects_escalate_without_unbounded_particle_growth() {
+        let starter = kill_effect_profile(KillProgress {
+            total: 1,
+            streak: 1,
+        });
+        let rampage = kill_effect_profile(KillProgress {
+            total: 5,
+            streak: 4,
+        });
+        let unstoppable = kill_effect_profile(KillProgress {
+            total: 100,
+            streak: 100,
+        });
+        assert!(rampage.particle_count > starter.particle_count);
+        assert!(unstoppable.particle_count <= 29);
+        assert!(unstoppable.ring_scale > rampage.ring_scale);
+    }
+
+    #[test]
+    fn kill_popup_exposes_streak_and_total_kill_tier() {
+        assert_eq!(
+            kill_popup_label(KillProgress {
+                total: 1,
+                streak: 1
+            }),
+            "KILL +1"
+        );
+        assert_eq!(
+            kill_popup_label(KillProgress {
+                total: 3,
+                streak: 3
+            }),
+            "HOT x3"
+        );
+        assert_eq!(
+            kill_popup_label(KillProgress {
+                total: 7,
+                streak: 1
+            }),
+            "UNSTOPPABLE +1"
+        );
     }
 }

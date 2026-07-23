@@ -10,6 +10,7 @@ type CompetitorHudQuery<'w, 's> = Query<
     (
         &'static Competitor,
         &'static TerritoryRecord,
+        &'static SimulationMatchStatistics,
         &'static LifeState,
         &'static SpawnProtection,
         Option<&'static ActiveTrail>,
@@ -19,6 +20,7 @@ type CompetitorHudQuery<'w, 's> = Query<
 #[derive(SystemParam)]
 pub(super) struct HudData<'w, 's> {
     state: Res<'w, State<AppState>>,
+    config: Res<'w, GameConfig>,
     session: Res<'w, MatchSession>,
     territory_map: Res<'w, crate::territory_map::TerritoryMap>,
     rankings: Res<'w, Rankings>,
@@ -53,6 +55,7 @@ type HudTextQuery<'w, 's> = Query<
 
 #[derive(SystemParam)]
 pub(super) struct ResultsResources<'w> {
+    config: Res<'w, GameConfig>,
     session: Res<'w, MatchSession>,
     territory_map: Res<'w, crate::territory_map::TerritoryMap>,
     setup: Res<'w, MatchSetup>,
@@ -210,7 +213,7 @@ pub(super) fn reconcile_human_huds(
             ))
             .with_children(|root| {
                 root.spawn((
-                    Text::new("PLAYER   0.0%"),
+                    Text::new("PLAYER  TURF 0.0/100%\nKILLS 0  STREAK 0  SPEED +0%"),
                     TextFont {
                         font: theme.body_font.clone(),
                         font_size: FontSize::Px(14.0 * text_scale),
@@ -301,6 +304,7 @@ pub(super) fn update_gameplay_hud(
 ) {
     let HudData {
         state,
+        config,
         session,
         rankings,
         territory_map,
@@ -327,7 +331,10 @@ pub(super) fn update_gameplay_hud(
             let _ = write!(
                 ranking_text,
                 "\n{}  {}{}   {:>4.1}%",
-                entry.rank, competitor.display_name, npc, entry.territory_percent
+                entry.rank,
+                competitor.display_name,
+                npc,
+                config.display_territory_percent(entry.territory_percent)
             );
         }
     }
@@ -384,25 +391,31 @@ pub(super) fn update_gameplay_hud(
                 );
             }
         } else if let Some(marker) = summary {
-            let Ok((competitor, _territory, life, protection, trail)) = competitors.get(marker.0)
+            let Ok((competitor, _territory, stats, life, protection, trail)) =
+                competitors.get(marker.0)
             else {
                 continue;
             };
-            let percent = territory_map.area_percent(competitor.id);
+            let percent =
+                config.display_territory_percent(territory_map.area_percent(competitor.id));
             let status = if !life.is_alive() {
-                "   RESPAWNING"
+                " DOWN"
             } else if protection.active() {
-                "   SHIELDED"
+                " SHIELD"
             } else if trail.is_some() {
-                "   DRAWING"
+                " DRAW"
             } else {
                 ""
             };
             update_text(
                 &mut text,
-                &format!(
-                    "{}   TURF {:.1}%{}",
-                    competitor.display_name, percent, status
+                &human_hud_summary(
+                    &competitor.display_name,
+                    percent,
+                    stats.kills,
+                    stats.kill_streak,
+                    (config.speed_multiplier_for_kills(stats.kills) - 1.0) * 100.0,
+                    status,
                 ),
             );
             if let Some(mut border) = border {
@@ -417,7 +430,7 @@ pub(super) fn update_gameplay_hud(
                 .map_or(0, |entry| entry.rank);
             update_text(&mut text, &format!("#{rank} OF {}", rankings.entries.len()));
         } else if let Some(marker) = respawn {
-            let Ok((_, _, life, protection, _)) = competitors.get(marker.0) else {
+            let Ok((_, _, _, life, protection, _)) = competitors.get(marker.0) else {
                 continue;
             };
             let next = if !life.is_alive() {
@@ -440,6 +453,20 @@ fn update_text(text: &mut Text, next: &str) {
         text.0.clear();
         text.0.push_str(next);
     }
+}
+
+fn human_hud_summary(
+    name: &str,
+    territory_percent: f32,
+    kills: u32,
+    streak: u32,
+    speed_bonus_percent: f32,
+    status: &str,
+) -> String {
+    format!(
+        "{name}{status}  TURF {territory_percent:.1}/100%\n\
+         KILLS {kills}  STREAK {streak}  SPEED +{speed_bonus_percent:.0}%"
+    )
 }
 
 fn elimination_line(
@@ -471,6 +498,7 @@ pub(super) fn collect_match_results(
     resources: ResultsResources,
 ) {
     let ResultsResources {
+        config,
         session,
         territory_map,
         setup,
@@ -495,7 +523,7 @@ pub(super) fn collect_match_results(
         if territory_map.arena_area <= f32::EPSILON {
             0.0
         } else {
-            area.max(0.0) * 100.0 / territory_map.arena_area
+            config.display_territory_percent(area.max(0.0) * 100.0 / territory_map.arena_area)
         }
     };
     results.winner_name = session
@@ -568,4 +596,19 @@ pub(super) fn collect_match_results(
     }
     persisted.0 = Some(session.seed);
     persistence.dirty = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_hud_summary;
+
+    #[test]
+    fn human_summary_keeps_status_out_of_the_dense_progression_line() {
+        let summary = human_hud_summary("KEY KID", 0.3, 1, 1, 3.5, " DOWN");
+        assert_eq!(
+            summary,
+            "KEY KID DOWN  TURF 0.3/100%\nKILLS 1  STREAK 1  SPEED +4%"
+        );
+        assert!(summary.lines().all(|line| line.chars().count() <= 30));
+    }
 }

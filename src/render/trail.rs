@@ -2,10 +2,11 @@ use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
 
-use super::{CompetitorVisual, materials::RenderAssets, territory::TerritoryVisual};
+use super::{CompetitorVisual, materials::RenderAssets, territory::TERRITORY_SURFACE_HEIGHT};
 
 const CAP_SEGMENTS: usize = 10;
 const TRAIL_CLEARANCE: f32 = 0.03;
+const TRAIL_TRAVERSAL_HEIGHT: f32 = TERRITORY_SURFACE_HEIGHT + TRAIL_CLEARANCE;
 
 pub const MAX_RENDER_TRAIL_POINTS: usize = 512;
 
@@ -40,7 +41,6 @@ pub(super) fn spawn_trail_pipeline_warmup(
         Mesh3d(meshes.add(ribbon_mesh(
             &[Vec2::new(-0.01, 0.0), Vec2::new(0.01, 0.0)],
             0.01,
-            &TerritoryVisual::default(),
         ))),
         MeshMaterial3d(assets.trail_materials[0].clone()),
         Transform::from_xyz(0.0, -1.0, 0.0),
@@ -59,7 +59,6 @@ pub(super) fn cleanup_trail_pipeline_warmup(
 pub(super) fn sync_trail_visuals(
     mut commands: Commands,
     assets: Option<Res<RenderAssets>>,
-    territory: Res<TerritoryVisual>,
     mut meshes: ResMut<Assets<Mesh>>,
     sources: Query<(Entity, &CompetitorVisual, &TrailVisual)>,
     mut proxies: Query<(Entity, &mut TrailProxy, &Mesh3d)>,
@@ -77,13 +76,13 @@ pub(super) fn sync_trail_visuals(
         rendered[visual.id as usize] = true;
         if proxy.revision != trail.revision {
             if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
-                *mesh = ribbon_mesh(&trail.points, 0.65, &territory);
+                *mesh = ribbon_mesh(&trail.points, 0.65);
             }
             proxy.revision = trail.revision;
         }
     }
     for (source, visual, trail) in &sources {
-        if rendered[visual.id as usize] || trail.points.len() < 2 {
+        if rendered[visual.id as usize] || !trail_has_ribbon_geometry(trail) {
             continue;
         }
         let palette = visual.color_id as usize % assets.trail_materials.len();
@@ -93,14 +92,18 @@ pub(super) fn sync_trail_visuals(
                 source,
                 revision: trail.revision,
             },
-            Mesh3d(meshes.add(ribbon_mesh(&trail.points, 0.65, &territory))),
+            Mesh3d(meshes.add(ribbon_mesh(&trail.points, 0.65))),
             MeshMaterial3d(assets.trail_materials[palette].clone()),
             Transform::default(),
         ));
     }
 }
 
-fn ribbon_mesh(points: &[Vec2], width: f32, territory: &TerritoryVisual) -> Mesh {
+fn trail_has_ribbon_geometry(trail: &TrailVisual) -> bool {
+    trail.points.len() >= 2
+}
+
+fn ribbon_mesh(points: &[Vec2], width: f32) -> Mesh {
     let mut positions = Vec::with_capacity(points.len() * 2);
     let mut normals = Vec::with_capacity(points.len() * 2);
     let mut uvs = Vec::with_capacity(points.len() * 2);
@@ -125,9 +128,16 @@ fn ribbon_mesh(points: &[Vec2], width: f32, territory: &TerritoryVisual) -> Mesh
         let join = (normal_a + normal_b).normalize_or(normal_b);
         let denominator = join.dot(normal_b).abs().max(0.45);
         let offset = join * (width * 0.5 / denominator).min(width * 0.75);
-        let height = surface_height(territory, point);
-        positions.push([point.x + offset.x, height, point.y + offset.y]);
-        positions.push([point.x - offset.x, height, point.y - offset.y]);
+        positions.push([
+            point.x + offset.x,
+            TRAIL_TRAVERSAL_HEIGHT,
+            point.y + offset.y,
+        ]);
+        positions.push([
+            point.x - offset.x,
+            TRAIL_TRAVERSAL_HEIGHT,
+            point.y - offset.y,
+        ]);
         normals.extend_from_slice(&[[0.0, 1.0, 0.0]; 2]);
         uvs.push([distance, 0.0]);
         uvs.push([distance, 1.0]);
@@ -136,19 +146,11 @@ fn ribbon_mesh(points: &[Vec2], width: f32, territory: &TerritoryVisual) -> Mesh
             indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
         }
     }
-    // Round the two free ends instead of leaving a conspicuous square cutoff.
-    // This is render-only geometry; the authoritative trail remains untouched.
+    // The anchored end stays flush with the ownership boundary so the ribbon
+    // reads as emerging from the turf. Only the exposed head is rounded behind
+    // the cube. This is render-only geometry; the authoritative trail remains
+    // untouched.
     let radius = width * 0.5;
-    append_round_cap(
-        &mut positions,
-        &mut normals,
-        &mut uvs,
-        &mut indices,
-        points[0],
-        radius,
-        surface_height(territory, points[0]),
-        0.0,
-    );
     append_round_cap(
         &mut positions,
         &mut normals,
@@ -156,7 +158,7 @@ fn ribbon_mesh(points: &[Vec2], width: f32, territory: &TerritoryVisual) -> Mesh
         &mut indices,
         *points.last().unwrap_or(&points[0]),
         radius,
-        surface_height(territory, *points.last().unwrap_or(&points[0])),
+        TRAIL_TRAVERSAL_HEIGHT,
         distance,
     );
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
@@ -199,30 +201,30 @@ fn append_round_cap(
     }
 }
 
-fn surface_height(territory: &TerritoryVisual, point: Vec2) -> f32 {
-    territory.surface_height(point) + TRAIL_CLEARANCE
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn ribbon_uses_two_vertices_per_sample() {
-        let mesh = ribbon_mesh(
-            &[Vec2::ZERO, Vec2::X, Vec2::new(1.0, 1.0)],
-            0.65,
-            &TerritoryVisual::default(),
-        );
-        assert_eq!(mesh.count_vertices(), 28);
-        assert_eq!(mesh.indices().unwrap().len(), 72);
+        let mesh = ribbon_mesh(&[Vec2::ZERO, Vec2::X, Vec2::new(1.0, 1.0)], 0.65);
+        assert_eq!(mesh.count_vertices(), 17);
+        assert_eq!(mesh.indices().unwrap().len(), 42);
     }
+
+    #[test]
+    fn anchored_end_does_not_bulge_behind_the_boundary() {
+        let mesh = ribbon_mesh(&[Vec2::ZERO, Vec2::X], 0.65);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert!(positions.iter().all(|position| position[0] >= 0.0));
+    }
+
     #[test]
     fn acute_join_stays_bounded() {
-        let mesh = ribbon_mesh(
-            &[Vec2::ZERO, Vec2::X, Vec2::new(0.1, 0.01)],
-            0.65,
-            &TerritoryVisual::default(),
-        );
+        let mesh = ribbon_mesh(&[Vec2::ZERO, Vec2::X, Vec2::new(0.1, 0.01)], 0.65);
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .unwrap()
@@ -236,31 +238,37 @@ mod tests {
     }
 
     #[test]
-    fn ribbon_follows_claimed_surface_height() {
-        let territory = TerritoryVisual {
-            width: 2,
-            height: 1,
-            cell_size: 1.0,
-            owners: vec![0, 1],
-            ..default()
-        };
-        let mesh = ribbon_mesh(
-            &[Vec2::new(0.5, 0.5), Vec2::new(1.5, 0.5)],
-            0.65,
-            &territory,
-        );
+    fn ribbon_stays_flat_on_the_traversal_plane() {
+        let mesh = ribbon_mesh(&[Vec2::new(0.5, 0.5), Vec2::new(1.5, 0.5)], 0.65);
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .unwrap()
             .as_float3()
             .unwrap();
-        assert_eq!(
-            positions[0][1],
-            super::super::territory::FIELD_SURFACE_HEIGHT + TRAIL_CLEARANCE
+        assert!(
+            positions
+                .iter()
+                .all(|position| position[1] == TRAIL_TRAVERSAL_HEIGHT)
         );
-        assert_eq!(
-            positions[2][1],
-            super::super::territory::TERRITORY_SURFACE_HEIGHT + TRAIL_CLEARANCE
+    }
+
+    #[test]
+    fn unsampled_trail_head_is_renderable_from_the_boundary() {
+        let mut active = crate::trail::ActiveTrail::new(
+            crate::ids::CompetitorId(0),
+            crate::board::Cell::new(0, 0),
+            Vec2::ZERO,
+            Vec2::X,
         );
+        active.head = Vec2::new(0.1, 0.0);
+        let visual = TrailVisual {
+            points: active.render_points(MAX_RENDER_TRAIL_POINTS),
+            source_samples: active.points.len(),
+            ..default()
+        };
+
+        assert_eq!(visual.source_samples, 1);
+        assert_eq!(visual.points, vec![Vec2::ZERO, Vec2::new(0.1, 0.0)]);
+        assert!(trail_has_ribbon_geometry(&visual));
     }
 }

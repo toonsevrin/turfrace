@@ -332,17 +332,25 @@ fn move_competitors(
         &mut CompetitorMotion,
         &SteeringIntent,
         &LifeState,
+        &MatchStatistics,
         &mut SpawnProtection,
     )>,
 ) {
     let dt = time.delta_secs();
     session.elapsed_seconds += dt;
-    for (competitor, mut motion, intent, life, mut protection) in &mut query {
+    for (competitor, mut motion, intent, life, stats, mut protection) in &mut query {
         if !life.is_alive() {
             continue;
         }
         let desired = (intent.magnitude > 0.0).then_some(intent.desired_direction);
-        advance_motion(&mut motion, desired, &territory, &config, dt);
+        advance_motion(
+            &mut motion,
+            desired,
+            &territory,
+            &config,
+            config.player_speed_for_kills(stats.kills),
+            dt,
+        );
         advance_spawn_protection(
             &mut protection,
             competitor.id,
@@ -467,15 +475,8 @@ fn resolve_deaths(
     )>,
 ) {
     let intents = std::mem::take(&mut pending.0);
-    for intent in &intents {
-        if let Some(killer) = intent.killer
-            && let Some((_, _, _, mut stats, _)) =
-                query.iter_mut().find(|(_, c, _, _, _)| c.id == killer)
-        {
-            stats.kills += 1;
-        }
-    }
     for intent in intents {
+        let mut eliminated = false;
         if let Some((entity, competitor, mut life, mut stats, trail)) = query
             .iter_mut()
             .find(|(_, c, _, _, _)| c.id == intent.victim)
@@ -491,6 +492,7 @@ fn resolve_deaths(
                 territory.rebuild_sample_cache(&mut board);
             }
             stats.deaths += 1;
+            stats.reset_kill_streak();
             life.status = LifeStatus::Respawning;
             life.respawn_remaining = config.respawn_delay(stats.deaths);
             eliminations.events.0.push(SimulationEvent::Death {
@@ -518,6 +520,14 @@ fn resolve_deaths(
                     match_time,
                 });
             }
+            eliminated = true;
+        }
+        if eliminated
+            && let Some(killer) = intent.killer
+            && let Some((_, _, _, mut stats, _)) =
+                query.iter_mut().find(|(_, c, _, _, _)| c.id == killer)
+        {
+            credit_kill(killer, &mut stats, &mut eliminations.events);
         }
     }
 }
@@ -535,6 +545,7 @@ fn resolve_territory_consequences(
 ) {
     let credits = std::mem::take(&mut displaced.0);
     for (victim, killer) in credits {
+        let mut eliminated = false;
         if let Some((entity, _, _, mut life, _, _, mut stats, _, trail)) = query
             .iter_mut()
             .find(|(_, c, _, _, _, _, _, _, _)| c.id == victim)
@@ -548,6 +559,7 @@ fn resolve_territory_consequences(
                 territory_map.rebuild_sample_cache(&mut board);
             }
             stats.deaths += 1;
+            stats.reset_kill_streak();
             life.status = LifeStatus::Respawning;
             life.respawn_remaining = config.respawn_delay(stats.deaths);
             eliminations.events.0.push(SimulationEvent::Death {
@@ -567,12 +579,14 @@ fn resolve_territory_consequences(
                     match_time,
                 });
             }
+            eliminated = true;
         }
-        if let Some((_, _, _, _, _, _, mut stats, _, _)) = query
-            .iter_mut()
-            .find(|(_, c, _, _, _, _, _, _, _)| c.id == killer)
+        if eliminated
+            && let Some((_, _, _, _, _, _, mut stats, _, _)) = query
+                .iter_mut()
+                .find(|(_, c, _, _, _, _, _, _, _)| c.id == killer)
         {
-            stats.kills += 1;
+            credit_kill(killer, &mut stats, &mut eliminations.events);
         }
     }
     for (entity, c, m, life, protection, mut territory, mut stats, last_owned, trail) in &mut query
@@ -604,23 +618,30 @@ fn resolve_territory_consequences(
     }
 }
 
+fn credit_kill(killer: CompetitorId, stats: &mut MatchStatistics, events: &mut SimulationEvents) {
+    let progress = stats.record_kill();
+    events.0.push(SimulationEvent::Kill { killer, progress });
+}
+
 fn check_victory(
+    config: Res<GameConfig>,
     territory: Res<TerritoryMap>,
     mut session: ResMut<MatchSession>,
     mut events: ResMut<SimulationEvents>,
     mut next: ResMut<NextState<AppState>>,
 ) {
+    if session.phase == MatchPhase::Finished {
+        return;
+    }
     let winner = territory
         .territories
         .iter()
         .enumerate()
-        .find(|(index, shape)| {
-            shape.area_scaled() == territory.arena.area_scaled()
-                && territory
-                    .territories
-                    .iter()
-                    .enumerate()
-                    .all(|(other, candidate)| other == *index || candidate.is_empty())
+        .find(|(index, _)| {
+            territory.reaches_victory_threshold(
+                CompetitorId(*index as u8),
+                config.victory_territory_percent,
+            )
         })
         .map(|(index, _)| CompetitorId(index as u8));
     if let Some(winner) = winner {

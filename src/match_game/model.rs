@@ -62,6 +62,8 @@ pub struct TerritoryRecord {
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct MatchStatistics {
     pub kills: u32,
+    pub kill_streak: u32,
+    pub best_kill_streak: u32,
     pub deaths: u32,
     pub captures_completed: u32,
     pub area_captured_total: f32,
@@ -74,6 +76,28 @@ pub struct MatchStatistics {
     pub peak_territory_cells: u32,
     pub longest_trail_length: f32,
     pub time_alive_seconds: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KillProgress {
+    pub total: u32,
+    pub streak: u32,
+}
+
+impl MatchStatistics {
+    pub fn record_kill(&mut self) -> KillProgress {
+        self.kills = self.kills.saturating_add(1);
+        self.kill_streak = self.kill_streak.saturating_add(1);
+        self.best_kill_streak = self.best_kill_streak.max(self.kill_streak);
+        KillProgress {
+            total: self.kills,
+            streak: self.kill_streak,
+        }
+    }
+
+    pub fn reset_kill_streak(&mut self) {
+        self.kill_streak = 0;
+    }
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -156,6 +180,10 @@ pub enum SimulationEvent {
         victim: CompetitorId,
         killer: Option<CompetitorId>,
         cause: DeathCause,
+    },
+    Kill {
+        killer: CompetitorId,
+        progress: KillProgress,
     },
     Respawn {
         player: CompetitorId,

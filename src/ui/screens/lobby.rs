@@ -42,12 +42,12 @@ fn spawn_card_stepper(
                 Text::new(label),
                 TextFont {
                     font: theme.body_font.clone(),
-                    font_size: FontSize::Px(11.0),
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(MUTED),
                 Node {
-                    width: px(64),
+                    width: px(76),
                     ..default()
                 },
             ));
@@ -376,7 +376,10 @@ pub(crate) fn lobby_fingerprint(lobby: &Lobby, compact: bool) -> String {
 }
 
 const fn is_compact_lobby(width: f32) -> bool {
-    width < 1100.0
+    // Two cards still fit comfortably at the 960px browser stress width. A
+    // premature one-column switch made the primary start/back controls fall
+    // below the viewport, so reserve stacking for genuinely narrow canvases.
+    width < 840.0
 }
 
 #[derive(Component)]
@@ -457,8 +460,9 @@ mod tests {
     }
 
     #[test]
-    fn lobby_uses_one_column_at_browser_stress_widths() {
-        assert!(is_compact_lobby(960.0));
+    fn lobby_keeps_controls_visible_at_browser_stress_widths() {
+        assert!(is_compact_lobby(800.0));
+        assert!(!is_compact_lobby(960.0));
         assert!(!is_compact_lobby(1280.0));
     }
 

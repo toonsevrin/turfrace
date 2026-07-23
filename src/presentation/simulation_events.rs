@@ -5,7 +5,8 @@ use crate::{
     effects::VisualEffect,
     ids::CompetitorId,
     match_game::{
-        Competitor, CompetitorKind, DeathCause, Rankings, SimulationEvent, SimulationEvents,
+        Competitor, CompetitorKind, DeathCause, KillProgress, Rankings, SimulationEvent,
+        SimulationEvents,
     },
     movement::CompetitorMotion,
     territory_map::TerritoryMap,
@@ -83,6 +84,21 @@ pub(super) fn bridge_simulation_events(
                     });
                 }
             }
+            SimulationEvent::Kill { killer, progress } => {
+                if let Some((entity, competitor, motion)) = lookup(&competitors, killer) {
+                    visual_writer.write(VisualEffect::Kill {
+                        source: entity,
+                        position: motion.position,
+                        color_id: competitor.color_id,
+                        progress,
+                    });
+                    audio_writer.write(PlayAudioCue {
+                        cue: AudioCue::Kill,
+                        human_involved: competitor.kind == CompetitorKind::Human,
+                        intensity: kill_audio_intensity(progress),
+                    });
+                }
+            }
             SimulationEvent::Respawn { player } => {
                 if let Some((entity, competitor, motion)) = lookup(&competitors, player) {
                     visual_writer.write(VisualEffect::Respawn {
@@ -131,4 +147,27 @@ fn lookup<'a>(
     competitors
         .iter()
         .find(|(_, competitor, _)| competitor.id == id)
+}
+
+fn kill_audio_intensity(progress: KillProgress) -> f32 {
+    (progress.streak.saturating_add(progress.total) as f32 / 10.0).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::match_game::KillProgress;
+
+    use super::kill_audio_intensity;
+
+    #[test]
+    fn saturated_kill_counts_keep_audio_intensity_finite() {
+        assert_eq!(
+            kill_audio_intensity(KillProgress {
+                total: u32::MAX,
+                streak: u32::MAX,
+            }),
+            1.0
+        );
+        assert_eq!(kill_audio_intensity(KillProgress::default()), 0.0);
+    }
 }

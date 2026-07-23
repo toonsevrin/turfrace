@@ -3,36 +3,76 @@ use crate::{lobby::MatchSetup, match_game::lifecycle::start_match};
 use std::time::Duration;
 
 #[test]
-fn exact_victory_does_not_round() {
+fn victory_uses_exact_area_threshold_and_allows_remaining_territory() {
     let mut app = App::new();
     let board = BoardGrid::generate(1, 2, &GameConfig::default());
     let mut territory = TerritoryMap::from_board(&board);
+    let arena = territory.arena.clone();
     app.init_resource::<NextState<AppState>>()
+        .insert_resource(GameConfig::default())
         .insert_resource(board)
         .insert_resource(territory.clone())
         .init_resource::<MatchSession>()
         .init_resource::<SimulationEvents>()
         .add_systems(Update, check_victory);
-    {
-        let sliver = crate::geometry::MultiPolygon::from_outer(&[
-            Vec2::new(-0.02, -100.0),
-            Vec2::new(0.02, -100.0),
-            Vec2::new(0.02, 100.0),
-            Vec2::new(-0.02, 100.0),
-        ]);
-        territory.territories[0] = territory.arena.difference(&sliver);
-        *app.world_mut().resource_mut::<TerritoryMap>() = territory.clone();
-    }
+
+    let (min, max) = territory.arena.bounds().expect("generated arena bounds");
+    let right_strip = |fraction: f32| {
+        let cut_x = min.world().x + (max.world().x - min.world().x) * fraction;
+        crate::geometry::MultiPolygon::from_outer(&[
+            Vec2::new(cut_x, min.world().y - 1.0),
+            Vec2::new(max.world().x + 1.0, min.world().y - 1.0),
+            Vec2::new(max.world().x + 1.0, max.world().y + 1.0),
+            Vec2::new(cut_x, max.world().y + 1.0),
+        ])
+        .intersection(&arena)
+    };
+
+    territory.territories[0] = territory.arena.difference(&right_strip(0.25));
+    *app.world_mut().resource_mut::<TerritoryMap>() = territory.clone();
     app.update();
     assert_eq!(app.world().resource::<MatchSession>().winner, None);
-    {
-        territory.territories[0] = territory.arena.clone();
-        *app.world_mut().resource_mut::<TerritoryMap>() = territory;
-    }
+
+    let remaining = right_strip(0.95);
+    territory.territories[0] = territory.arena.difference(&remaining);
+    territory.territories[1] = remaining;
+    *app.world_mut().resource_mut::<TerritoryMap>() = territory;
     app.update();
     assert_eq!(
         app.world().resource::<MatchSession>().winner,
         Some(CompetitorId(0))
+    );
+}
+
+#[test]
+fn victory_emits_once_when_other_territory_remains() {
+    let mut app = App::new();
+    let board = BoardGrid::generate(1, 2, &GameConfig::default());
+    let mut territory = TerritoryMap::from_board(&board);
+    let (min, max) = territory.arena.bounds().expect("generated arena bounds");
+    let cut_x = min.world().x + (max.world().x - min.world().x) * 0.95;
+    let remaining = crate::geometry::MultiPolygon::from_outer(&[
+        Vec2::new(cut_x, min.world().y - 1.0),
+        Vec2::new(max.world().x + 1.0, min.world().y - 1.0),
+        Vec2::new(max.world().x + 1.0, max.world().y + 1.0),
+        Vec2::new(cut_x, max.world().y + 1.0),
+    ])
+    .intersection(&territory.arena);
+    territory.territories[0] = territory.arena.difference(&remaining);
+    territory.territories[1] = remaining;
+    app.init_resource::<NextState<AppState>>()
+        .insert_resource(GameConfig::default())
+        .insert_resource(board)
+        .insert_resource(territory)
+        .init_resource::<MatchSession>()
+        .init_resource::<SimulationEvents>()
+        .add_systems(Update, check_victory);
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world().resource::<SimulationEvents>().0.len(),
+        1,
+        "a finished match must not emit duplicate victory events"
     );
 }
 
@@ -56,6 +96,36 @@ fn elimination_feed_is_bounded_and_keeps_the_newest_records() {
         feed.0.last().map(|entry| entry.victim),
         Some(CompetitorId(6))
     );
+}
+
+#[test]
+fn kill_streak_grows_with_kills_and_resets_on_death() {
+    let mut stats = MatchStatistics::default();
+    assert_eq!(
+        stats.record_kill(),
+        KillProgress {
+            total: 1,
+            streak: 1
+        }
+    );
+    assert_eq!(
+        stats.record_kill(),
+        KillProgress {
+            total: 2,
+            streak: 2
+        }
+    );
+    assert_eq!(stats.best_kill_streak, 2);
+    stats.reset_kill_streak();
+    assert_eq!(stats.kill_streak, 0);
+    assert_eq!(
+        stats.record_kill(),
+        KillProgress {
+            total: 3,
+            streak: 1
+        }
+    );
+    assert_eq!(stats.best_kill_streak, 2);
 }
 
 #[test]
@@ -175,6 +245,93 @@ fn death_immediately_clears_territory_and_active_trail() {
     assert!(world.entity(entity).get::<ActiveTrail>().is_none());
     assert_eq!(world.resource::<BoardGrid>().owner_counts[id.index()], 0);
     assert!(world.resource::<BoardGrid>().verify_counts());
+}
+
+#[test]
+fn credited_kill_updates_streak_and_emits_presentation_event() {
+    let config = GameConfig::default();
+    let board = BoardGrid::generate(23, 2, &config);
+    let territory = TerritoryMap::from_board(&board);
+    let mut app = App::new();
+    app.insert_resource(config)
+        .insert_resource(board)
+        .insert_resource(territory)
+        .insert_resource(PendingDeaths(vec![crate::combat::TrailCollisionIntent {
+            victim: CompetitorId(0),
+            killer: Some(CompetitorId(1)),
+            impact_time: 0.25,
+        }]))
+        .init_resource::<SimulationEvents>()
+        .add_systems(Update, resolve_deaths);
+    for id in [0, 1] {
+        app.world_mut().spawn((
+            Competitor {
+                id: CompetitorId(id),
+                display_name: format!("Player {id}"),
+                kind: CompetitorKind::Npc,
+                color_id: id,
+                pattern_id: id,
+            },
+            LifeState::alive(),
+            MatchStatistics {
+                kill_streak: (id == 0) as u32 * 2,
+                ..default()
+            },
+        ));
+    }
+    app.update();
+
+    let mut query = app
+        .world_mut()
+        .query::<(&Competitor, &MatchStatistics, &LifeState)>();
+    let world = app.world();
+    let killer = query
+        .iter(world)
+        .find(|(competitor, _, _)| competitor.id == CompetitorId(1))
+        .unwrap();
+    let victim = query
+        .iter(world)
+        .find(|(competitor, _, _)| competitor.id == CompetitorId(0))
+        .unwrap();
+    assert_eq!(killer.1.kills, 1);
+    assert_eq!(killer.1.kill_streak, 1);
+    assert_eq!(victim.1.kill_streak, 0);
+    assert!(!victim.2.is_alive());
+    assert!(
+        app.world()
+            .resource::<SimulationEvents>()
+            .0
+            .iter()
+            .any(|event| matches!(
+                event,
+                SimulationEvent::Kill {
+                    killer: CompetitorId(1),
+                    progress: KillProgress {
+                        total: 1,
+                        streak: 1
+                    }
+                }
+            ))
+    );
+
+    app.world_mut()
+        .resource_mut::<PendingDeaths>()
+        .0
+        .push(crate::combat::TrailCollisionIntent {
+            victim: CompetitorId(0),
+            killer: Some(CompetitorId(1)),
+            impact_time: 0.25,
+        });
+    app.update();
+    let mut query = app.world_mut().query::<(&Competitor, &MatchStatistics)>();
+    let killer = query
+        .iter(app.world())
+        .find(|(competitor, _)| competitor.id == CompetitorId(1))
+        .unwrap();
+    assert_eq!(
+        killer.1.kills, 1,
+        "an already-dead victim cannot grant another kill"
+    );
 }
 
 #[test]

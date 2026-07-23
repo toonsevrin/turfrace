@@ -16,6 +16,7 @@ use crate::{
     app_state::{AppState, SettingsReturn},
     audio::{AudioCue, PlayAudioCue},
     camera::PlayerCamera,
+    config::GameConfig,
     input::{InputDeviceId, MenuAction, MenuInput},
     lobby::{Lobby, LobbyCommand, LobbyCommandMessage, MatchDisconnectNotice, MatchSetup},
     match_game::{
@@ -233,6 +234,7 @@ impl Plugin for UiPlugin {
             .add_systems(
                 Update,
                 (
+                    update_ui_scale,
                     animate_background,
                     button_interactions,
                     controller_navigation,
@@ -255,6 +257,21 @@ impl Plugin for UiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_scale_uses_reference_resolution_without_non_uniform_stretching() {
+        assert_eq!(ui_scale_for_viewport(1280.0, 720.0), 1.0);
+        assert_eq!(ui_scale_for_viewport(1920.0, 1080.0), 1.5);
+        assert_eq!(ui_scale_for_viewport(3840.0, 2160.0), 3.0);
+        assert_eq!(ui_scale_for_viewport(3440.0, 1440.0), 2.0);
+    }
+
+    #[test]
+    fn ui_scale_stays_readable_at_small_stress_viewports() {
+        assert_eq!(ui_scale_for_viewport(0.0, 720.0), 1.0);
+        assert_eq!(ui_scale_for_viewport(960.0, 600.0), 1.0);
+        assert_eq!(ui_scale_for_viewport(800.0, 450.0), 1.0);
+    }
 
     #[test]
     fn settings_values_are_clamped_by_dispatch_contract() {

@@ -12,6 +12,8 @@ pub struct ViewportSubject {
     pub trail_length: f32,
     /// Normalized 0..1 danger/edge pressure used for subtle awareness zoom.
     pub awareness: f32,
+    pub kill_count: u32,
+    pub kill_streak: u32,
     pub alive: bool,
 }
 
@@ -31,6 +33,10 @@ pub struct CameraTuning {
     pub follow_half_life: f32,
     pub zoom_half_life: f32,
     pub maximum_zoom_out: f32,
+    pub kill_fov_per_kill_radians: f32,
+    pub maximum_kill_fov_bonus_radians: f32,
+    pub kill_streak_fov_per_kill_radians: f32,
+    pub kill_fov_pulse_radians: f32,
 }
 
 impl Default for CameraTuning {
@@ -45,8 +51,20 @@ impl Default for CameraTuning {
             follow_half_life: 0.12,
             zoom_half_life: 0.35,
             maximum_zoom_out: 0.25,
+            kill_fov_per_kill_radians: 1.35_f32.to_radians(),
+            maximum_kill_fov_bonus_radians: 9.0_f32.to_radians(),
+            kill_streak_fov_per_kill_radians: 0.55_f32.to_radians(),
+            kill_fov_pulse_radians: 3.0_f32.to_radians(),
         }
     }
+}
+
+/// A short non-authoritative FOV punch triggered by a credited kill.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CameraFovPulse {
+    pub remaining: f32,
+    pub total: f32,
+    pub amount_radians: f32,
 }
 
 #[derive(Component)]
@@ -135,16 +153,24 @@ fn viewport_accent(color_id: u8) -> Color {
     crate::palette::palette_color(color_id).with_alpha(0.92)
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn follow_subjects(
     time: Res<Time>,
     tuning: Res<CameraTuning>,
     subjects: Query<&ViewportSubject>,
-    mut cameras: Query<(&PlayerCamera, &Camera, &mut CameraRigState, &mut Transform)>,
+    mut cameras: Query<(
+        &PlayerCamera,
+        &Camera,
+        &mut CameraRigState,
+        &mut Transform,
+        &mut Projection,
+        Option<&mut CameraFovPulse>,
+    )>,
 ) {
     let dt = time.delta_secs().min(0.1);
     let follow_alpha = 1.0 - 2.0_f32.powf(-dt / tuning.follow_half_life.max(0.001));
     let zoom_alpha = 1.0 - 2.0_f32.powf(-dt / tuning.zoom_half_life.max(0.001));
-    for (player_camera, camera, mut rig, mut transform) in &mut cameras {
+    for (player_camera, camera, mut rig, mut transform, mut projection, pulse) in &mut cameras {
         let Ok(subject) = subjects.get(player_camera.subject) else {
             continue;
         };
@@ -173,11 +199,27 @@ pub(super) fn follow_subjects(
         let offset = Vec3::new(0.0, tuning.height, tuning.trailing_offset) * scale;
         transform.translation = rig.focus + offset;
         transform.look_at(rig.focus, Vec3::Y);
+
+        let persistent_fov = kill_fov_bonus(subject.kill_count, &tuning);
+        let streak_fov =
+            subject.kill_streak.min(4) as f32 * tuning.kill_streak_fov_per_kill_radians;
+        let pulse_fov = pulse.map_or(0.0, |mut pulse| {
+            pulse.remaining = (pulse.remaining - dt).max(0.0);
+            let progress = 1.0 - pulse.remaining / pulse.total.max(0.001);
+            pulse.amount_radians * (progress * std::f32::consts::PI).sin().max(0.0)
+        });
+        if let Projection::Perspective(perspective) = projection.as_mut() {
+            perspective.fov = tuning.vertical_fov_radians + persistent_fov + streak_fov + pulse_fov;
+        }
     }
 }
 
 fn framing_compensation(aspect: f32) -> f32 {
     ((16.0 / 9.0) / aspect.max(0.01)).max(1.0).powf(0.44)
+}
+
+fn kill_fov_bonus(kills: u32, tuning: &CameraTuning) -> f32 {
+    (kills as f32 * tuning.kill_fov_per_kill_radians).min(tuning.maximum_kill_fov_bonus_radians)
 }
 
 #[cfg(test)]
@@ -198,5 +240,14 @@ mod tests {
         assert_eq!(framing_compensation(16.0 / 9.0), 1.0);
         let side_by_side = framing_compensation(8.0 / 9.0);
         assert!(side_by_side > 1.3 && side_by_side < 1.4);
+    }
+
+    #[test]
+    fn kill_count_widens_fov_but_respects_the_presentation_cap() {
+        let tuning = CameraTuning::default();
+        let one_kill = kill_fov_bonus(1, &tuning);
+        let many_kills = kill_fov_bonus(100, &tuning);
+        assert!(one_kill > 0.0);
+        assert_eq!(many_kills, tuning.maximum_kill_fov_bonus_radians);
     }
 }

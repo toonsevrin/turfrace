@@ -12,6 +12,10 @@ use super::{PresentationSettings, RetiredMeshes, materials::TerritoryMaterial, m
 pub const FIELD_SURFACE_HEIGHT: f32 = 0.015;
 pub const TERRITORY_SURFACE_HEIGHT: f32 = 0.17;
 const TERRITORY_WALL_BASE: f32 = 0.025;
+/// Shears the foot of the shallow wall toward the camera. This makes the
+/// colored side read at gameplay scale without lifting the top surface (and
+/// therefore without changing player or trail presentation heights).
+const TERRITORY_DEPTH_OFFSET: Vec2 = Vec2::new(0.12, 0.32);
 
 /// Compact render snapshot of the authoritative board. The simulation grid is
 /// never shown directly: ownership is rebuilt into a small number of exact
@@ -314,12 +318,13 @@ fn build_owner_mesh(territory: &TerritoryVisual, owner: u8) -> Option<Mesh> {
             } else {
                 Vec2::new(direction.y, -direction.x)
             };
+            let wall_foot = point + TERRITORY_DEPTH_OFFSET;
             positions.push([point.x, surface_height, point.y]);
-            positions.push([point.x, wall_base, point.y]);
+            positions.push([wall_foot.x, wall_base, wall_foot.y]);
             normals.push([outward.x, 0.0, outward.y]);
             normals.push([outward.x, 0.0, outward.y]);
             uvs.extend_from_slice(&[[point.x, point.y], [point.x, point.y]]);
-            wall_uvs.extend_from_slice(&[[1.0, 1.0], [1.0, 1.0]]);
+            wall_uvs.extend_from_slice(&[[1.0, 0.0], [1.0, 1.0]]);
         }
         for index in 0..loop_points.len() {
             let next = (index + 1) % loop_points.len();
@@ -469,22 +474,35 @@ mod tests {
     }
 
     #[test]
-    fn owner_mesh_has_exact_top_and_elevated_wall() {
+    fn owner_mesh_has_exact_top_and_directional_depth() {
         let mesh = build_owner_mesh(&territory(), 1).expect("owner mesh");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .unwrap()
             .as_float3()
             .unwrap();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x2(wall_uvs)) =
+            mesh.attribute(Mesh::ATTRIBUTE_UV_1)
+        else {
+            panic!("wall UVs must use two floats");
+        };
+        let wall_top = positions
+            .iter()
+            .zip(wall_uvs)
+            .find(|(_, uv)| **uv == [1.0, 0.0])
+            .map(|(position, _)| Vec3::from(*position))
+            .expect("wall top");
+        let wall_foot = positions
+            .iter()
+            .zip(wall_uvs)
+            .find(|(_, uv)| **uv == [1.0, 1.0])
+            .map(|(position, _)| Vec3::from(*position))
+            .expect("wall foot");
+        assert_eq!(wall_top.y, TERRITORY_SURFACE_HEIGHT);
+        assert_eq!(wall_foot.y, TERRITORY_WALL_BASE);
         assert!(
-            positions
-                .iter()
-                .any(|position| position[1] >= TERRITORY_SURFACE_HEIGHT)
-        );
-        assert!(
-            positions
-                .iter()
-                .any(|position| position[1] >= TERRITORY_WALL_BASE)
+            Vec2::new(wall_foot.x - wall_top.x, wall_foot.z - wall_top.z)
+                .abs_diff_eq(TERRITORY_DEPTH_OFFSET, 1.0e-6)
         );
         assert!(mesh.count_vertices() > 12);
     }

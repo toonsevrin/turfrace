@@ -570,12 +570,12 @@ pub(super) fn spawn_game_over(
                 BorderColor::all(INK),
             ))
             .with_children(|panel| {
-                spawn_title(panel, &theme, "100% CLAIMED!", 52.0);
+                spawn_title(panel, &theme, "100% CONTROL!", 52.0);
                 spawn_subtitle(
                     panel,
                     &theme,
                     format!(
-                        "{} OWNS THE FIELD",
+                        "{} CONTROLS THE FIELD",
                         if results.winner_name.is_empty() {
                             "THE WINNER"
                         } else {
@@ -761,7 +761,7 @@ fn result_column(label: &str, width: Val, grow: bool, theme: &UiTheme) -> impl B
         Text::new(label),
         TextFont {
             font: theme.body_font.clone(),
-            font_size: FontSize::Px(10.0),
+            font_size: FontSize::Px(12.0),
             ..default()
         },
         TextColor(MUTED),

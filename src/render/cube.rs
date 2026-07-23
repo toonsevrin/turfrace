@@ -3,8 +3,9 @@ use bevy::prelude::*;
 use crate::camera::ViewportSubject;
 
 use super::{
-    PresentationSettings, TerritoryVisual, TrailVisual, materials::RenderAssets,
-    territory::FIELD_SURFACE_HEIGHT,
+    PresentationSettings, TerritoryVisual, TrailVisual,
+    materials::RenderAssets,
+    territory::{FIELD_SURFACE_HEIGHT, TERRITORY_SURFACE_HEIGHT},
 };
 
 const PLAYER_CLEARANCE: f32 = 0.035;
@@ -24,6 +25,8 @@ pub struct CompetitorVisual {
     pub spawn_protection: f32,
     pub is_leader: bool,
     pub awareness: f32,
+    pub kills: u32,
+    pub kill_streak: u32,
 }
 
 impl Default for CompetitorVisual {
@@ -40,6 +43,8 @@ impl Default for CompetitorVisual {
             spawn_protection: 0.0,
             is_leader: false,
             awareness: 0.0,
+            kills: 0,
+            kill_streak: 0,
         }
     }
 }
@@ -105,7 +110,7 @@ pub(super) fn sync_competitor_visuals(
         };
         let target = Vec3::new(
             visual.position.x,
-            player_base_height(&territory, visual.position),
+            player_base_height(&territory, visual.position, trail.is_some()),
             visual.position.y,
         );
         let alpha = 1.0 - 2.0_f32.powf(-time.delta_secs().min(0.1) / 0.045);
@@ -158,6 +163,8 @@ pub(super) fn sync_competitor_visuals(
                 heading,
                 trail_length: trail.map_or(0.0, |trail| trail.length),
                 awareness: visual.awareness,
+                kill_count: visual.kills,
+                kill_streak: visual.kill_streak,
                 alive: visual.alive,
             }
         } else {
@@ -169,6 +176,8 @@ pub(super) fn sync_competitor_visuals(
                 heading,
                 trail_length: 0.0,
                 awareness: 0.0,
+                kill_count: 0,
+                kill_streak: 0,
                 alive: false,
             }
         };
@@ -187,7 +196,14 @@ pub(super) fn sync_competitor_visuals(
         if rendered[visual.id as usize] {
             continue;
         }
-        spawn_proxy(&mut commands, &assets, &territory, source, visual);
+        spawn_proxy(
+            &mut commands,
+            &assets,
+            &territory,
+            source,
+            visual,
+            trail.is_some(),
+        );
         if let Some(slot) = visual.human_slot {
             commands.entity(source).insert(ViewportSubject {
                 slot,
@@ -196,6 +212,8 @@ pub(super) fn sync_competitor_visuals(
                 heading: visual.heading,
                 trail_length: trail.map_or(0.0, |trail| trail.length),
                 awareness: visual.awareness,
+                kill_count: visual.kills,
+                kill_streak: visual.kill_streak,
                 alive: visual.alive,
             });
         }
@@ -208,6 +226,7 @@ fn spawn_proxy(
     territory: &TerritoryVisual,
     source: Entity,
     visual: &CompetitorVisual,
+    drawing: bool,
 ) {
     let palette = visual.color_id as usize % assets.cube_materials.len();
     commands.spawn((
@@ -219,7 +238,7 @@ fn spawn_proxy(
         },
         Transform::from_xyz(
             visual.position.x,
-            player_base_height(territory, visual.position),
+            player_base_height(territory, visual.position, drawing),
             visual.position.y,
         ),
         Visibility::default(),
@@ -276,10 +295,17 @@ fn spawn_proxy(
     ));
 }
 
-fn player_base_height(territory: &TerritoryVisual, position: Vec2) -> f32 {
+fn player_base_height(territory: &TerritoryVisual, position: Vec2, drawing: bool) -> f32 {
     // Keep the black silhouette fully above the raised turf lip. Without a
-    // small clearance the territory top clips the lower outline faces.
-    territory.surface_height(position) - FIELD_SURFACE_HEIGHT + PLAYER_CLEARANCE
+    // small clearance the territory top clips the lower outline faces. Active
+    // drawers stay at the turf traversal level over the entire path, avoiding
+    // height snaps and making enemy-territory crossings read as going over it.
+    let surface_height = if drawing {
+        TERRITORY_SURFACE_HEIGHT
+    } else {
+        territory.surface_height(position)
+    };
+    surface_height - FIELD_SURFACE_HEIGHT + PLAYER_CLEARANCE
 }
 
 fn smooth_heading(current: Vec2, target: Vec2, alpha: f32) -> (Vec2, f32) {
@@ -319,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn cube_rises_with_claimed_territory() {
+    fn cube_uses_a_stable_traversal_height_while_drawing() {
         let territory = TerritoryVisual {
             width: 1,
             height: 1,
@@ -328,13 +354,18 @@ mod tests {
             ..default()
         };
         assert_eq!(
-            player_base_height(&territory, Vec2::splat(0.5)),
+            player_base_height(&territory, Vec2::splat(0.5), false),
             super::super::territory::TERRITORY_SURFACE_HEIGHT - FIELD_SURFACE_HEIGHT
                 + PLAYER_CLEARANCE
         );
         assert_eq!(
-            player_base_height(&territory, Vec2::splat(2.0)),
+            player_base_height(&territory, Vec2::splat(2.0), false),
             PLAYER_CLEARANCE
+        );
+        assert_eq!(
+            player_base_height(&territory, Vec2::splat(2.0), true),
+            super::super::territory::TERRITORY_SURFACE_HEIGHT - FIELD_SURFACE_HEIGHT
+                + PLAYER_CLEARANCE
         );
     }
 }

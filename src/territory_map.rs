@@ -67,6 +67,18 @@ impl TerritoryMap {
         }
     }
 
+    /// Returns whether a player owns at least the requested share of the
+    /// arena. Both areas are fixed-point integer values, so the threshold is
+    /// independent of floating-point display rounding and sample-grid size.
+    pub fn reaches_victory_threshold(&self, player: CompetitorId, percent: u8) -> bool {
+        let arena_area = self.arena.area_scaled();
+        if arena_area <= 0 || percent == 0 {
+            return false;
+        }
+        i128::from(self.territories[player.index()].area_scaled()) * 100
+            >= i128::from(arena_area) * i128::from(percent)
+    }
+
     pub fn owner_at(&self, point: Vec2) -> OwnerId {
         let candidates = self.index.candidates(point);
         if candidates.is_empty() {
@@ -609,6 +621,55 @@ mod tests {
 
         assert_eq!(map.area(player), map.arena_area);
         assert!(!map.owns(Vec2::new(25.0, 0.0), player));
+    }
+
+    #[test]
+    fn victory_threshold_uses_fixed_point_area_at_the_boundary() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        map.territories[player.index()] = MultiPolygon::from_outer(&[
+            Vec2::new(-20.0, -20.0),
+            Vec2::new(17.99, -20.0),
+            Vec2::new(17.99, 20.0),
+            Vec2::new(-20.0, 20.0),
+        ]);
+        assert!(!map.reaches_victory_threshold(player, 95));
+
+        map.territories[player.index()] = MultiPolygon::from_outer(&[
+            Vec2::new(-20.0, -20.0),
+            Vec2::new(18.0, -20.0),
+            Vec2::new(18.0, 20.0),
+            Vec2::new(-20.0, 20.0),
+        ]);
+        assert!(map.reaches_victory_threshold(player, 95));
+    }
+
+    #[test]
+    fn capture_can_reach_victory_without_full_conquest() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        let opponent = CompetitorId(1);
+        map.apply_claim(
+            opponent,
+            MultiPolygon::from_outer(&[
+                Vec2::new(18.0, -20.0),
+                Vec2::new(20.0, -20.0),
+                Vec2::new(20.0, 20.0),
+                Vec2::new(18.0, 20.0),
+            ]),
+        );
+        map.apply_claim(
+            player,
+            MultiPolygon::from_outer(&[
+                Vec2::new(-20.0, -20.0),
+                Vec2::new(18.0, -20.0),
+                Vec2::new(18.0, 20.0),
+                Vec2::new(-20.0, 20.0),
+            ]),
+        );
+
+        assert!(map.reaches_victory_threshold(player, 95));
+        assert!(map.area(opponent) > 0.0);
     }
 
     #[test]

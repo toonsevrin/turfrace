@@ -4,7 +4,7 @@ mod follow;
 mod layout;
 mod mouse;
 
-pub use follow::{CameraTuning, PlayerCamera, ViewportSubject};
+pub use follow::{CameraFovPulse, CameraTuning, PlayerCamera, ViewportSubject};
 #[allow(unused_imports)]
 pub use layout::{ViewportRect, viewport_layout};
 

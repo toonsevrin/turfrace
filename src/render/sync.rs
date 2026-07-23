@@ -4,7 +4,9 @@ use bevy::prelude::*;
 
 use crate::{
     board::BoardGrid,
-    match_game::{Competitor, CompetitorKind, LifeState, Rankings, SpawnProtection},
+    match_game::{
+        Competitor, CompetitorKind, LifeState, MatchStatistics, Rankings, SpawnProtection,
+    },
     movement::CompetitorMotion,
     territory_map::TerritoryMap,
     trail::ActiveTrail,
@@ -109,6 +111,7 @@ pub(super) fn sync_competitor_snapshots(
         &CompetitorMotion,
         &LifeState,
         Option<&SpawnProtection>,
+        Option<&MatchStatistics>,
         Option<&ActiveTrail>,
         Option<&CompetitorVisual>,
         Option<&TrailVisual>,
@@ -121,7 +124,7 @@ pub(super) fn sync_competitor_snapshots(
         .collect();
     humans.sort();
     let leader = rankings.as_ref().and_then(|rankings| rankings.leader());
-    for (entity, competitor, motion, life, protection, trail, current, current_trail) in
+    for (entity, competitor, motion, life, protection, stats, trail, current, current_trail) in
         &competitors
     {
         let pattern_slot = competitor.id.index();
@@ -152,6 +155,8 @@ pub(super) fn sync_competitor_snapshots(
             spawn_protection: protection.map_or(0.0, |protection| protection.remaining),
             is_leader: leader == Some(competitor.id),
             awareness: 0.0,
+            kills: stats.map_or(0, |stats| stats.kills),
+            kill_streak: stats.map_or(0, |stats| stats.kill_streak),
         };
         let changed = current.is_none_or(|old| {
             old.position != next.position
@@ -159,6 +164,8 @@ pub(super) fn sync_competitor_snapshots(
                 || old.alive != next.alive
                 || old.spawn_protection != next.spawn_protection
                 || old.is_leader != next.is_leader
+                || old.kills != next.kills
+                || old.kill_streak != next.kill_streak
                 || old.human_slot != next.human_slot
                 || old.color_id != next.color_id
         });
@@ -188,7 +195,13 @@ pub(super) fn sync_competitor_snapshots(
 }
 
 fn trail_visual_needs_update(current: Option<&TrailVisual>, trail: &ActiveTrail) -> bool {
-    current.is_none_or(|visual| visual.source_samples != trail.points.len())
+    current.is_none_or(|visual| {
+        visual.source_samples != trail.points.len()
+            || visual
+                .points
+                .last()
+                .is_none_or(|point| point.distance_squared(trail.head) > 1e-8)
+    })
 }
 
 #[cfg(test)]
@@ -242,14 +255,21 @@ mod tests {
     }
 
     #[test]
-    fn trail_visual_updates_only_for_committed_samples() {
+    fn trail_visual_tracks_the_exact_head_between_committed_samples() {
         let mut trail = ActiveTrail::new(CompetitorId(0), Cell::new(0, 0), Vec2::ZERO, Vec2::X);
         let visual = TrailVisual {
+            points: trail.render_points(MAX_RENDER_TRAIL_POINTS),
             source_samples: trail.points.len(),
             ..default()
         };
 
         trail.head = Vec2::new(0.1, 0.0);
+        assert!(trail_visual_needs_update(Some(&visual), &trail));
+        let visual = TrailVisual {
+            points: trail.render_points(MAX_RENDER_TRAIL_POINTS),
+            source_samples: trail.points.len(),
+            ..default()
+        };
         assert!(!trail_visual_needs_update(Some(&visual), &trail));
         trail.points.push(trail.head);
         assert!(trail_visual_needs_update(Some(&visual), &trail));

@@ -1,7 +1,36 @@
 //! Shared visual language: Bungee typography, tight outlined controls, and motion.
 
 use super::*;
-use bevy::{core_pipeline::Core2d, render::camera::CameraRenderGraph};
+use bevy::{core_pipeline::Core2d, render::camera::CameraRenderGraph, window::PrimaryWindow};
+
+const UI_REFERENCE_WIDTH: f32 = 1280.0;
+const UI_REFERENCE_HEIGHT: f32 = 720.0;
+const UI_MIN_SCALE: f32 = 1.0;
+const UI_MAX_SCALE: f32 = 3.0;
+
+/// The menus are authored against a 1280×720 logical reference canvas. Using
+/// the smaller axis preserves the composition on ultrawide windows without
+/// stretching typography, while the lower clamp keeps 960×600 stress layouts
+/// from becoming needlessly small.
+pub(super) fn ui_scale_for_viewport(width: f32, height: f32) -> f32 {
+    if width <= 0.0 || height <= 0.0 {
+        return 1.0;
+    }
+    (width / UI_REFERENCE_WIDTH)
+        .min(height / UI_REFERENCE_HEIGHT)
+        .clamp(UI_MIN_SCALE, UI_MAX_SCALE)
+}
+
+pub(super) fn update_ui_scale(
+    mut ui_scale: ResMut<UiScale>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let Ok(window) = windows.single() else { return };
+    let next = ui_scale_for_viewport(window.width(), window.height());
+    if (ui_scale.0 - next).abs() > f32::EPSILON {
+        ui_scale.0 = next;
+    }
+}
 
 pub(super) fn setup_ui(mut commands: Commands, assets: Res<AssetServer>) {
     let display_font = FontSource::Handle(assets.load("fonts/Bungee-Regular.ttf"));

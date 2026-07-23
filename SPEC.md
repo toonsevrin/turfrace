@@ -4,7 +4,7 @@
 
 **Turfrace** is a competitive local multiplayer territory-control game for 2–8 human players. Players continuously steer colored cubes around a dynamically generated white playing field. Leaving owned territory creates a vulnerable trail. Returning to owned territory converts the trail into permanent territory and claims the enclosed area. Opponents can kill a player by touching that player’s active trail.
 
-The match ends immediately when one player owns 100% of the claimable playing field.
+The match ends immediately when one competitor controls at least 95% of the claimable playing field.
 
 The initial release is a static browser application built with Rust, Bevy, WebAssembly, and browser-local persistence. It has no server dependency and no online multiplayer.
 
@@ -87,6 +87,8 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | NPC count                           | `total competitors - human players` |
 | Simulation frequency                |             60 fixed updates/second |
 | Player speed                        |              8.0 world units/second |
+| Kill speed bonus per kill            |                                  3.5% |
+| Maximum kill speed bonus             |                                   28% |
 | Maximum turn rate                   |                         270°/second |
 | Cube colored core size              |                          1.20 units |
 | Cube black outline size             |                          1.36 units |
@@ -99,6 +101,7 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | Spawn protection                    |                        1.25 seconds |
 | First respawn delay                 |                           5 seconds |
 | Respawn increase per death          |                           5 seconds |
+| Victory territory threshold         |                                 95% |
 | Leaderboard rows                    |                               Top 3 |
 | Camera downward angle               |  Approximately 68° below horizontal |
 | Camera vertical field of view       |                                 48° |
@@ -406,7 +409,25 @@ Recommended death presentation:
 * Killer viewport receives a small confirmation flash.
 * A compact kill-feed message appears.
 
-## 7.5 Spawn protection
+## 7.5 Kill momentum and streaks
+
+Each credited kill increments the killer's total kill count and current kill
+streak. The current streak resets when that competitor dies; the best streak
+remains match statistics. Total kills increase movement speed by 3.5% each,
+up to a 28% cap, and the bonus persists through respawns.
+
+The killer receives escalating non-authoritative feedback as total kills rise:
+
+* A colored particle burst, ground ring, and short kill popup appear at the
+  killer's position.
+* The popup shows the current streak, with stronger tier labels at 2, 4, and 7
+  total kills.
+* The killer's local camera briefly punches its FOV, while total kills and the
+  current streak also widen the persistent gameplay FOV.
+* The per-player HUD shows total kills, current streak, and the earned speed
+  bonus.
+
+## 7.6 Spawn protection
 
 For 1.25 seconds after spawning:
 
@@ -472,7 +493,7 @@ The new seed territory may overwrite a small number of claimed cells if no uncla
 
 Victory is checked before expired respawn timers create new territory.
 
-If a competitor reaches 100% ownership during the same update in which another player is due to respawn:
+If a competitor reaches the victory threshold during the same update in which another player is due to respawn:
 
 * The match ends.
 * The respawn does not occur.
@@ -486,18 +507,21 @@ If a competitor reaches 100% ownership during the same update in which another p
 A competitor’s territory percentage is:
 
 ```text
-owned_playable_cells / total_playable_cells × 100
+owned_vector_area / total_arena_vector_area × 100
 ```
 
-Non-playable cells outside the generated contour are never counted.
+Area outside the generated contour is never counted.
 
-Display percentages to one decimal place, but use exact integer cell counts for all comparisons and victory checks.
+Display percentages to one decimal place, but use exact fixed-point polygon areas for all comparisons and victory checks. The sample grid is not authoritative for victory.
+
+Player-facing territory percentages normalize the victory threshold to 100%:
+`display_percent = min(actual_percent / victory_threshold_percent × 100, 100)`.
 
 ## 9.2 Live ranking
 
 All match participants are ranked by:
 
-1. Territory cell count, descending.
+1. Territory vector area, descending.
 2. Living competitors before respawning competitors.
 3. Kill count, descending.
 4. Stable competitor ID, ascending.
@@ -527,13 +551,13 @@ The indicator must:
 
 ## 9.4 Victory condition
 
-Victory occurs only when:
+Victory occurs when:
 
 ```text
-owned_cells[winner] == total_playable_cells
+owned_vector_area[winner] × 100 >= total_arena_vector_area × victory_threshold_percent
 ```
 
-There is no rounded-percentage shortcut.
+The default threshold is configurable through `GameConfig` and is 95% in v0.1. There is no rounded-percentage shortcut, and opponents may still own the remaining area.
 
 When victory occurs:
 
@@ -544,7 +568,7 @@ When victory occurs:
 5. Hold the final field for approximately three seconds.
 6. Open the results screen.
 
-Because every playable cell belongs to the winner, losing players normally finish at zero territory. Results therefore rank the remaining players using:
+Results rank the remaining players using:
 
 1. Highest territory percentage reached during the match.
 2. Kill count.
@@ -1222,6 +1246,7 @@ Each human viewport contains:
 * Top-left: profile name and percentage.
 * Bottom-left: current rank, such as `#5 / 8`.
 * Trail-active indicator while outside territory.
+* Total kills, current kill streak, and earned speed bonus.
 * Respawn countdown when dead.
 * Small spawn-protection timer or shield.
 * Optional home-direction arrow.
@@ -1585,14 +1610,21 @@ Trails are flat ribbon meshes.
 * Material: unlit, premultiplied alpha.
 * Corners: bevel or rounded joins.
 * End cap: rounded behind the cube.
+* Start edge: flush with the ownership boundary so the trail emerges from turf
+  without a circular bulb.
 * No vertical side walls.
 
-Trail vertices follow the current surface:
+Active trails use one stable traversal plane just above claimed territory:
 
-* About `Y = 0.015` over unclaimed field.
-* About `Y = 0.115` over claimed territory.
+* About `Y = 0.20` over unclaimed and claimed surfaces.
+* The exact trail head is synchronized every presentation update, including
+  between committed gameplay samples.
+* A drawing cube remains at the claimed-territory traversal height until its
+  trail closes.
 
-This keeps the trail visually flat while preventing depth fighting.
+This makes paths read as intentional bridges over every owner's territory,
+avoids folded ribbon geometry at ownership boundaries, and prevents cubes from
+snapping or clipping through the raised turf lip.
 
 ## 18.5 Cubes
 
@@ -1778,6 +1810,29 @@ Required options:
 * Adjustable mouse sensitivity.
 * Larger HUD text.
 * Master and category volume controls.
+
+### Responsive UI sizing
+
+Menus and overlays are authored against a `1280×720` logical reference canvas,
+then rendered through one uniform scale derived from the smaller viewport axis.
+This keeps typography and hit targets proportional on 16:9, 16:10, 4:3, and
+ultrawide displays without stretching one axis. The scale is clamped to a
+minimum of `1.0` for compact stress layouts and a maximum of `3.0` for large
+desktop/Retina canvases. Bevy's logical window size is used, so a Retina device
+does not accidentally double the UI merely because its backing framebuffer has
+twice the pixel density.
+
+New UI text should generally target these logical sizes:
+
+* Captions and table metadata: `12–14px`.
+* Body/status text and secondary actions: `16–18px`.
+* Primary interactive labels: `18–22px`.
+* Screen titles and major announcements: `42–68px`.
+
+Every menu must remain usable at `200%` text/UI scaling: labels may wrap or
+reflow, but content and interactive function must not be lost. This follows
+the intent of WCAG 2.2 Success Criterion 1.4.4 while preserving a game-like
+composition at the normal reference scale.
 
 Reduced-motion mode disables:
 
@@ -2219,7 +2274,7 @@ Required tests include:
 * Displaced death.
 * Respawn-delay sequence.
 * Ranking tie-breaks.
-* Exact 100% victory.
+* Exact fixed-point 95% victory threshold.
 
 ## 25.2 Property tests
 
@@ -2419,7 +2474,7 @@ These decisions remove ambiguity for implementation:
 * All competitors, including NPCs, participate in one ranking.
 * The top-right leaderboard shows the top three overall.
 * Human viewport count is based on human players, not total competitors.
-* Victory requires every playable cell, not a rounded percentage.
+* Victory uses the exact fixed-point 95% area threshold, not a rounded percentage.
 * Victory is checked before respawns.
 * The initial release is entirely local and static, with no backend.
 * WebGL2 is the compatibility baseline.

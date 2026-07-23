@@ -25,6 +25,7 @@ pub fn advance_motion(
     desired: Option<Vec2>,
     territory: &TerritoryMap,
     config: &GameConfig,
+    speed: f32,
     dt: f32,
 ) {
     motion.previous_position = motion.position;
@@ -42,7 +43,7 @@ pub fn advance_motion(
         )
         .normalize_or_zero();
     }
-    let attempted = motion.position + motion.heading * config.player_speed * dt;
+    let attempted = motion.position + motion.heading * speed.max(0.0) * dt;
     if territory.arena_signed_distance(attempted) >= config.collision_radius {
         motion.position = attempted;
         return;
@@ -65,7 +66,7 @@ pub fn advance_motion(
         }
     });
     motion.heading = (tangent + inward * config.inward_edge_steer).normalize_or_zero();
-    let slid = safe + motion.heading * config.player_speed * dt;
+    let slid = safe + motion.heading * speed.max(0.0) * dt;
     motion.position = if territory.arena_signed_distance(slid) >= config.collision_radius {
         slid
     } else {
@@ -82,7 +83,14 @@ mod tests {
         let cfg = GameConfig::default();
         let map = TerritoryMap::from_board(&BoardGrid::generate(1, 2, &cfg));
         let mut m = CompetitorMotion::new(Vec2::ZERO, Vec2::X);
-        advance_motion(&mut m, Some(-Vec2::X), &map, &cfg, 1.0 / 60.0);
+        advance_motion(
+            &mut m,
+            Some(-Vec2::X),
+            &map,
+            &cfg,
+            cfg.player_speed,
+            1.0 / 60.0,
+        );
         assert!(m.heading.dot(Vec2::X) > 0.99);
     }
     #[test]
@@ -92,7 +100,7 @@ mod tests {
         let map = TerritoryMap::from_board(&b);
         let edge = b.contour.points[0];
         let mut m = CompetitorMotion::new(edge - Vec2::X, Vec2::X);
-        advance_motion(&mut m, None, &map, &cfg, 1.0);
+        advance_motion(&mut m, None, &map, &cfg, cfg.player_speed, 1.0);
         assert!(map.arena_signed_distance(m.position) >= cfg.collision_radius - 0.51);
         assert!(m.heading.dot(Vec2::X) < 0.99);
     }
@@ -104,7 +112,27 @@ mod tests {
         let map = TerritoryMap::from_board(&board);
         let edge = board.contour.points[0];
         let mut motion = CompetitorMotion::new(edge - Vec2::X, Vec2::X);
-        advance_motion(&mut motion, None, &map, &cfg, 1.0);
+        advance_motion(&mut motion, None, &map, &cfg, cfg.player_speed, 1.0);
         assert!(map.arena_signed_distance(motion.position) >= cfg.collision_radius - 0.5);
+    }
+
+    #[test]
+    fn kill_speed_uses_the_same_boundary_safe_movement_path() {
+        let cfg = GameConfig::default();
+        let board = BoardGrid::generate(29, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let mut base = CompetitorMotion::new(Vec2::ZERO, Vec2::X);
+        let mut boosted = CompetitorMotion::new(Vec2::ZERO, Vec2::X);
+        advance_motion(&mut base, None, &map, &cfg, cfg.player_speed, 0.1);
+        advance_motion(
+            &mut boosted,
+            None,
+            &map,
+            &cfg,
+            cfg.player_speed_for_kills(4),
+            0.1,
+        );
+        assert!(boosted.position.x > base.position.x);
+        assert!(map.arena_signed_distance(boosted.position) >= cfg.collision_radius - 0.01);
     }
 }

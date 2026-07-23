@@ -5,6 +5,10 @@ use bevy::prelude::*;
 pub struct GameConfig {
     pub fixed_hz: f64,
     pub player_speed: f32,
+    /// Fractional speed added for each credited kill, before the match cap.
+    pub kill_speed_bonus_per_kill: f32,
+    /// Maximum total speed bonus earned from kills.
+    pub kill_speed_bonus_cap: f32,
     pub max_turn_rate_radians: f32,
     pub collision_radius: f32,
     pub trail_width: f32,
@@ -14,6 +18,9 @@ pub struct GameConfig {
     pub spawn_protection_minimum_seconds: f32,
     pub respawn_base_seconds: f32,
     pub respawn_cap_seconds: Option<f32>,
+    /// Whole-arena territory share required to win. The comparison is made
+    /// against authoritative fixed-point polygon area, not displayed text.
+    pub victory_territory_percent: u8,
     pub self_trail_exclusion_distance: f32,
     pub trail_sample_distance: f32,
     pub trail_sample_angle_radians: f32,
@@ -29,6 +36,8 @@ impl Default for GameConfig {
         Self {
             fixed_hz: 60.0,
             player_speed: 8.0,
+            kill_speed_bonus_per_kill: 0.035,
+            kill_speed_bonus_cap: 0.28,
             max_turn_rate_radians: 270.0_f32.to_radians(),
             collision_radius: 0.52,
             trail_width: 0.65,
@@ -38,6 +47,7 @@ impl Default for GameConfig {
             spawn_protection_minimum_seconds: 0.5,
             respawn_base_seconds: 5.0,
             respawn_cap_seconds: None,
+            victory_territory_percent: 95,
             self_trail_exclusion_distance: 1.5,
             trail_sample_distance: 0.2,
             trail_sample_angle_radians: 6.0_f32.to_radians(),
@@ -55,9 +65,30 @@ impl GameConfig {
         (1.0 / self.fixed_hz) as f32
     }
 
+    pub fn speed_multiplier_for_kills(&self, kills: u32) -> f32 {
+        1.0 + (self.kill_speed_bonus_per_kill.max(0.0) * kills as f32)
+            .min(self.kill_speed_bonus_cap.max(0.0))
+    }
+
+    pub fn player_speed_for_kills(&self, kills: u32) -> f32 {
+        self.player_speed * self.speed_multiplier_for_kills(kills)
+    }
+
     pub fn respawn_delay(&self, deaths: u32) -> f32 {
         let delay = self.respawn_base_seconds * deaths as f32;
         self.respawn_cap_seconds.map_or(delay, |cap| delay.min(cap))
+    }
+
+    /// Converts an authoritative arena percentage into the normalized value
+    /// shown in player-facing territory displays. Winning territory maps to
+    /// 100%, and malformed or over-cap values cannot exceed that maximum.
+    pub fn display_territory_percent(&self, actual_percent: f32) -> f32 {
+        let threshold = f32::from(self.victory_territory_percent);
+        if threshold <= 0.0 || !actual_percent.is_finite() {
+            0.0
+        } else {
+            (actual_percent * 100.0 / threshold).clamp(0.0, 100.0)
+        }
     }
 }
 
@@ -74,5 +105,30 @@ mod tests {
         );
         config.respawn_cap_seconds = Some(12.0);
         assert_eq!(config.respawn_delay(3), 12.0);
+    }
+
+    #[test]
+    fn display_territory_percent_normalizes_the_victory_threshold() {
+        let config = GameConfig::default();
+        assert_eq!(config.display_territory_percent(95.0), 100.0);
+        assert_eq!(config.display_territory_percent(47.5), 50.0);
+        assert_eq!(config.display_territory_percent(100.0), 100.0);
+        assert_eq!(config.display_territory_percent(-1.0), 0.0);
+        assert_eq!(config.display_territory_percent(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn kill_speed_bonus_is_small_progressive_and_capped() {
+        let config = GameConfig::default();
+        assert_eq!(config.speed_multiplier_for_kills(0), 1.0);
+        assert!((config.speed_multiplier_for_kills(2) - 1.07).abs() < 1.0e-6);
+        assert_eq!(config.speed_multiplier_for_kills(100), 1.28);
+
+        let config = GameConfig {
+            kill_speed_bonus_per_kill: -1.0,
+            kill_speed_bonus_cap: -1.0,
+            ..GameConfig::default()
+        };
+        assert_eq!(config.speed_multiplier_for_kills(10), 1.0);
     }
 }

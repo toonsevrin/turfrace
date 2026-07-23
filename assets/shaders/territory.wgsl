@@ -28,6 +28,8 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     if family == 10 { ink = stripe(length(p) * 0.36, 0.10); }
     if family == 11 { ink = stripe(abs(fract(p.x * 0.30) - 0.5) + p.y * 0.28, 0.10); }
 
-    let side = mesh.uv_b.y;
-    return vec4(material.color.rgb * (1.0 - ink * 0.075 * material.parameters.y) * (1.0 - side * 0.27), 1.0);
+    let side = mesh.uv_b.x;
+    let depth = mesh.uv_b.y;
+    let side_shade = side * (0.24 + depth * 0.10);
+    return vec4(material.color.rgb * (1.0 - ink * 0.075 * material.parameters.y) * (1.0 - side_shade), 1.0);
 }
