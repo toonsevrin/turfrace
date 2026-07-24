@@ -1,3 +1,4 @@
+use crate::render::SKY_COLOR;
 use bevy::prelude::*;
 
 /// Render-facing description of a local human who needs a viewport.
@@ -118,7 +119,7 @@ pub(super) fn reconcile_player_cameras(
                 }),
                 Camera {
                     order: subject.slot as isize,
-                    clear_color: ClearColorConfig::Custom(Color::srgb_u8(10, 18, 31)),
+                    clear_color: ClearColorConfig::Custom(SKY_COLOR),
                     ..default()
                 },
                 Transform::from_translation(

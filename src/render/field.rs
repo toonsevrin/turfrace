@@ -3,9 +3,14 @@ use bevy::{
 };
 
 use super::{
-    RetiredMeshes,
+    RetiredMeshes, SKY_COLOR,
     materials::{FlatMaterial, PaperMaterial, RenderAssets},
 };
+
+const FIELD_BOTTOM: f32 = -0.34;
+const FIELD_DEPTH_OFFSET: Vec2 = Vec2::new(0.22, 0.46);
+const FIELD_SHADOW_HEIGHT: f32 = -0.38;
+const OUTSIDE_CANVAS_HEIGHT: f32 = -0.46;
 
 /// Render snapshot of the generated star-shaped field contour.
 #[derive(Resource, Debug, Clone, Default)]
@@ -35,8 +40,8 @@ pub(super) fn setup_stage(
     commands.spawn((
         Name::new("Outside Canvas"),
         Mesh3d(meshes.add(Plane3d::default().mesh().size(260.0, 260.0))),
-        MeshMaterial3d(materials.add(FlatMaterial::new(Color::srgb_u8(10, 18, 31), 0.0))),
-        Transform::from_xyz(0.0, -0.055, 0.0),
+        MeshMaterial3d(materials.add(FlatMaterial::new(SKY_COLOR, 0.0))),
+        Transform::from_xyz(0.0, OUTSIDE_CANVAS_HEIGHT, 0.0),
     ));
 }
 
@@ -81,7 +86,7 @@ pub(super) fn sync_field_mesh(
     // barely visible skirt with the same paper material, so oblique cameras
     // still read the arena as a paper-thin decal. A dedicated warm edge mesh
     // keeps the top surface bright while making the boundary legible.
-    let depth_mesh = build_field_depth_mesh(&field.contour, -0.18);
+    let depth_mesh = build_field_depth_mesh(&field.contour, FIELD_BOTTOM, FIELD_DEPTH_OFFSET);
     if let Ok((entity, mesh)) = depth.single() {
         retired.0.push_back((mesh.0.clone(), 0));
         commands
@@ -96,7 +101,7 @@ pub(super) fn sync_field_mesh(
         ));
     }
 
-    let shadow_mesh = build_field_mesh(&field.contour, -0.035, false);
+    let shadow_mesh = build_field_mesh(&field.contour, FIELD_SHADOW_HEIGHT, false);
     if let Ok((entity, mesh)) = shadow.single() {
         retired.0.push_back((mesh.0.clone(), 0));
         commands
@@ -110,7 +115,7 @@ pub(super) fn sync_field_mesh(
             MeshMaterial3d(flat.add(FlatMaterial::transparent(Color::srgba(
                 0.01, 0.02, 0.04, 0.48,
             )))),
-            Transform::from_xyz(0.28, 0.0, 0.38),
+            Transform::from_xyz(0.42, 0.0, 0.72),
         ));
     }
 
@@ -212,7 +217,7 @@ fn build_field_mesh(contour: &[Vec2], height: f32, include_skirt: bool) -> Mesh 
     mesh
 }
 
-fn build_field_depth_mesh(contour: &[Vec2], bottom: f32) -> Mesh {
+fn build_field_depth_mesh(contour: &[Vec2], bottom: f32, depth_offset: Vec2) -> Mesh {
     let mut positions = Vec::with_capacity(contour.len() * 2);
     let mut normals = Vec::with_capacity(contour.len() * 2);
     let mut uvs = Vec::with_capacity(contour.len() * 2);
@@ -228,7 +233,8 @@ fn build_field_depth_mesh(contour: &[Vec2], bottom: f32) -> Mesh {
             outward
         };
         positions.push([point.x, 0.0, point.y]);
-        positions.push([point.x, bottom, point.y]);
+        let foot = point + depth_offset;
+        positions.push([foot.x, bottom, foot.y]);
         normals.extend_from_slice(&[[outward.x, 0.0, outward.y]; 2]);
         uvs.extend_from_slice(&[[index as f32, 0.0], [index as f32, 1.0]]);
     }
@@ -286,7 +292,7 @@ mod tests {
             Vec2::new(1.0, 1.0),
             Vec2::new(-1.0, 1.0),
         ];
-        let mesh = build_field_depth_mesh(&contour, -0.18);
+        let mesh = build_field_depth_mesh(&contour, FIELD_BOTTOM, FIELD_DEPTH_OFFSET);
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .unwrap()
@@ -294,7 +300,12 @@ mod tests {
             .unwrap();
         assert_eq!(mesh.count_vertices(), contour.len() * 2);
         assert!(positions.iter().any(|point| point[1] == 0.0));
-        assert!(positions.iter().any(|point| point[1] == -0.18));
+        assert!(positions.iter().any(|point| point[1] == FIELD_BOTTOM));
+        assert!(positions.iter().any(|point| {
+            point[1] == FIELD_BOTTOM
+                && point[0] == contour[0].x + FIELD_DEPTH_OFFSET.x
+                && point[2] == contour[0].y + FIELD_DEPTH_OFFSET.y
+        }));
         assert_eq!(mesh.indices().unwrap().len(), contour.len() * 6);
     }
 }

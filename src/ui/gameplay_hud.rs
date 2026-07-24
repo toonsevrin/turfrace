@@ -90,7 +90,7 @@ pub(super) fn spawn_gameplay_hud(
                     TextColor(MUTED),
                     TextShadow {
                         offset: Vec2::new(1.0, 1.0),
-                        color: Color::srgba(1.0, 0.97, 0.88, 0.78),
+                        color: INK.with_alpha(0.82),
                     },
                     TextLayout::justify(Justify::Right),
                     Node {
@@ -117,28 +117,59 @@ pub(super) fn spawn_gameplay_hud(
                 ));
             }
             root.spawn((
-                Text::new(""),
-                TextFont {
-                    font: theme.body_font.clone(),
-                    font_size: FontSize::Px(13.0 * text_scale),
-                    ..default()
-                },
-                TextColor(INK),
-                TextShadow {
-                    offset: Vec2::new(1.0, 1.0),
-                    color: Color::srgba(1.0, 0.97, 0.88, 0.78),
-                },
-                TextLayout::justify(Justify::Right),
                 Node {
                     position_type: PositionType::Absolute,
                     right: px(18),
-                    top: px(118),
-                    width: px(260),
-                    max_width: px(260),
+                    top: px(112),
+                    width: px(292),
+                    min_height: px(42),
+                    padding: UiRect::axes(px(14), px(9)),
+                    border: UiRect::left(px(4)),
+                    border_radius: BorderRadius::all(px(5)),
+                    justify_content: JustifyContent::FlexEnd,
+                    align_items: AlignItems::Center,
                     ..default()
                 },
-                KillFeedText,
-            ));
+                BackgroundColor(INK.with_alpha(0.90)),
+                BorderColor::all(CORAL),
+                UiTransform::default(),
+                Visibility::Hidden,
+                KillFeedPanel,
+            ))
+            .with_children(|feed| {
+                feed.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font: theme.body_font.clone(),
+                        font_size: FontSize::Px(13.0 * text_scale),
+                        ..default()
+                    },
+                    TextColor(CREAM),
+                    TextShadow {
+                        offset: Vec2::new(2.0, 2.0),
+                        color: Color::BLACK.with_alpha(0.92),
+                    },
+                    TextLayout::justify(Justify::Right),
+                    Node {
+                        width: percent(100),
+                        ..default()
+                    },
+                    KillFeedText,
+                ));
+                feed.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        right: px(7),
+                        top: px(7),
+                        width: px(5),
+                        height: px(5),
+                        border_radius: BorderRadius::all(percent(50)),
+                        ..default()
+                    },
+                    BackgroundColor(CORAL),
+                    KillFeedAccent,
+                ));
+            });
             root.spawn((
                 Text::new("3"),
                 TextFont {
@@ -338,7 +369,12 @@ pub(super) fn update_gameplay_hud(
     mut elimination_text: Local<String>,
     mut respawn_text: Local<String>,
     mut texts: HudTextQuery,
-    mut accents: Query<(&GlobalRankingAccent, &mut BackgroundColor)>,
+    mut accents: Query<(&GlobalRankingAccent, &mut BackgroundColor), Without<KillFeedAccent>>,
+    mut kill_feed_panels: Query<(&mut Visibility, &mut BorderColor), With<KillFeedPanel>>,
+    mut kill_feed_accents: Query<
+        &mut BackgroundColor,
+        (With<KillFeedAccent>, Without<GlobalRankingAccent>),
+    >,
 ) {
     let HudData {
         state,
@@ -428,14 +464,6 @@ pub(super) fn update_gameplay_hud(
             update_text(&mut text, &announcement_text);
         } else if kill_feed.is_some() {
             update_text(&mut text, &elimination_text);
-            if let Some(mut text_color) = text_color {
-                let next_color = if elimination_text.is_empty() {
-                    Color::NONE
-                } else {
-                    INK
-                };
-                set_text_color_if_changed(&mut text_color, next_color);
-            }
         } else if let Some(marker) = respawn {
             let Ok((_, life, protection, _)) = competitors.get(marker.0) else {
                 continue;
@@ -478,6 +506,66 @@ pub(super) fn update_gameplay_hud(
             background.0 = next_color;
         }
     }
+    let event_color = eliminations
+        .as_ref()
+        .and_then(|feed| feed.0.last())
+        .and_then(|entry| entry.killer.or(Some(entry.victim)))
+        .and_then(|id| {
+            competitors
+                .iter()
+                .find(|(competitor, ..)| competitor.id == id)
+                .map(|(competitor, ..)| palette_color(competitor.color_id))
+        })
+        .unwrap_or(CORAL);
+    for (mut visibility, mut border) in &mut kill_feed_panels {
+        *visibility = if elimination_text.is_empty() {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        border.set_all(event_color);
+    }
+    for mut accent in &mut kill_feed_accents {
+        accent.0 = event_color;
+    }
+}
+
+pub(super) fn animate_kill_feed(
+    time: Res<Time>,
+    session: Res<MatchSession>,
+    settings: Res<UserSettings>,
+    eliminations: Option<Res<EliminationFeed>>,
+    mut panels: Query<(&mut UiTransform, &mut BackgroundColor), With<KillFeedPanel>>,
+) {
+    let age = eliminations
+        .as_ref()
+        .and_then(|feed| feed.0.last())
+        .map_or(f32::INFINITY, |event| {
+            (session.elapsed_seconds - event.match_time).max(0.0)
+        });
+    let reduced_motion = settings.reduced_motion;
+    for (mut transform, mut background) in &mut panels {
+        let (translation, scale) = kill_feed_transform(age, reduced_motion);
+        transform.translation = Val2::px(translation, 0.0);
+        transform.scale = Vec2::splat(scale);
+        let progress = (age / 0.55).clamp(0.0, 1.0);
+        let shimmer = if reduced_motion || !age.is_finite() {
+            0.0
+        } else {
+            (time.elapsed_secs() * 8.0).sin().max(0.0) * (1.0 - progress)
+        };
+        background.0 = INK.with_alpha(0.90 + shimmer * 0.08);
+    }
+}
+
+fn kill_feed_transform(age: f32, reduced_motion: bool) -> (f32, f32) {
+    if reduced_motion {
+        return (0.0, 1.0);
+    }
+    let progress = (age / 0.55).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - progress).powi(3);
+    let bounce = (progress * std::f32::consts::PI).sin() * (1.0 - progress) * 0.09;
+    (30.0 * (1.0 - eased), 0.94 + eased * 0.06 + bounce)
 }
 
 pub(super) fn write_ranking_label(target: &mut String, rank: u8, name: &str, percent: f32) {
@@ -519,16 +607,16 @@ fn append_elimination_line(
     });
     match (entry.cause, killer) {
         (DeathCause::SelfTrail, _) => {
-            let _ = write!(target, "{} CUT THEMSELVES", victim.display_name);
+            let _ = write!(target, "SELF CUT!  {}", victim.display_name);
         }
         (DeathCause::Displaced, Some(killer)) => {
-            let _ = write!(target, "{killer} ERASED {}", victim.display_name);
+            let _ = write!(target, "ERASED!  {killer}  >  {}", victim.display_name);
         }
         (_, Some(killer)) => {
-            let _ = write!(target, "{killer} CUT {}", victim.display_name);
+            let _ = write!(target, "CUT!  {killer}  >  {}", victim.display_name);
         }
         _ => {
-            let _ = write!(target, "{} WIPED OUT", victim.display_name);
+            let _ = write!(target, "WIPED OUT!  {}", victim.display_name);
         }
     }
 }
@@ -636,4 +724,26 @@ pub(super) fn collect_match_results(
     }
     persisted.0 = Some(session.seed);
     persistence.dirty = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kill_feed_transform;
+
+    #[test]
+    fn kill_feed_enters_with_a_bounce_then_settles() {
+        let start = kill_feed_transform(0.0, false);
+        let middle = kill_feed_transform(0.25, false);
+        let settled = kill_feed_transform(0.55, false);
+
+        assert_eq!(start, (30.0, 0.94));
+        assert!(middle.0 > 0.0 && middle.0 < start.0);
+        assert!(middle.1 > 1.0);
+        assert_eq!(settled, (0.0, 1.0));
+    }
+
+    #[test]
+    fn reduced_motion_shows_the_kill_feed_at_rest_immediately() {
+        assert_eq!(kill_feed_transform(0.0, true), (0.0, 1.0));
+    }
 }

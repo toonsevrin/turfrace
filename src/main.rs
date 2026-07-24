@@ -3,7 +3,7 @@ use bevy::{
     prelude::*,
     window::{PresentMode, WindowResolution},
 };
-use turfrace::{app_state, match_game, presentation};
+use turfrace::{app_state, match_game, presentation, render::SKY_COLOR};
 
 fn main() {
     #[allow(unused_mut)]
@@ -21,7 +21,7 @@ fn main() {
     }
 
     App::new()
-        .insert_resource(ClearColor(Color::srgb_u8(10, 18, 31)))
+        .insert_resource(ClearColor(SKY_COLOR))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .add_plugins(
             DefaultPlugins

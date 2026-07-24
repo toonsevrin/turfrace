@@ -21,6 +21,10 @@ use std::collections::VecDeque;
 
 use crate::palette::PLAYER_COLORS;
 
+/// The open space beyond the paper arena. A light sky keeps an exposed edge
+/// feeling intentional without competing with the saturated player colors.
+pub const SKY_COLOR: Color = Color::srgb_u8(91, 183, 232);
+
 pub(crate) fn mix_with_white(color: Color, amount: f32) -> Color {
     let c = color.to_srgba();
     Color::srgb(

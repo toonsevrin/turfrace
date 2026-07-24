@@ -3,12 +3,11 @@ use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
 use crate::{
     app_state::AppState,
     match_game::{MatchPhase, MatchPurpose, MatchSession},
-    render::PresentationSettings,
+    render::{PresentationSettings, SKY_COLOR},
     territory_map::TerritoryMap,
 };
 
-const OVERVIEW_MARGIN: f32 = 1.12;
-const HOME_MENU_WIDTH_FRACTION: f32 = 0.38;
+const HOME_COVER_MARGIN: f32 = 0.90;
 
 /// Identifies the full-field camera used by the Home attract match.
 #[derive(Component, Debug, Clone, Copy)]
@@ -37,7 +36,7 @@ pub(super) fn reconcile_spectator_camera(
             }),
             Camera {
                 order: 0,
-                clear_color: ClearColorConfig::Custom(Color::srgb_u8(10, 18, 31)),
+                clear_color: ClearColorConfig::Custom(SKY_COLOR),
                 ..default()
             },
             Transform::default(),
@@ -66,7 +65,7 @@ pub(super) fn fit_spectator_camera(
     let viewport = home_field_viewport(window.physical_size());
     let aspect = viewport.physical_size.x as f32 / viewport.physical_size.y.max(1) as f32;
     let direction = Vec3::new(0.0, tuning.height, tuning.trailing_offset).normalize_or(Vec3::Y);
-    let distance = overview_distance(half_extents, direction, aspect, tuning.vertical_fov_radians);
+    let distance = cover_distance(half_extents, direction, aspect, tuning.vertical_fov_radians);
     let focus = Vec3::new(center.x, 0.0, center.y);
     for (mut camera, mut transform, mut projection) in &mut cameras {
         let viewport_changed = camera.viewport.as_ref().is_none_or(|current| {
@@ -85,18 +84,14 @@ pub(super) fn fit_spectator_camera(
 }
 
 fn home_field_viewport(window_size: UVec2) -> Viewport {
-    let left = (window_size.x as f32 * HOME_MENU_WIDTH_FRACTION).round() as u32;
     Viewport {
-        physical_position: UVec2::new(left.min(window_size.x.saturating_sub(1)), 0),
-        physical_size: UVec2::new(
-            window_size.x.saturating_sub(left).max(1),
-            window_size.y.max(1),
-        ),
+        physical_position: UVec2::ZERO,
+        physical_size: window_size.max(UVec2::ONE),
         ..default()
     }
 }
 
-fn overview_distance(half_extents: Vec2, direction: Vec3, aspect: f32, vertical_fov: f32) -> f32 {
+fn cover_distance(half_extents: Vec2, direction: Vec3, aspect: f32, vertical_fov: f32) -> f32 {
     let vertical_half_fov = (vertical_fov * 0.5).clamp(0.01, 1.5);
     let horizontal_half_fov = (vertical_half_fov.tan() * aspect.max(0.01)).atan();
     let forward = -direction;
@@ -108,7 +103,7 @@ fn overview_distance(half_extents: Vec2, direction: Vec3, aspect: f32, vertical_
     let depth = extents.dot(forward).abs();
     let horizontal_distance = horizontal / horizontal_half_fov.tan().max(0.01);
     let vertical_distance = vertical / vertical_half_fov.tan().max(0.01);
-    (horizontal_distance.max(vertical_distance) + depth + 2.0) * OVERVIEW_MARGIN
+    (horizontal_distance.min(vertical_distance) + depth + 2.0) * HOME_COVER_MARGIN
 }
 
 #[cfg(test)]
@@ -116,24 +111,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overview_distance_grows_for_narrow_windows() {
+    fn cover_distance_adapts_to_the_viewport_aspect() {
         let half_extents = Vec2::new(50.0, 50.0);
         let direction = Vec3::new(0.0, 25.4, 10.35).normalize();
-        let wide = overview_distance(half_extents, direction, 16.0 / 9.0, 48.0_f32.to_radians());
-        let narrow = overview_distance(half_extents, direction, 9.0 / 16.0, 48.0_f32.to_radians());
+        let wide = cover_distance(half_extents, direction, 16.0 / 9.0, 48.0_f32.to_radians());
+        let narrow = cover_distance(half_extents, direction, 9.0 / 16.0, 48.0_f32.to_radians());
         assert!(narrow > wide);
     }
 
     #[test]
-    fn overview_distance_scales_with_arena_radius_and_margin() {
+    fn cover_distance_scales_with_arena_radius() {
         let direction = Vec3::new(0.0, 25.4, 10.35).normalize();
-        let small = overview_distance(
+        let small = cover_distance(
             Vec2::splat(10.0),
             direction,
             16.0 / 9.0,
             48.0_f32.to_radians(),
         );
-        let large = overview_distance(
+        let large = cover_distance(
             Vec2::splat(20.0),
             direction,
             16.0 / 9.0,
@@ -144,10 +139,10 @@ mod tests {
     }
 
     #[test]
-    fn home_field_viewport_reserves_the_left_side_for_navigation() {
+    fn home_field_viewport_fills_the_window_behind_centered_navigation() {
         let viewport = home_field_viewport(UVec2::new(1_280, 720));
-        assert_eq!(viewport.physical_position, UVec2::new(486, 0));
-        assert_eq!(viewport.physical_size, UVec2::new(794, 720));
+        assert_eq!(viewport.physical_position, UVec2::ZERO);
+        assert_eq!(viewport.physical_size, UVec2::new(1_280, 720));
     }
 
     #[test]

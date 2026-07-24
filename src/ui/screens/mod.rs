@@ -438,14 +438,14 @@ pub(super) fn spawn_pause(
                     spawn_button(panel, &theme, "RESUME", UiAction::Resume, 0);
                 }
                 spawn_button(panel, &theme, "SETTINGS", UiAction::Settings, 1);
-                spawn_overlay_button(
+                spawn_button(
                     panel,
                     &theme,
                     "RESTART MATCH",
                     UiAction::State(AppState::MatchLoading),
                     2,
                 );
-                spawn_overlay_button(
+                spawn_button(
                     panel,
                     &theme,
                     "RETURN TO LOBBY",

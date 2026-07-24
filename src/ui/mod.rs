@@ -152,6 +152,12 @@ struct GlobalRankingAccent(usize);
 struct KillFeedText;
 
 #[derive(Component)]
+struct KillFeedPanel;
+
+#[derive(Component)]
+struct KillFeedAccent;
+
+#[derive(Component)]
 struct MatchAnnouncementText;
 
 #[derive(Component)]
@@ -289,7 +295,12 @@ impl Plugin for UiPlugin {
             )
             .add_systems(
                 Update,
-                (reconcile_human_huds, update_gameplay_hud, update_name_tags),
+                (
+                    reconcile_human_huds,
+                    update_gameplay_hud,
+                    animate_kill_feed,
+                    update_name_tags,
+                ),
             );
     }
 }

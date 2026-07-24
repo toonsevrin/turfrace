@@ -6,10 +6,8 @@ pub(in crate::ui) fn spawn_home(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((ScreenRoot, screen_node(), BackgroundColor(Color::NONE)))
         .with_children(|root| {
-            let mut home_panel = panel_node(percent(38));
-            home_panel.position_type = PositionType::Absolute;
-            home_panel.left = percent(0);
-            home_panel.max_width = px(486);
+            let mut home_panel = panel_node(percent(52));
+            home_panel.max_width = px(580);
             home_panel.padding = UiRect::axes(px(28), px(24));
             root.spawn((
                 home_panel,
