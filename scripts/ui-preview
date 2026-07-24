@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT_DIR"
+
+section=${1:-all}
+duration=${2:-6}
+
+case "$section" in
+    all)
+        ./scripts/visual-feedback --all
+        ;;
+    hud)
+        ./scripts/visual-feedback match --seconds "$duration"
+        python3 scripts/crop_png.py \
+            target/visual-feedback/match.png \
+            target/visual-feedback/hud.png \
+            --x 960 --y 0 --width 320 --height 210
+        printf 'PREVIEW target/visual-feedback/hud.png\n'
+        ;;
+    lobby-cards)
+        ./scripts/visual-feedback lobby
+        python3 scripts/crop_png.py \
+            target/visual-feedback/lobby.png \
+            target/visual-feedback/lobby-cards.png \
+            --x 170 --y 170 --width 940 --height 330
+        printf 'PREVIEW target/visual-feedback/lobby-cards.png\n'
+        ;;
+    results-table)
+        ./scripts/visual-feedback results
+        python3 scripts/crop_png.py \
+            target/visual-feedback/results.png \
+            target/visual-feedback/results-table.png \
+            --x 180 --y 145 --width 920 --height 350
+        printf 'PREVIEW target/visual-feedback/results-table.png\n'
+        ;;
+    *)
+        ./scripts/visual-feedback "$section"
+        ;;
+esac

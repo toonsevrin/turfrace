@@ -42,8 +42,8 @@ The initial version includes:
 * 2–8 local human players.
 * Mouse control for one player.
 * Multiple simultaneous gamepads.
-* NPC competitors filling empty match slots.
-* Configurable total competitor count.
+* NPC competitors explicitly added to the field.
+* Configurable robot count.
 * Dynamically generated field contours.
 * Territory capture and stealing.
 * Trail cutting and self-trail collisions.
@@ -82,9 +82,9 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | Setting                             |                             Default |
 | ----------------------------------- | ----------------------------------: |
 | Human players                       |                                 2–8 |
-| Total competitors                   |                                   8 |
-| Configurable total competitor range |                                2–12 |
-| NPC count                           | `total competitors - human players` |
+| Robots                              |                                   0 |
+| Total competitor range              |                                2–12 |
+| Total competitors                   |             `human players + robots` |
 | Simulation frequency                |             60 fixed updates/second |
 | Player speed                        |              8.0 world units/second |
 | Kill speed bonus per kill            |                                  3.5% |
@@ -1147,23 +1147,25 @@ The standard game requires:
 
 * At least two human players.
 * Every joined player marked ready.
-* Total competitors greater than or equal to joined humans.
+* The combined human and robot field does not exceed 12 competitors.
 
 Any ready player may press Start.
 
 A three-second countdown begins. Any player may cancel it with Back before the match loads.
 
-## 15.4 Total competitor selector
+## 15.4 Robot selector
 
-Default total competitors: 8.
+Default robots: 0. Robots are added explicitly and the most recent robot preference is persisted.
 
-Range: 2–12.
+The complete field remains limited to 2–12 competitors.
 
 ```text
-npc_count = max(0, total_competitors - joined_humans)
+total_competitors = joined_humans + npc_count
+0 <= npc_count <= 12 - joined_humans
 ```
 
-If another human joins while the total is too low, automatically raise the total to the human count.
+At least two joined humans are required to start.
+If another human joins a full field, reduce the robot count to keep the total within 12.
 
 NPC names, colors, patterns, and behavior styles are assigned when the match starts.
 
@@ -1199,12 +1201,12 @@ A global UI camera renders:
 Leaderboard row:
 
 ```text
-[rank] [name] [color key]
+[rank] [name] [claimed %] [color rail]
 ```
 
-The live rows omit territory percentage: rank movement and player color provide the immediate
-signal, while detailed percentages remain available on the results and local-record screens. The
-rows remain legible at narrow viewports and require no title or panel.
+The live rows include the current territory percentage to one decimal place, so rank changes have
+an immediately understandable cause. A thin color rail replaces detached square swatches. The rows
+remain legible at narrow viewports and require no title or panel.
 
 ### Per-player HUD
 
@@ -2265,7 +2267,7 @@ For randomized field seeds and capture shapes:
 * Two gamepads join unique slots.
 * One mouse joins exactly one slot.
 * Eight gamepads produce eight human viewports.
-* NPC count fills to the selected total.
+* NPC count matches the explicit robot selection.
 * All joined players can navigate global lobby controls.
 * Profile selection skips profiles already in use.
 * Settings and profiles survive reload.
@@ -2311,8 +2313,8 @@ This allows gameplay bugs to be replayed exactly.
 The initial version is complete when all of the following are true:
 
 1. Two to eight humans can join with unique gamepads, with one optional mouse player.
-2. The lobby defaults to eight total competitors and fills empty places with NPCs.
-3. Total competitors can be configured from 2 to 12.
+2. The lobby defaults to zero robots; robots are added explicitly.
+3. The combined human and robot field can be configured from 2 to 12 competitors.
 4. Every cube moves continuously and responds to heading input.
 5. The generated field has a visibly rounded, irregular contour.
 6. Leaving territory creates a visible 50%-opacity trail.

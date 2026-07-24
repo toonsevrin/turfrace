@@ -17,7 +17,7 @@ use turfrace::{
     app_state::{AppShellPlugin, AppState},
     camera::{PlayerCamera, ViewportSubject},
     input::InputDeviceId,
-    lobby::{HumanSetup, Lobby, LobbyPlayer, MatchSetup},
+    lobby::{HumanSetup, LastLobbySettings, Lobby, LobbyPlayer, MatchSetup},
     match_game::{MatchPhase, MatchPlugin, MatchSession, start_match},
     presentation::PresentationPlugin,
     ui::{MatchResults, ResultRow},
@@ -28,9 +28,15 @@ enum Scenario {
     Home,
     Leaderboard,
     Lobby,
+    LobbyEmpty,
+    LobbyRobots,
     Match,
     Capture,
+    Countdown,
+    Respawn,
     Pause,
+    Disconnect,
+    GameOver,
     Results,
     Settings,
 }
@@ -41,9 +47,15 @@ impl Scenario {
             "home" => Some(Self::Home),
             "leaderboard" => Some(Self::Leaderboard),
             "lobby" => Some(Self::Lobby),
+            "lobby-empty" => Some(Self::LobbyEmpty),
+            "lobby-robots" => Some(Self::LobbyRobots),
             "match" => Some(Self::Match),
             "capture" => Some(Self::Capture),
+            "countdown" => Some(Self::Countdown),
+            "respawn" => Some(Self::Respawn),
             "pause" => Some(Self::Pause),
+            "disconnect" => Some(Self::Disconnect),
+            "game-over" => Some(Self::GameOver),
             "results" => Some(Self::Results),
             "settings" => Some(Self::Settings),
             _ => None,
@@ -52,10 +64,15 @@ impl Scenario {
 
     const fn default_capture_frame(self) -> u32 {
         match self {
-            Self::Home | Self::Leaderboard | Self::Settings => 30,
-            Self::Lobby | Self::Results => 45,
+            Self::Home
+            | Self::Leaderboard
+            | Self::Settings
+            | Self::LobbyEmpty
+            | Self::LobbyRobots => 30,
+            Self::Lobby | Self::Results | Self::GameOver => 45,
             Self::Match | Self::Capture => 360,
-            Self::Pause => 240,
+            Self::Countdown => 1,
+            Self::Respawn | Self::Pause | Self::Disconnect => 240,
         }
     }
 }
@@ -151,7 +168,7 @@ fn arguments() -> (Scenario, PathBuf, u32, u32, u32) {
             }
             "--help" | "-h" => {
                 println!(
-                    "usage: visual_playtest [--scenario home|leaderboard|lobby|match|capture|pause|results|settings] \
+                    "usage: visual_playtest [--scenario home|leaderboard|lobby|lobby-empty|match|capture|countdown|respawn|pause|disconnect|game-over|results|settings] \
                      [--output PATH.png] [--frames N | --seconds N] \
                      [--width PX] [--height PX]"
                 );
@@ -256,7 +273,21 @@ fn configure_scenario(world: &mut World) {
         Scenario::Home => {}
         Scenario::Leaderboard => configure_profiles_screen(world, AppState::LocalLeaderboard),
         Scenario::Lobby => configure_lobby(world),
-        Scenario::Match | Scenario::Capture | Scenario::Pause => configure_match(world),
+        Scenario::LobbyEmpty => world
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Lobby),
+        Scenario::LobbyRobots => {
+            configure_lobby(world);
+            world.resource_mut::<LastLobbySettings>().npc_count = 10;
+            world.resource_mut::<Lobby>().npc_count = 10;
+        }
+        Scenario::Match
+        | Scenario::Capture
+        | Scenario::Countdown
+        | Scenario::Respawn
+        | Scenario::Pause
+        | Scenario::Disconnect => configure_match(world),
+        Scenario::GameOver => configure_game_over(world),
         Scenario::Results => configure_results(world),
         Scenario::Settings => configure_profiles_screen(world, AppState::Settings),
     }
@@ -293,11 +324,11 @@ fn configure_lobby(world: &mut World) {
             display_name: "KEY KID".into(),
             color_id: 4,
             pattern_id: 7,
-            ready: true,
+            ready: false,
             connected: true,
         },
     ];
-    world.resource_mut::<Lobby>().total_competitors = 8;
+    world.resource_mut::<Lobby>().npc_count = 0;
     world
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Lobby);
@@ -337,6 +368,28 @@ fn configure_match(world: &mut World) {
 }
 
 fn configure_results(world: &mut World) {
+    configure_results_screen(world, AppState::Results);
+}
+
+fn configure_game_over(world: &mut World) {
+    configure_match(world);
+    let winner = world
+        .query::<&turfrace::match_game::Competitor>()
+        .iter(world)
+        .find(|competitor| competitor.kind == turfrace::match_game::CompetitorKind::Human)
+        .map(|competitor| competitor.id);
+    if let Some(winner) = winner {
+        let mut session = world.resource_mut::<MatchSession>();
+        session.winner = Some(winner);
+        session.phase = MatchPhase::Finished;
+        session.result_hold_remaining = 999.0;
+    }
+    world
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::GameOver);
+}
+
+fn configure_results_screen(world: &mut World, state: AppState) {
     *world.resource_mut::<MatchResults>() = MatchResults {
         winner_name: "MOUSE ACE".into(),
         duration_seconds: 154.0,
@@ -431,29 +484,55 @@ fn configure_results(world: &mut World) {
             },
         ],
     };
-    world
-        .resource_mut::<NextState<AppState>>()
-        .set(AppState::Results);
+    world.resource_mut::<NextState<AppState>>().set(state);
 }
 
 fn scenario_is_visible(world: &mut World) -> bool {
     let scenario = world.resource::<Harness>().scenario;
     let state = *world.resource::<State<AppState>>().get();
-    if scenario == Scenario::Pause && state == AppState::Playing {
+    if matches!(scenario, Scenario::Pause | Scenario::Disconnect) && state == AppState::Playing {
         let elapsed = world.resource::<MatchSession>().elapsed_seconds;
         if elapsed >= 3.0 {
+            if scenario == Scenario::Disconnect {
+                *world.resource_mut::<turfrace::lobby::MatchDisconnectNotice>() =
+                    turfrace::lobby::MatchDisconnectNotice {
+                        device: Some(InputDeviceId::KeyboardPrimary),
+                        player_name: "KEY KID".into(),
+                        replace_with_npc: false,
+                        resume_state: AppState::Playing,
+                    };
+            }
             world
                 .resource_mut::<NextState<AppState>>()
                 .set(AppState::Paused);
+        }
+    }
+    if scenario == Scenario::Respawn && state == AppState::Playing {
+        let subject = world
+            .query::<(&turfrace::match_game::Competitor, Entity)>()
+            .iter(world)
+            .find(|(competitor, _)| competitor.kind == turfrace::match_game::CompetitorKind::Human)
+            .map(|(_, entity)| entity);
+        if let Some(entity) = subject
+            && let Some(mut life) = world.get_mut::<turfrace::match_game::LifeState>(entity)
+        {
+            life.status = turfrace::match_game::LifeStatus::Respawning;
+            life.respawn_remaining = 4.2;
         }
     }
     match scenario {
         Scenario::Home => state == AppState::Home,
         Scenario::Leaderboard => state == AppState::LocalLeaderboard,
         Scenario::Lobby => state == AppState::Lobby,
+        Scenario::LobbyEmpty => state == AppState::Lobby,
+        Scenario::LobbyRobots => state == AppState::Lobby,
         Scenario::Match => state == AppState::Playing,
         Scenario::Capture => state == AppState::Playing,
+        Scenario::Countdown => state == AppState::Countdown,
+        Scenario::Respawn => state == AppState::Playing,
         Scenario::Pause => state == AppState::Paused,
+        Scenario::Disconnect => state == AppState::Paused,
+        Scenario::GameOver => state == AppState::GameOver,
         Scenario::Results => state == AppState::Results,
         Scenario::Settings => state == AppState::Settings,
     }

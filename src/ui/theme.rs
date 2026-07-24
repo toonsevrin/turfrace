@@ -310,6 +310,32 @@ pub(super) fn spawn_compact_menu_button(
     );
 }
 
+pub(super) fn spawn_overlay_button(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    label: impl Into<String>,
+    action: UiAction,
+    order: u16,
+) {
+    spawn_button_sized(
+        parent,
+        theme,
+        label,
+        action,
+        order,
+        ButtonMetrics {
+            min_height: 34.0,
+            horizontal_padding: 10.0,
+            font_size: 15.0,
+            width: Val::Auto,
+            max_width: Val::Auto,
+            align_self: AlignSelf::Center,
+            label_style: ButtonLabelStyle::Overlay,
+            frame_style: ButtonFrameStyle::QuietRule,
+        },
+    );
+}
+
 #[derive(Clone, Copy)]
 struct ButtonMetrics {
     min_height: f32,
@@ -326,6 +352,7 @@ struct ButtonMetrics {
 enum ButtonLabelStyle {
     Perspective,
     Utility,
+    Overlay,
 }
 
 #[derive(Clone, Copy)]
@@ -398,6 +425,18 @@ fn spawn_button_sized(
                     },
                     TextColor(INK),
                     IntegratedButtonLabel { idle: INK },
+                ));
+            }
+            ButtonLabelStyle::Overlay => {
+                button.spawn((
+                    Text::new(label),
+                    TextFont {
+                        font: theme.body_font.clone(),
+                        font_size: FontSize::Px(metrics.font_size),
+                        ..default()
+                    },
+                    TextColor(CREAM),
+                    IntegratedButtonLabel { idle: CREAM },
                 ));
             }
         });

@@ -5,27 +5,21 @@ use crate::lobby::MAX_HUMANS;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::window::PrimaryWindow;
 
-fn input_device_label(device: InputDeviceId) -> String {
-    match device {
-        InputDeviceId::KeyboardPrimary => "KEY".to_owned(),
-        InputDeviceId::Mouse => "MOUSE".to_owned(),
-        InputDeviceId::Gamepad(id) => format!("PAD {}", id + 1),
-    }
-}
-
-fn card_customization_actions(device: InputDeviceId) -> [LobbyCommand; 4] {
+fn card_customization_actions(device: InputDeviceId) -> [LobbyCommand; 6] {
     [
         LobbyCommand::CycleProfile(device, -1),
         LobbyCommand::CycleProfile(device, 1),
+        LobbyCommand::CycleColor(device, -1),
+        LobbyCommand::CycleColor(device, 1),
         LobbyCommand::CyclePattern(device, -1),
         LobbyCommand::CyclePattern(device, 1),
     ]
 }
 
-fn spawn_card_stepper(
+fn spawn_icon_stepper(
     parent: &mut ChildSpawnerCommands,
     theme: &UiTheme,
-    label: &str,
+    center: impl Bundle,
     previous: LobbyCommand,
     next: LobbyCommand,
     order: u16,
@@ -33,26 +27,153 @@ fn spawn_card_stepper(
     parent
         .spawn((Node {
             display: Display::Flex,
-            column_gap: px(8),
             align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            column_gap: px(5),
             ..default()
         },))
         .with_children(|row| {
-            row.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.body_font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(MUTED),
-                Node {
-                    width: px(76),
-                    ..default()
-                },
-            ));
             spawn_mini_button(row, theme, "<", UiAction::Lobby(previous), order);
+            row.spawn(center);
             spawn_mini_button(row, theme, ">", UiAction::Lobby(next), order + 1);
+        });
+}
+
+fn spawn_device_icon(parent: &mut ChildSpawnerCommands, device: InputDeviceId, color: Color) {
+    let (width, height, radius) = match device {
+        InputDeviceId::Mouse => (22.0, 30.0, 9.0),
+        InputDeviceId::KeyboardPrimary => (38.0, 24.0, 2.0),
+        InputDeviceId::Gamepad(_) => (38.0, 24.0, 10.0),
+    };
+    parent
+        .spawn((
+            Node {
+                width: px(width),
+                height: px(height),
+                border: UiRect::all(px(2)),
+                border_radius: BorderRadius::all(px(radius)),
+                position_type: PositionType::Relative,
+                ..default()
+            },
+            BorderColor::all(color),
+        ))
+        .with_children(|icon| match device {
+            InputDeviceId::Mouse => {
+                icon.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(8),
+                        top: px(3),
+                        width: px(2),
+                        height: px(8),
+                        ..default()
+                    },
+                    BackgroundColor(color),
+                ));
+            }
+            InputDeviceId::KeyboardPrimary => {
+                for top in [5.0, 12.0] {
+                    icon.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(5),
+                            top: px(top),
+                            width: px(24),
+                            height: px(2),
+                            ..default()
+                        },
+                        BackgroundColor(color),
+                    ));
+                }
+            }
+            InputDeviceId::Gamepad(_) => {
+                icon.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(7),
+                        top: px(6),
+                        width: px(3),
+                        height: px(9),
+                        ..default()
+                    },
+                    BackgroundColor(color),
+                ));
+                icon.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(4),
+                        top: px(9),
+                        width: px(9),
+                        height: px(3),
+                        ..default()
+                    },
+                    BackgroundColor(color),
+                ));
+                for left in [24.0, 29.0] {
+                    icon.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(left),
+                            top: px(9),
+                            width: px(3),
+                            height: px(3),
+                            border_radius: BorderRadius::all(percent(50)),
+                            ..default()
+                        },
+                        BackgroundColor(color),
+                    ));
+                }
+            }
+        });
+}
+
+fn spawn_robot_icon(parent: &mut ChildSpawnerCommands, color: Color) {
+    parent
+        .spawn((Node {
+            width: px(30),
+            height: px(28),
+            position_type: PositionType::Relative,
+            ..default()
+        },))
+        .with_children(|robot| {
+            robot.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(5),
+                    top: px(7),
+                    width: px(20),
+                    height: px(16),
+                    border: UiRect::all(px(2)),
+                    border_radius: BorderRadius::all(px(3)),
+                    ..default()
+                },
+                BorderColor::all(color),
+            ));
+            robot.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(14),
+                    top: px(1),
+                    width: px(2),
+                    height: px(7),
+                    ..default()
+                },
+                BackgroundColor(color),
+            ));
+            for left in [10.0, 18.0] {
+                robot.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(left),
+                        top: px(12),
+                        width: px(3),
+                        height: px(3),
+                        border_radius: BorderRadius::all(percent(50)),
+                        ..default()
+                    },
+                    BackgroundColor(color),
+                ));
+            }
         });
 }
 
@@ -91,8 +212,7 @@ pub(crate) fn spawn_lobby_content(
                 ScrollPosition::default(),
             ))
             .with_children(|panel| {
-                spawn_title(panel, theme, "LOBBY", 42.0);
-                spawn_subtitle(panel, theme, "ENTER  /  CLICK  /  A");
+                spawn_title(panel, theme, "RACERS", 42.0);
                 panel
                     .spawn((Node {
                         width: percent(100),
@@ -130,6 +250,8 @@ pub(crate) fn spawn_lobby_content(
                             let [
                                 previous_profile,
                                 next_profile,
+                                previous_color,
+                                next_color,
                                 previous_pattern,
                                 next_pattern,
                             ] = card_customization_actions(player.device);
@@ -137,18 +259,19 @@ pub(crate) fn spawn_lobby_content(
                             grid.spawn((
                                 Node {
                                     min_height: px(0),
-                                    padding: UiRect::all(px(12)),
-                                    border: UiRect {
-                                        left: px(3),
-                                        ..default()
-                                    },
+                                    padding: UiRect::all(px(14)),
+                                    border: UiRect::all(px(2)),
                                     flex_direction: FlexDirection::Column,
-                                    row_gap: px(6),
+                                    row_gap: px(10),
                                     ..default()
                                 },
-                                BackgroundColor(Color::NONE),
+                                BackgroundColor(color.with_alpha(if player.ready {
+                                    0.10
+                                } else {
+                                    0.045
+                                })),
                                 BorderColor::all(if player.connected {
-                                    color.with_alpha(0.72)
+                                    color.with_alpha(if player.ready { 0.95 } else { 0.38 })
                                 } else {
                                     CORAL.with_alpha(0.72)
                                 }),
@@ -156,124 +279,134 @@ pub(crate) fn spawn_lobby_content(
                             .with_children(|card| {
                                 card.spawn((Node {
                                     width: percent(100),
-                                    display: Display::Flex,
+                                    flex_direction: FlexDirection::Column,
                                     align_items: AlignItems::Center,
+                                    row_gap: px(5),
                                     ..default()
                                 },))
-                                    .with_children(|header| {
-                                        header.spawn((
-                                            Text::new(format!(
-                                                "P{}  {}   {}",
-                                                slot + 1,
-                                                player.display_name,
-                                                input_device_label(player.device),
-                                            )),
-                                            TextFont {
-                                                font: theme.body_font.clone(),
-                                                font_size: FontSize::Px(20.0),
-                                                ..default()
-                                            },
-                                            TextColor(INK),
-                                            Node {
-                                                flex_grow: 1.0,
-                                                ..default()
-                                            },
-                                        ));
-                                        header.spawn((
-                                            Node {
-                                                width: px(9),
-                                                height: px(9),
-                                                ..default()
-                                            },
-                                            BackgroundColor(if !player.connected {
-                                                CORAL
-                                            } else if player.ready {
-                                                LIME
-                                            } else {
-                                                MUTED.with_alpha(0.38)
-                                            }),
-                                        ));
-                                    });
-                                card.spawn((Node {
-                                    width: percent(100),
-                                    display: Display::Flex,
-                                    align_items: AlignItems::Center,
-                                    column_gap: px(16),
-                                    ..default()
-                                },))
-                                    .with_children(|body| {
-                                        body.spawn((Node {
-                                            flex_grow: 1.0,
-                                            flex_direction: FlexDirection::Column,
-                                            row_gap: px(6),
-                                            ..default()
-                                        },))
-                                            .with_children(|controls| {
-                                                spawn_card_stepper(
-                                                    controls,
-                                                    theme,
-                                                    "PROFILE",
-                                                    previous_profile,
-                                                    next_profile,
-                                                    40 + slot as u16 * 10,
-                                                );
-                                                spawn_card_stepper(
-                                                    controls,
-                                                    theme,
-                                                    &format!("PAT {}", player.pattern_id + 1),
-                                                    previous_pattern,
-                                                    next_pattern,
-                                                    42 + slot as u16 * 10,
-                                                );
-                                                spawn_mini_button(
-                                                    controls,
-                                                    theme,
-                                                    "+ PROFILE",
-                                                    UiAction::CreateProfile(slot),
-                                                    44 + slot as u16 * 10,
-                                                );
-                                                if player.connected {
-                                                    spawn_mini_button(
-                                                        controls,
-                                                        theme,
-                                                        if player.ready { "WAIT" } else { "READY" },
-                                                        UiAction::Lobby(LobbyCommand::ToggleReady(
-                                                            player.device,
-                                                        )),
-                                                        46 + slot as u16 * 10,
-                                                    );
-                                                }
-                                            });
-                                        body.spawn((
-                                            Node {
-                                                width: px(82),
-                                                height: px(82),
-                                                border: UiRect::all(px(2)),
-                                                align_items: AlignItems::Center,
-                                                justify_content: JustifyContent::Center,
-                                                ..default()
-                                            },
-                                            BackgroundColor(color),
-                                            BorderColor::all(INK),
-                                        ))
-                                        .with_children(
-                                            |stamp| {
-                                                stamp.spawn((
-                                                    Text::new(format!("P{}", slot + 1)),
-                                                    TextFont {
-                                                        font: theme.display_font.clone(),
-                                                        font_size: FontSize::Px(26.0),
-                                                        ..default()
-                                                    },
-                                                    TextColor(CREAM),
-                                                    TextShadow {
-                                                        offset: Vec2::new(3.0, 3.0),
-                                                        color: INK,
-                                                    },
-                                                ));
-                                            },
+                                    .with_children(|controls| {
+                                        spawn_icon_stepper(
+                                            controls,
+                                            theme,
+                                            (
+                                                Text::new(player.display_name.clone()),
+                                                TextFont {
+                                                    font: theme.body_font.clone(),
+                                                    font_size: FontSize::Px(20.0),
+                                                    ..default()
+                                                },
+                                                TextColor(INK),
+                                                TextLayout::justify(Justify::Center),
+                                                Node {
+                                                    width: px(190),
+                                                    ..default()
+                                                },
+                                            ),
+                                            previous_profile,
+                                            next_profile,
+                                            40 + slot as u16 * 10,
+                                        );
+                                        spawn_icon_stepper(
+                                            controls,
+                                            theme,
+                                            (
+                                                Node {
+                                                    width: px(32),
+                                                    height: px(32),
+                                                    border: UiRect::all(px(2)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(color),
+                                                BorderColor::all(INK),
+                                            ),
+                                            previous_color,
+                                            next_color,
+                                            42 + slot as u16 * 10,
+                                        );
+                                        spawn_icon_stepper(
+                                            controls,
+                                            theme,
+                                            (
+                                                Text::new(format!(
+                                                    "PATTERN {}",
+                                                    player.pattern_id + 1
+                                                )),
+                                                TextFont {
+                                                    font: theme.body_font.clone(),
+                                                    font_size: FontSize::Px(12.0),
+                                                    ..default()
+                                                },
+                                                TextColor(MUTED),
+                                                TextLayout::justify(Justify::Center),
+                                                Node {
+                                                    width: px(88),
+                                                    ..default()
+                                                },
+                                            ),
+                                            previous_pattern,
+                                            next_pattern,
+                                            44 + slot as u16 * 10,
+                                        );
+                                        spawn_mini_button(
+                                            controls,
+                                            theme,
+                                            "+ NEW",
+                                            UiAction::CreateProfile(slot),
+                                            46 + slot as u16 * 10,
                                         );
                                     });
+                                if player.connected {
+                                    let mut ready_row = card.spawn((
+                                        Node {
+                                            width: percent(100),
+                                            min_height: px(52),
+                                            display: Display::Flex,
+                                            align_items: AlignItems::Center,
+                                            justify_content: JustifyContent::Center,
+                                            column_gap: px(12),
+                                            border_radius: BorderRadius::all(px(4)),
+                                            ..default()
+                                        },
+                                        BackgroundColor(if player.ready {
+                                            Color::NONE
+                                        } else {
+                                            color.with_alpha(0.08)
+                                        }),
+                                    ));
+                                    if !player.ready {
+                                        ready_row.insert(ReadyPrompt {
+                                            color,
+                                            phase: slot as f32 * 1.7,
+                                        });
+                                    }
+                                    ready_row.with_children(|ready| {
+                                        spawn_device_icon(ready, player.device, color);
+                                        spawn_button(
+                                            ready,
+                                            theme,
+                                            if player.ready { "UNREADY" } else { "READY" },
+                                            UiAction::Lobby(LobbyCommand::ToggleReady(
+                                                player.device,
+                                            )),
+                                            48 + slot as u16 * 10,
+                                        );
+                                    });
+                                } else {
+                                    card.spawn((
+                                        Text::new("PRESS ANY BUTTON TO RECLAIM"),
+                                        TextFont {
+                                            font: theme.body_font.clone(),
+                                            font_size: FontSize::Px(13.0),
+                                            ..default()
+                                        },
+                                        TextColor(CORAL),
+                                        TextLayout::justify(Justify::Center),
+                                        Node {
+                                            width: percent(100),
+                                            ..default()
+                                        },
+                                    ));
+                                }
                             });
                         }
                     });
@@ -303,39 +436,36 @@ pub(crate) fn spawn_lobby_content(
                             row,
                             theme,
                             "-",
-                            UiAction::Lobby(LobbyCommand::ChangeCompetitors(-1)),
+                            UiAction::Lobby(LobbyCommand::ChangeNpcCount(-1)),
                             20,
                         );
                         row.spawn((
-                            Text::new(format!(
-                                "{}  /  {} CPU",
-                                lobby.total_competitors,
-                                lobby.npc_count()
-                            )),
+                            Text::new(format!("{}", lobby.npc_count())),
                             TextFont {
                                 font: theme.body_font.clone(),
-                                font_size: FontSize::Px(17.0),
+                                font_size: FontSize::Px(22.0),
                                 ..default()
                             },
                             TextColor(INK),
                             Node {
-                                flex_grow: 1.0,
+                                width: px(34),
                                 ..default()
                             },
                             TextLayout::justify(Justify::Center),
                         ));
+                        spawn_robot_icon(row, MUTED);
                         spawn_mini_button(
                             row,
                             theme,
                             "+",
-                            UiAction::Lobby(LobbyCommand::ChangeCompetitors(1)),
+                            UiAction::Lobby(LobbyCommand::ChangeNpcCount(1)),
                             21,
                         );
                     });
                 let start_label = if lobby.can_start() {
-                    "START"
+                    "START RACE"
                 } else {
-                    "1 READY"
+                    "READY UP"
                 };
                 spawn_button(
                     panel,
@@ -367,7 +497,7 @@ pub(crate) fn lobby_fingerprint(lobby: &Lobby, compact: bool) -> String {
         })
         .collect::<Vec<_>>()
         .join("|");
-    format!("{}:{}:{players}", lobby.total_competitors, compact)
+    format!("{}:{}:{players}", lobby.npc_count(), compact)
 }
 
 const fn is_compact_lobby(width: f32) -> bool {
@@ -450,8 +580,10 @@ mod tests {
         let actions = card_customization_actions(device);
         assert!(matches!(actions[0], LobbyCommand::CycleProfile(d, -1) if d == device));
         assert!(matches!(actions[1], LobbyCommand::CycleProfile(d, 1) if d == device));
-        assert!(matches!(actions[2], LobbyCommand::CyclePattern(d, -1) if d == device));
-        assert!(matches!(actions[3], LobbyCommand::CyclePattern(d, 1) if d == device));
+        assert!(matches!(actions[2], LobbyCommand::CycleColor(d, -1) if d == device));
+        assert!(matches!(actions[3], LobbyCommand::CycleColor(d, 1) if d == device));
+        assert!(matches!(actions[4], LobbyCommand::CyclePattern(d, -1) if d == device));
+        assert!(matches!(actions[5], LobbyCommand::CyclePattern(d, 1) if d == device));
     }
 
     #[test]
@@ -469,9 +601,12 @@ mod tests {
     }
 
     #[test]
-    fn lobby_labels_each_supported_input_device() {
-        assert_eq!(input_device_label(InputDeviceId::KeyboardPrimary), "KEY");
-        assert_eq!(input_device_label(InputDeviceId::Mouse), "MOUSE");
-        assert_eq!(input_device_label(InputDeviceId::Gamepad(1)), "PAD 2");
+    fn fresh_two_player_lobby_starts_without_robots() {
+        let profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        lobby.join(InputDeviceId::Mouse, &profiles);
+        lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
+        assert_eq!(lobby.npc_count(), 0);
+        assert_eq!(lobby.max_npc_count(), 10);
     }
 }

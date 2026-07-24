@@ -84,7 +84,7 @@ pub(super) fn spawn_gameplay_hud(
                     Text::new(""),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(14.0 * text_scale),
+                        font_size: FontSize::Px(15.0 * text_scale),
                         ..default()
                     },
                     TextColor(MUTED),
@@ -95,10 +95,10 @@ pub(super) fn spawn_gameplay_hud(
                     TextLayout::justify(Justify::Right),
                     Node {
                         position_type: PositionType::Absolute,
-                        right: px(24),
-                        top: px(18 + index as i32 * 24),
-                        width: px(210),
-                        max_width: px(210),
+                        right: px(22),
+                        top: px(16 + index as i32 * 27),
+                        width: px(236),
+                        max_width: px(236),
                         ..default()
                     },
                     GlobalRankingRow(index),
@@ -107,9 +107,9 @@ pub(super) fn spawn_gameplay_hud(
                     Node {
                         position_type: PositionType::Absolute,
                         right: px(12),
-                        top: px(24 + index as i32 * 24),
-                        width: px(8),
-                        height: px(8),
+                        top: px(17 + index as i32 * 27),
+                        width: px(4),
+                        height: px(18),
                         ..default()
                     },
                     BackgroundColor(Color::NONE),
@@ -132,7 +132,7 @@ pub(super) fn spawn_gameplay_hud(
                 Node {
                     position_type: PositionType::Absolute,
                     right: px(18),
-                    top: px(154),
+                    top: px(118),
                     width: px(260),
                     max_width: px(260),
                     ..default()
@@ -221,7 +221,7 @@ pub(super) fn reconcile_human_huds(
                         Text::new(""),
                         TextFont {
                             font: theme.display_font.clone(),
-                            font_size: FontSize::Px(25.0 * text_scale),
+                            font_size: FontSize::Px(30.0 * text_scale),
                             ..default()
                         },
                         TextColor(CORAL),
@@ -365,6 +365,7 @@ pub(super) fn update_gameplay_hud(
                 &mut ranking_lines[index],
                 entry.rank,
                 &competitor.display_name,
+                entry.territory_percent,
             );
         }
     }
@@ -443,11 +444,11 @@ pub(super) fn update_gameplay_hud(
             if !life.is_alive() {
                 let _ = write!(
                     respawn_text,
-                    "BACK IN {:.1}",
+                    "RESPAWN\n{:.1}",
                     life.respawn_remaining.max(0.0)
                 );
             } else if protection.active() {
-                let _ = write!(respawn_text, "SHIELDED {:.1}", protection.remaining);
+                let _ = write!(respawn_text, "SHIELD\n{:.1}", protection.remaining);
             }
             update_text(&mut text, &respawn_text);
             if let Some(mut text_color) = text_color {
@@ -479,8 +480,8 @@ pub(super) fn update_gameplay_hud(
     }
 }
 
-pub(super) fn write_ranking_label(target: &mut String, rank: u8, name: &str) {
-    let _ = write!(target, "{rank}  {name}");
+pub(super) fn write_ranking_label(target: &mut String, rank: u8, name: &str, percent: f32) {
+    let _ = write!(target, "{rank}  {name}   {percent:.1}%");
 }
 
 fn update_text(text: &mut Text, next: &str) {

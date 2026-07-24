@@ -1,145 +1,29 @@
 //! Application screens other than the device-registration lobby.
 
+mod home;
+mod leaderboard;
 mod lobby;
+pub(super) use home::*;
+pub(super) use leaderboard::*;
 pub(super) use lobby::*;
 
 use super::*;
 
-pub(super) fn spawn_home(mut commands: Commands, theme: Res<UiTheme>) {
-    commands
-        .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
-        .with_children(|root| {
-            spawn_background(root);
-            let mut home_panel = panel_node(percent(90));
-            home_panel.max_width = px(500);
-            root.spawn((
-                home_panel,
-                BackgroundColor(Color::NONE),
-                BorderColor::all(INK),
-            ))
-            .with_children(|panel| {
-                spawn_title(panel, &theme, "TURFRACE", 68.0);
-                spawn_subtitle(panel, &theme, "CUT / CLAIM / SURVIVE");
-                spawn_button(panel, &theme, "PLAY", UiAction::State(AppState::Lobby), 0);
-                spawn_button(
-                    panel,
-                    &theme,
-                    "LEADERBOARD",
-                    UiAction::State(AppState::LocalLeaderboard),
-                    1,
-                );
-                spawn_button(panel, &theme, "SETTINGS", UiAction::Settings, 2);
-            });
-        });
-}
-
-pub(super) fn spawn_match_loading(mut commands: Commands, theme: Res<UiTheme>) {
-    commands
-        .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
-        .with_children(|root| {
-            root.spawn((
-                panel_node(percent(90)),
-                BackgroundColor(Color::NONE),
-                BorderColor::all(INK),
-            ))
-            .with_children(|panel| {
-                spawn_title(panel, &theme, "TURFRACE", 56.0);
-                spawn_subtitle(panel, &theme, "PREPARING FIELD");
-            });
-        });
-}
-
-// Lobby screen systems live in `screens::lobby`.
-pub(super) fn spawn_leaderboard(
-    mut commands: Commands,
-    theme: Res<UiTheme>,
-    profiles: Res<ProfileStore>,
+fn spawn_overlay_caption(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    text: impl Into<String>,
 ) {
-    commands
-        .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
-        .with_children(|root| {
-            spawn_background(root);
-            root.spawn((
-                panel_node(percent(82)),
-                BackgroundColor(Color::NONE),
-                BorderColor::all(INK),
-            ))
-            .with_children(|panel| {
-                spawn_title(panel, &theme, "LEADERBOARD", 42.0);
-                let leaderboard = profiles.sorted_leaderboard();
-                if leaderboard.is_empty() {
-                    spawn_subtitle(panel, &theme, "NO MATCHES YET");
-                }
-                for (rank, profile) in leaderboard.into_iter().enumerate() {
-                    let stats = &profile.statistics;
-                    let win_rate = if stats.games_played == 0 {
-                        0.0
-                    } else {
-                        stats.wins as f32 * 100.0 / stats.games_played as f32
-                    };
-                    panel
-                        .spawn((
-                            Node {
-                                width: percent(100),
-                                min_height: px(38),
-                                padding: UiRect::axes(px(10), px(6)),
-                                column_gap: px(8),
-                                align_items: AlignItems::Center,
-                                ..default()
-                            },
-                            BackgroundColor(Color::NONE),
-                        ))
-                        .with_children(|row| {
-                            row.spawn((
-                                Text::new(format!("#{:02}", rank + 1)),
-                                TextFont {
-                                    font: theme.body_font.clone(),
-                                    font_size: FontSize::Px(18.0),
-                                    ..default()
-                                },
-                                TextColor(palette_color(rank as u8)),
-                                Node {
-                                    width: px(52),
-                                    ..default()
-                                },
-                            ));
-                            row.spawn((
-                                Text::new(profile.display_name.clone()),
-                                TextFont {
-                                    font: theme.body_font.clone(),
-                                    font_size: FontSize::Px(17.0),
-                                    ..default()
-                                },
-                                TextColor(palette_color(rank as u8)),
-                                Node {
-                                    flex_grow: 1.0,
-                                    ..default()
-                                },
-                            ));
-                            for (value, width) in [
-                                (format!("{}/{}", stats.wins, stats.games_played), 76.0),
-                                (format!("{win_rate:.0}%"), 58.0),
-                                (format!("K{}", stats.kills), 48.0),
-                            ] {
-                                row.spawn((
-                                    Text::new(value),
-                                    TextFont {
-                                        font: theme.body_font.clone(),
-                                        font_size: FontSize::Px(16.0),
-                                        ..default()
-                                    },
-                                    TextColor(palette_color(rank as u8)),
-                                    Node {
-                                        width: px(width),
-                                        ..default()
-                                    },
-                                ));
-                            }
-                        });
-                }
-                spawn_button(panel, &theme, "BACK", UiAction::Back(AppState::Home), 0);
-            });
-        });
+    parent.spawn((
+        Text::new(text),
+        TextFont {
+            font: theme.body_font.clone(),
+            font_size: FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(CREAM.with_alpha(0.88)),
+        TextLayout::justify(Justify::Center),
+    ));
 }
 
 pub(super) fn setting_line(
@@ -215,21 +99,34 @@ pub(super) fn toggle_line(
 }
 
 fn settings_section(parent: &mut ChildSpawnerCommands, theme: &UiTheme, label: &str) {
-    parent.spawn((
-        Text::new(label),
-        TextFont {
-            font: theme.body_font.clone(),
-            font_size: FontSize::Px(12.0),
-            ..default()
-        },
-        TextColor(MUTED),
-        Node {
+    parent
+        .spawn((Node {
             width: percent(100),
-            margin: UiRect::top(px(2)),
-            padding: UiRect::bottom(px(3)),
+            min_height: px(22),
+            margin: UiRect::top(px(5)),
+            column_gap: px(7),
+            align_items: AlignItems::Center,
             ..default()
-        },
-    ));
+        },))
+        .with_children(|row| {
+            row.spawn((
+                Node {
+                    width: px(3),
+                    height: px(14),
+                    ..default()
+                },
+                BackgroundColor(CORAL.with_alpha(0.72)),
+            ));
+            row.spawn((
+                Text::new(label),
+                TextFont {
+                    font: theme.body_font.clone(),
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+            ));
+        });
 }
 
 pub(super) fn spawn_settings(
@@ -270,206 +167,214 @@ pub(super) fn spawn_settings(
                         ..default()
                     },))
                     .with_children(|grid| {
-                        grid.spawn((Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(4),
-                            ..default()
-                        },))
-                            .with_children(|left| {
-                                settings_section(left, &theme, "AUDIO");
-                                setting_line(
-                                    left,
+                        grid.spawn((
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(4),
+                                padding: UiRect::axes(px(16), px(8)),
+                                border: UiRect::top(px(2)),
+                                ..default()
+                            },
+                            BackgroundColor(INK.with_alpha(0.025)),
+                            BorderColor::all(palette_color(0).with_alpha(0.45)),
+                        ))
+                        .with_children(|left| {
+                            settings_section(left, &theme, "AUDIO");
+                            setting_line(
+                                left,
+                                &theme,
+                                "MASTER",
+                                format!("{:>3}%", (settings.master_volume * 100.0).round()),
+                                SettingField::Master,
+                                0,
+                            );
+                            setting_line(
+                                left,
+                                &theme,
+                                "MUSIC",
+                                format!("{:>3}%", (settings.music_volume * 100.0).round()),
+                                SettingField::Music,
+                                2,
+                            );
+                            setting_line(
+                                left,
+                                &theme,
+                                "SFX",
+                                format!("{:>3}%", (settings.sound_effect_volume * 100.0).round()),
+                                SettingField::SoundEffects,
+                                4,
+                            );
+                            settings_section(left, &theme, "DISPLAY");
+                            setting_line(
+                                left,
+                                &theme,
+                                "SHAKE",
+                                format!("{:>3}%", (settings.screen_shake * 100.0).round()),
+                                SettingField::ScreenShake,
+                                6,
+                            );
+                            toggle_line(
+                                left,
+                                &theme,
+                                "MOTION",
+                                settings.reduced_motion,
+                                SettingField::ReducedMotion,
+                                8,
+                            );
+                            toggle_line(
+                                left,
+                                &theme,
+                                "PATTERNS",
+                                settings.colorblind_assist,
+                                SettingField::Colorblind,
+                                9,
+                            );
+                            toggle_line(
+                                left,
+                                &theme,
+                                "FULLSCREEN",
+                                settings.fullscreen,
+                                SettingField::Fullscreen,
+                                10,
+                            );
+                            spawn_compact_menu_button(
+                                left,
+                                &theme,
+                                format!("QUALITY / {:?}", settings.graphics_quality).to_uppercase(),
+                                UiAction::ToggleSetting(SettingField::GraphicsQuality),
+                                17,
+                            );
+                        });
+                        grid.spawn((
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(4),
+                                padding: UiRect::axes(px(16), px(8)),
+                                border: UiRect::top(px(2)),
+                                ..default()
+                            },
+                            BackgroundColor(INK.with_alpha(0.025)),
+                            BorderColor::all(palette_color(2).with_alpha(0.45)),
+                        ))
+                        .with_children(|right| {
+                            settings_section(right, &theme, "CONTROL");
+                            setting_line(
+                                right,
+                                &theme,
+                                "DEADZONE",
+                                format!("{:>3}%", (settings.gamepad_deadzone * 100.0).round()),
+                                SettingField::GamepadDeadzone,
+                                11,
+                            );
+                            setting_line(
+                                right,
+                                &theme,
+                                "AIM SPEED",
+                                format!("{:.1}x", settings.mouse_sensitivity),
+                                SettingField::MouseSensitivity,
+                                13,
+                            );
+                            settings_section(right, &theme, "ACCESSIBILITY");
+                            toggle_line(
+                                right,
+                                &theme,
+                                "BIG HUD",
+                                settings.larger_hud_text,
+                                SettingField::LargerHudText,
+                                15,
+                            );
+                            toggle_line(
+                                right,
+                                &theme,
+                                "HIGH CONTRAST",
+                                settings.high_contrast_ui,
+                                SettingField::HighContrast,
+                                16,
+                            );
+                            if !profiles.profiles.is_empty() {
+                                settings_section(
+                                    right,
                                     &theme,
-                                    "MASTER",
-                                    format!("{:>3}%", (settings.master_volume * 100.0).round()),
-                                    SettingField::Master,
-                                    0,
+                                    &format!("PROFILES / {}", profiles.profiles.len()),
                                 );
-                                setting_line(
-                                    left,
+                                for (index, profile) in profiles.profiles.iter().enumerate() {
+                                    right
+                                        .spawn((Node {
+                                            width: percent(100),
+                                            display: Display::Flex,
+                                            column_gap: px(6),
+                                            align_items: AlignItems::Center,
+                                            ..default()
+                                        },))
+                                        .with_children(|row| {
+                                            row.spawn((
+                                                Text::new(profile.display_name.clone()),
+                                                TextFont {
+                                                    font: theme.body_font.clone(),
+                                                    font_size: FontSize::Px(14.0),
+                                                    ..default()
+                                                },
+                                                TextColor(INK),
+                                                Node {
+                                                    flex_grow: 1.0,
+                                                    ..default()
+                                                },
+                                            ));
+                                            spawn_mini_button(
+                                                row,
+                                                &theme,
+                                                "RENAME",
+                                                UiAction::RenameProfile(profile.id.clone()),
+                                                18 + index as u16 * 2,
+                                            );
+                                            let delete_label = if confirmation.action
+                                                == Some(ConfirmationAction::DeleteProfile(
+                                                    profile.id.clone(),
+                                                )) {
+                                                "CONFIRM"
+                                            } else {
+                                                "DELETE"
+                                            };
+                                            spawn_mini_button(
+                                                row,
+                                                &theme,
+                                                delete_label,
+                                                UiAction::DeleteProfile(profile.id.clone()),
+                                                19 + index as u16 * 2,
+                                            );
+                                        });
+                                }
+                                let reset_order = 18 + profiles.profiles.len() as u16 * 2;
+                                let reset = if confirmation.action
+                                    == Some(ConfirmationAction::ResetStatistics)
+                                {
+                                    "CONFIRM RESET"
+                                } else {
+                                    "RESET STATS"
+                                };
+                                let all = if confirmation.action
+                                    == Some(ConfirmationAction::ResetAllData)
+                                {
+                                    "CONFIRM RESET"
+                                } else {
+                                    "RESET DATA"
+                                };
+                                spawn_compact_menu_button(
+                                    right,
                                     &theme,
-                                    "MUSIC",
-                                    format!("{:>3}%", (settings.music_volume * 100.0).round()),
-                                    SettingField::Music,
-                                    2,
-                                );
-                                setting_line(
-                                    left,
-                                    &theme,
-                                    "SFX",
-                                    format!(
-                                        "{:>3}%",
-                                        (settings.sound_effect_volume * 100.0).round()
-                                    ),
-                                    SettingField::SoundEffects,
-                                    4,
-                                );
-                                settings_section(left, &theme, "DISPLAY");
-                                setting_line(
-                                    left,
-                                    &theme,
-                                    "SHAKE",
-                                    format!("{:>3}%", (settings.screen_shake * 100.0).round()),
-                                    SettingField::ScreenShake,
-                                    6,
-                                );
-                                toggle_line(
-                                    left,
-                                    &theme,
-                                    "MOTION",
-                                    settings.reduced_motion,
-                                    SettingField::ReducedMotion,
-                                    8,
-                                );
-                                toggle_line(
-                                    left,
-                                    &theme,
-                                    "PATTERNS",
-                                    settings.colorblind_assist,
-                                    SettingField::Colorblind,
-                                    9,
-                                );
-                                toggle_line(
-                                    left,
-                                    &theme,
-                                    "FULLSCREEN",
-                                    settings.fullscreen,
-                                    SettingField::Fullscreen,
-                                    10,
+                                    reset,
+                                    UiAction::ResetStatistics,
+                                    reset_order,
                                 );
                                 spawn_compact_menu_button(
-                                    left,
-                                    &theme,
-                                    format!("QUALITY / {:?}", settings.graphics_quality)
-                                        .to_uppercase(),
-                                    UiAction::ToggleSetting(SettingField::GraphicsQuality),
-                                    17,
-                                );
-                            });
-                        grid.spawn((Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(4),
-                            ..default()
-                        },))
-                            .with_children(|right| {
-                                settings_section(right, &theme, "CONTROL");
-                                setting_line(
                                     right,
                                     &theme,
-                                    "DEADZONE",
-                                    format!("{:>3}%", (settings.gamepad_deadzone * 100.0).round()),
-                                    SettingField::GamepadDeadzone,
-                                    11,
+                                    all,
+                                    UiAction::ResetAllData,
+                                    reset_order + 1,
                                 );
-                                setting_line(
-                                    right,
-                                    &theme,
-                                    "AIM SPEED",
-                                    format!("{:.1}x", settings.mouse_sensitivity),
-                                    SettingField::MouseSensitivity,
-                                    13,
-                                );
-                                settings_section(right, &theme, "ACCESSIBILITY");
-                                toggle_line(
-                                    right,
-                                    &theme,
-                                    "BIG HUD",
-                                    settings.larger_hud_text,
-                                    SettingField::LargerHudText,
-                                    15,
-                                );
-                                toggle_line(
-                                    right,
-                                    &theme,
-                                    "HIGH CONTRAST",
-                                    settings.high_contrast_ui,
-                                    SettingField::HighContrast,
-                                    16,
-                                );
-                                if !profiles.profiles.is_empty() {
-                                    settings_section(
-                                        right,
-                                        &theme,
-                                        &format!("PROFILES / {}", profiles.profiles.len()),
-                                    );
-                                    for (index, profile) in profiles.profiles.iter().enumerate() {
-                                        right
-                                            .spawn((Node {
-                                                width: percent(100),
-                                                display: Display::Flex,
-                                                column_gap: px(6),
-                                                align_items: AlignItems::Center,
-                                                ..default()
-                                            },))
-                                            .with_children(|row| {
-                                                row.spawn((
-                                                    Text::new(profile.display_name.clone()),
-                                                    TextFont {
-                                                        font: theme.body_font.clone(),
-                                                        font_size: FontSize::Px(14.0),
-                                                        ..default()
-                                                    },
-                                                    TextColor(INK),
-                                                    Node {
-                                                        flex_grow: 1.0,
-                                                        ..default()
-                                                    },
-                                                ));
-                                                spawn_mini_button(
-                                                    row,
-                                                    &theme,
-                                                    "RENAME",
-                                                    UiAction::RenameProfile(profile.id.clone()),
-                                                    18 + index as u16 * 2,
-                                                );
-                                                let delete_label = if confirmation.action
-                                                    == Some(ConfirmationAction::DeleteProfile(
-                                                        profile.id.clone(),
-                                                    )) {
-                                                    "CONFIRM"
-                                                } else {
-                                                    "DELETE"
-                                                };
-                                                spawn_mini_button(
-                                                    row,
-                                                    &theme,
-                                                    delete_label,
-                                                    UiAction::DeleteProfile(profile.id.clone()),
-                                                    19 + index as u16 * 2,
-                                                );
-                                            });
-                                    }
-                                    let reset_order = 18 + profiles.profiles.len() as u16 * 2;
-                                    let reset = if confirmation.action
-                                        == Some(ConfirmationAction::ResetStatistics)
-                                    {
-                                        "CONFIRM RESET"
-                                    } else {
-                                        "RESET STATS"
-                                    };
-                                    let all = if confirmation.action
-                                        == Some(ConfirmationAction::ResetAllData)
-                                    {
-                                        "CONFIRM RESET"
-                                    } else {
-                                        "RESET DATA"
-                                    };
-                                    spawn_compact_menu_button(
-                                        right,
-                                        &theme,
-                                        reset,
-                                        UiAction::ResetStatistics,
-                                        reset_order,
-                                    );
-                                    spawn_compact_menu_button(
-                                        right,
-                                        &theme,
-                                        all,
-                                        UiAction::ResetAllData,
-                                        reset_order + 1,
-                                    );
-                                }
-                            });
+                            }
+                        });
                     });
                 if let Some(warning) = &persistence.warning {
                     panel.spawn((
@@ -503,7 +408,7 @@ pub(super) fn spawn_pause(
         .spawn((
             ScreenRoot,
             screen_node(),
-            BackgroundColor(Color::srgba(0.96, 0.94, 0.88, 0.86)),
+            BackgroundColor(Color::srgba(0.04, 0.055, 0.08, 0.72)),
         ))
         .with_children(|root| {
             let mut pause_panel = panel_node(percent(90));
@@ -516,12 +421,12 @@ pub(super) fn spawn_pause(
             .with_children(|panel| {
                 spawn_title(panel, &theme, "PAUSED", 58.0);
                 if disconnect.device.is_some() {
-                    spawn_subtitle(
+                    spawn_overlay_caption(
                         panel,
                         &theme,
                         format!("{} LOST CONTROLLER", disconnect.player_name),
                     );
-                    spawn_subtitle(panel, &theme, "PRESS A TO TAKE OVER");
+                    spawn_overlay_caption(panel, &theme, "PRESS ANY BUTTON TO TAKE OVER");
                     spawn_button(
                         panel,
                         &theme,
@@ -533,14 +438,14 @@ pub(super) fn spawn_pause(
                     spawn_button(panel, &theme, "RESUME", UiAction::Resume, 0);
                 }
                 spawn_button(panel, &theme, "SETTINGS", UiAction::Settings, 1);
-                spawn_button(
+                spawn_overlay_button(
                     panel,
                     &theme,
                     "RESTART MATCH",
                     UiAction::State(AppState::MatchLoading),
                     2,
                 );
-                spawn_button(
+                spawn_overlay_button(
                     panel,
                     &theme,
                     "RETURN TO LOBBY",
@@ -571,18 +476,16 @@ pub(super) fn spawn_game_over(
                 BorderColor::all(INK),
             ))
             .with_children(|panel| {
-                spawn_title(panel, &theme, "100% CONTROL!", 52.0);
-                spawn_subtitle(
+                spawn_subtitle(panel, &theme, "FIELD CLAIMED");
+                spawn_title(
                     panel,
                     &theme,
-                    format!(
-                        "{} CONTROLS THE FIELD",
-                        if results.winner_name.is_empty() {
-                            "THE WINNER"
-                        } else {
-                            &results.winner_name
-                        }
-                    ),
+                    if results.winner_name.is_empty() {
+                        "WINNER"
+                    } else {
+                        &results.winner_name
+                    },
+                    52.0,
                 );
                 spawn_button(
                     panel,
@@ -617,17 +520,22 @@ pub(super) fn spawn_results(
                 BorderColor::all(INK),
             ))
             .with_children(|panel| {
-                spawn_title(panel, &theme, "FINAL RANKING", 34.0);
+                spawn_subtitle(panel, &theme, "MATCH COMPLETE");
+                spawn_title(
+                    panel,
+                    &theme,
+                    if results.winner_name.is_empty() {
+                        "NO WINNER"
+                    } else {
+                        &results.winner_name
+                    },
+                    38.0,
+                );
                 spawn_subtitle(
                     panel,
                     &theme,
                     format!(
-                        "{}  /  {:02}:{:02}",
-                        if results.winner_name.is_empty() {
-                            "NO WINNER"
-                        } else {
-                            &results.winner_name
-                        },
+                        "WINNER  /  {:02}:{:02}",
                         (results.duration_seconds / 60.0) as u32,
                         results.duration_seconds as u32 % 60
                     ),
@@ -640,11 +548,11 @@ pub(super) fn spawn_results(
                         ..default()
                     },))
                     .with_children(|header| {
-                        header.spawn(result_column("PLACE", px(48), false, &theme));
+                        header.spawn(result_column("#", px(48), false, &theme));
                         header.spawn(result_column("PLAYER", px(1), true, &theme));
-                        header.spawn(result_column("PEAK", px(58), false, &theme));
+                        header.spawn(result_column("TURF", px(58), false, &theme));
                         header.spawn(result_column("K/D", px(48), false, &theme));
-                        header.spawn(result_column("CAP", px(58), false, &theme));
+                        header.spawn(result_column("BEST LOOP", px(72), false, &theme));
                         header.spawn(result_column("CELLS", px(58), false, &theme));
                         header.spawn(result_column("TRAIL", px(58), false, &theme));
                     });
@@ -656,14 +564,18 @@ pub(super) fn spawn_results(
                         .spawn((
                             Node {
                                 width: percent(100),
-                                min_height: px(30),
+                                min_height: px(if row.placement <= 3 { 34 } else { 29 }),
                                 padding: UiRect::axes(px(10), px(2)),
                                 column_gap: px(6),
                                 border_radius: BorderRadius::all(px(0)),
                                 align_items: AlignItems::Center,
                                 ..default()
                             },
-                            BackgroundColor(Color::NONE),
+                            BackgroundColor(if row.placement == 1 {
+                                palette_color(row.color_id).with_alpha(0.06)
+                            } else {
+                                Color::NONE
+                            }),
                         ))
                         .with_children(|line| {
                             line.spawn((
@@ -702,12 +614,18 @@ pub(super) fn spawn_results(
                                     ..default()
                                 },
                             ));
-                            for value in [
-                                format!("{:.0}%", row.peak_percent),
-                                format!("{}/{}", row.kills, row.deaths),
-                                format!("{:.0}%", row.largest_capture_percent),
-                                format!("{}k", (row.total_cells_captured as f32 / 1000.0).round()),
-                                format!("{:.0}m", row.longest_trail),
+                            for (value, width) in [
+                                (format!("{:.0}%", row.peak_percent), 58),
+                                (format!("{}/{}", row.kills, row.deaths), 58),
+                                (format!("{:.0}%", row.largest_capture_percent), 72),
+                                (
+                                    format!(
+                                        "{}k",
+                                        (row.total_cells_captured as f32 / 1000.0).round()
+                                    ),
+                                    58,
+                                ),
+                                (format!("{:.0}m", row.longest_trail), 58),
                             ] {
                                 line.spawn((
                                     Text::new(value),
@@ -716,9 +634,13 @@ pub(super) fn spawn_results(
                                         font_size: FontSize::Px(13.0),
                                         ..default()
                                     },
-                                    TextColor(if row.placement == 1 { LIME } else { INK }),
+                                    TextColor(if row.placement == 1 {
+                                        palette_color(row.color_id)
+                                    } else {
+                                        INK
+                                    }),
                                     Node {
-                                        width: px(58),
+                                        width: px(width),
                                         ..default()
                                     },
                                 ));

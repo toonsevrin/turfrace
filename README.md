@@ -2,7 +2,7 @@
 
 Turfrace is a fast local multiplayer territory game for 2–8 humans, with NPCs filling a configurable 2–12 competitor field. Draw loops, steal turf, and cut exposed trails; the first competitor to control 95% of the irregular paper arena wins.
 
-The v0.1 implementation is a static Rust/Bevy 0.19 WebAssembly application. It has no server, telemetry, or network play. Profiles, preferences, lobby choices, and lifetime statistics remain in browser-local storage.
+The v0.1 implementation is a static Rust/Bevy 0.19 WebAssembly application. It has no server, telemetry, or network play. Profiles, preferences, lobby choices, and lifetime statistics remain in browser-local storage. Fresh lobbies start with no robots; add them explicitly with the robot stepper.
 
 Territory is exact fixed-point vector geometry with a bounded render/broadphase cache. Every
 competitor has one spawn-anchored island: a capture severs any other lobe, and a cube standing on
@@ -72,12 +72,20 @@ The visual harness boots the real game plugins at a fixed timestep and captures 
 ```sh
 ./scripts/visual-feedback home
 ./scripts/visual-feedback leaderboard
+./scripts/visual-feedback lobby-empty
+./scripts/visual-feedback lobby-robots
+./scripts/visual-feedback countdown
 ./scripts/visual-feedback match --frames 180
 ./scripts/visual-feedback match --seconds 6
 ./scripts/visual-feedback capture --seconds 6
+./scripts/visual-feedback respawn
+./scripts/visual-feedback disconnect
+./scripts/visual-feedback game-over
 ./scripts/visual-feedback results --width 960 --height 600
 ./scripts/visual-feedback settings
 ./scripts/visual-feedback --all
+./scripts/ui-preview lobby-cards
+./scripts/ui-preview hud
 ```
 
 Images are written to `target/visual-feedback/`. Frame and second offsets use the game's fixed 60 Hz clock, while optional dimensions make layout stress tests repeatable. The script uses Xvfb and Mesa's software Vulkan driver by default so people or automated review agents can inspect actual rendering in headless Linux. `VK_ICD_FILENAMES`, `WGPU_BACKEND`, and `WGPU_SETTINGS_PRIO` remain overridable for another test environment.

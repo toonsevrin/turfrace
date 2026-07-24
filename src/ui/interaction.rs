@@ -36,6 +36,8 @@ pub(super) fn animate_background(
     time: Res<Time>,
     settings: Res<UserSettings>,
     mut trails: Query<(&DecorativeTrail, &mut UiTransform)>,
+    mut racers: Query<(&HomeRacer, &mut UiTransform), Without<DecorativeTrail>>,
+    mut ready_prompts: Query<(&ReadyPrompt, &mut BackgroundColor)>,
 ) {
     if settings.reduced_motion {
         return;
@@ -46,6 +48,17 @@ pub(super) fn animate_background(
             t.sin() * trail.amplitude,
             (t * 0.73).cos() * trail.amplitude * 0.5,
         );
+    }
+    for (racer, mut transform) in &mut racers {
+        let t = time.elapsed_secs() * racer.speed + racer.phase;
+        transform.translation = Val2::px(t.cos() * racer.radius_x, t.sin() * racer.radius_y);
+        transform.rotation = Rot2::radians(t + std::f32::consts::FRAC_PI_2);
+    }
+    for (prompt, mut background) in &mut ready_prompts {
+        let t = time.elapsed_secs() * 3.0 + prompt.phase;
+        background.0 = prompt
+            .color
+            .with_alpha(0.045 + (t.sin() * 0.5 + 0.5) * 0.075);
     }
 }
 
@@ -354,17 +367,11 @@ pub(super) fn dispatch_ui_actions(
                 if *slot >= lobby.players.len() {
                     continue;
                 }
-                let default_name = format!("Player {}", slot + 1);
-                let profile = profiles.create(&default_name).clone();
-                lobby.players[*slot].profile_id = Some(profile.id);
-                lobby.players[*slot].display_name = profile.display_name.clone();
-                editor.target = Some(NameEditorTarget::LobbySlot(*slot));
-                editor.buffer = profile.display_name;
+                editor.begin_new_profile(*slot);
                 for entity in &editor_overlays {
                     commands.entity(entity).despawn();
                 }
                 spawn_name_editor(&mut commands, &theme, &editor.buffer);
-                persistence.dirty = true;
             }
             UiAction::RenameProfile(profile_id) => {
                 if let Some(profile) = profiles
@@ -372,8 +379,7 @@ pub(super) fn dispatch_ui_actions(
                     .iter()
                     .find(|profile| profile.id == *profile_id)
                 {
-                    editor.target = Some(NameEditorTarget::ExistingProfile(profile_id.clone()));
-                    editor.buffer = profile.display_name.clone();
+                    editor.begin_rename(profile_id.clone(), &profile.display_name);
                     for entity in &editor_overlays {
                         commands.entity(entity).despawn();
                     }
@@ -401,37 +407,17 @@ pub(super) fn dispatch_ui_actions(
                 editor.buffer.pop();
             }
             UiAction::EditorSave => {
-                if let Some(target) = editor.target.clone() {
-                    let profile_id = match &target {
-                        NameEditorTarget::LobbySlot(slot) => lobby
-                            .players
-                            .get(*slot)
-                            .and_then(|player| player.profile_id.clone()),
-                        NameEditorTarget::ExistingProfile(profile_id) => Some(profile_id.clone()),
-                    };
-                    if let Some(profile_id) = profile_id
-                        && let Some(profile) = profiles
-                            .profiles
-                            .iter_mut()
-                            .find(|profile| profile.id == profile_id)
-                    {
-                        profile.display_name =
-                            sanitize_profile_name(&editor.buffer, &profile.display_name);
-                        for player in &mut lobby.players {
-                            if player.profile_id.as_deref() == Some(&profile_id) {
-                                player.display_name = profile.display_name.clone();
-                            }
-                        }
-                    }
+                if let Some(target) = editor.target.take()
+                    && commit_name_edit(target, &editor.buffer, &mut profiles, &mut lobby)
+                {
+                    persistence.dirty = true;
                 }
-                editor.target = None;
                 for entity in &editor_overlays {
                     commands.entity(entity).despawn();
                 }
-                persistence.dirty = true;
             }
             UiAction::EditorCancel => {
-                editor.target = None;
+                editor.cancel();
                 for entity in &editor_overlays {
                     commands.entity(entity).despawn();
                 }
@@ -443,6 +429,43 @@ pub(super) fn dispatch_ui_actions(
                 }
                 next.set(AppState::MatchLoading);
             }
+        }
+    }
+}
+
+fn commit_name_edit(
+    target: NameEditorTarget,
+    requested_name: &str,
+    profiles: &mut ProfileStore,
+    lobby: &mut Lobby,
+) -> bool {
+    match target {
+        NameEditorTarget::NewLobbyProfile(slot) => {
+            let Some(player) = lobby.players.get_mut(slot) else {
+                return false;
+            };
+            let fallback = format!("Player {}", slot + 1);
+            let name = sanitize_profile_name(requested_name, &fallback);
+            let profile = profiles.create(&name).clone();
+            player.profile_id = Some(profile.id);
+            player.display_name = profile.display_name;
+            true
+        }
+        NameEditorTarget::ExistingProfile(profile_id) => {
+            let Some(profile) = profiles
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.id == profile_id)
+            else {
+                return false;
+            };
+            profile.display_name = sanitize_profile_name(requested_name, &profile.display_name);
+            for player in &mut lobby.players {
+                if player.profile_id.as_deref() == Some(&profile_id) {
+                    player.display_name.clone_from(&profile.display_name);
+                }
+            }
+            true
         }
     }
 }
@@ -708,5 +731,53 @@ mod tests {
             audio_cue_for_action(&UiAction::Back(AppState::Home)),
             AudioCue::MenuBack
         );
+    }
+
+    #[test]
+    fn new_profile_is_committed_only_when_the_editor_saves() {
+        let mut profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        lobby.join(InputDeviceId::Mouse, &profiles);
+
+        assert!(commit_name_edit(
+            NameEditorTarget::NewLobbyProfile(0),
+            "Ada",
+            &mut profiles,
+            &mut lobby,
+        ));
+
+        assert_eq!(profiles.profiles.len(), 1);
+        assert_eq!(profiles.profiles[0].display_name, "Ada");
+        assert_eq!(lobby.players[0].display_name, "Ada");
+    }
+
+    #[test]
+    fn blank_new_profile_save_uses_the_slot_default_name() {
+        let mut profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        lobby.join(InputDeviceId::Mouse, &profiles);
+
+        assert!(commit_name_edit(
+            NameEditorTarget::NewLobbyProfile(0),
+            "",
+            &mut profiles,
+            &mut lobby,
+        ));
+
+        assert_eq!(profiles.profiles[0].display_name, "Player 1");
+        assert_eq!(lobby.players[0].display_name, "Player 1");
+    }
+
+    #[test]
+    fn cancelling_a_new_profile_draft_cannot_persist_a_profile() {
+        let profiles = ProfileStore::default();
+        let mut editor = NameEditor::default();
+
+        editor.begin_new_profile(0);
+        editor.cancel();
+
+        assert!(editor.target.is_none());
+        assert!(editor.buffer.is_empty());
+        assert!(profiles.profiles.is_empty());
     }
 }

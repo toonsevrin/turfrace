@@ -60,6 +60,20 @@ struct DecorativeTrail {
     amplitude: f32,
 }
 
+#[derive(Component)]
+struct HomeRacer {
+    phase: f32,
+    speed: f32,
+    radius_x: f32,
+    radius_y: f32,
+}
+
+#[derive(Component)]
+struct ReadyPrompt {
+    color: Color,
+    phase: f32,
+}
+
 #[derive(Component, Clone, Debug)]
 enum UiAction {
     State(AppState),
@@ -181,9 +195,27 @@ struct NameEditor {
     buffer: String,
 }
 
+impl NameEditor {
+    fn begin_new_profile(&mut self, slot: usize) {
+        self.target = Some(NameEditorTarget::NewLobbyProfile(slot));
+        self.buffer.clear();
+    }
+
+    fn begin_rename(&mut self, profile_id: String, current_name: &str) {
+        self.target = Some(NameEditorTarget::ExistingProfile(profile_id));
+        self.buffer.clear();
+        self.buffer.push_str(current_name);
+    }
+
+    fn cancel(&mut self) {
+        self.target = None;
+        self.buffer.clear();
+    }
+}
+
 #[derive(Debug, Clone)]
 enum NameEditorTarget {
-    LobbySlot(usize),
+    NewLobbyProfile(usize),
     ExistingProfile(String),
 }
 
@@ -304,10 +336,9 @@ mod tests {
     }
 
     #[test]
-    fn match_ranking_label_stays_quiet_and_omits_percentage() {
+    fn match_ranking_label_includes_precise_claimed_share() {
         let mut label = String::new();
-        write_ranking_label(&mut label, 2, "MOUSE ACE");
-        assert_eq!(label, "2  MOUSE ACE");
-        assert!(!label.contains('%'));
+        write_ranking_label(&mut label, 2, "MOUSE ACE", 12.34);
+        assert_eq!(label, "2  MOUSE ACE   12.3%");
     }
 }

@@ -17,7 +17,6 @@ use crate::{
 pub const MAX_HUMANS: usize = 8;
 pub const MIN_COMPETITORS: u8 = 2;
 pub const MAX_COMPETITORS: u8 = 12;
-pub const DEFAULT_COMPETITORS: u8 = 8;
 pub const PLAYER_COLOR_COUNT: u8 = crate::palette::PLAYER_COLORS.len() as u8;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,42 +30,37 @@ pub struct LobbyPlayer {
     pub connected: bool,
 }
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct Lobby {
     pub players: Vec<LobbyPlayer>,
-    pub total_competitors: u8,
+    /// Robots selected independently of the joined human count.
+    pub npc_count: u8,
     pub shared_focus_owner: Option<InputDeviceId>,
-}
-
-impl Default for Lobby {
-    fn default() -> Self {
-        Self {
-            players: Vec::new(),
-            total_competitors: DEFAULT_COMPETITORS,
-            shared_focus_owner: None,
-        }
-    }
 }
 
 impl Lobby {
     pub fn npc_count(&self) -> u8 {
-        self.total_competitors
-            .saturating_sub(self.players.len() as u8)
+        self.npc_count
+    }
+
+    pub fn total_competitors(&self) -> u8 {
+        self.players.len() as u8 + self.npc_count
+    }
+
+    pub fn max_npc_count(&self) -> u8 {
+        MAX_COMPETITORS.saturating_sub(self.players.len() as u8)
     }
 
     pub fn can_start(&self) -> bool {
-        !self.players.is_empty()
+        self.players.len() >= usize::from(MIN_COMPETITORS)
             && self
                 .players
                 .iter()
                 .all(|player| player.ready && player.connected)
-            && usize::from(self.total_competitors) >= self.players.len()
     }
 
-    pub fn set_total_competitors(&mut self, requested: i16) {
-        let minimum = MIN_COMPETITORS.max(self.players.len() as u8);
-        self.total_competitors =
-            requested.clamp(i16::from(minimum), i16::from(MAX_COMPETITORS)) as u8;
+    pub fn set_npc_count(&mut self, requested: i16) {
+        self.npc_count = requested.clamp(0, i16::from(self.max_npc_count())) as u8;
     }
 
     pub fn slot_for_device(&self, device: InputDeviceId) -> Option<usize> {
@@ -104,7 +98,7 @@ impl Lobby {
             ready: false,
             connected: true,
         });
-        self.total_competitors = self.total_competitors.max(self.players.len() as u8);
+        self.npc_count = self.npc_count.min(self.max_npc_count());
         self.shared_focus_owner = Some(device);
         true
     }
@@ -230,7 +224,7 @@ impl Default for MatchSetup {
     fn default() -> Self {
         Self {
             seed: 1,
-            total_competitors: DEFAULT_COMPETITORS,
+            total_competitors: MIN_COMPETITORS,
             humans: Vec::new(),
             replay_same_field: false,
         }
@@ -242,7 +236,7 @@ pub enum LobbyCommand {
     Join(InputDeviceId),
     Leave(InputDeviceId),
     ToggleReady(InputDeviceId),
-    ChangeCompetitors(i8),
+    ChangeNpcCount(i8),
     CycleColor(InputDeviceId, i8),
     CycleProfile(InputDeviceId, i8),
     CyclePattern(InputDeviceId, i8),
@@ -252,18 +246,50 @@ pub enum LobbyCommand {
 #[derive(Message, Debug, Clone, Copy)]
 pub struct LobbyCommandMessage(pub LobbyCommand);
 
-#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+#[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LastLobbySettings {
     pub schema_version: u32,
-    pub total_competitors: u8,
+    pub npc_count: u8,
 }
 
 impl Default for LastLobbySettings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
-            total_competitors: DEFAULT_COMPETITORS,
+            schema_version: 2,
+            npc_count: 0,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for LastLobbySettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StoredSettings {
+            #[serde(default)]
+            schema_version: u32,
+            #[serde(default)]
+            npc_count: Option<u8>,
+            #[serde(default)]
+            total_competitors: Option<u8>,
+        }
+
+        let stored = StoredSettings::deserialize(deserializer)?;
+        let npc_count = stored.npc_count.unwrap_or_else(|| {
+            // Version 1 stored a target field size. It assumed the normal
+            // two-human lobby, so retain the equivalent robot preference.
+            stored
+                .total_competitors
+                .unwrap_or(MIN_COMPETITORS)
+                .saturating_sub(MIN_COMPETITORS)
+        });
+        let _ = stored.schema_version;
+        Ok(Self {
+            schema_version: 2,
+            npc_count: npc_count.min(MAX_COMPETITORS - 1),
+        })
     }
 }
 
@@ -411,7 +437,7 @@ fn replace_disconnected_with_npc(
 }
 
 fn restore_lobby_settings(last: Res<LastLobbySettings>, mut lobby: ResMut<Lobby>) {
-    lobby.set_total_competitors(i16::from(last.total_competitors));
+    lobby.set_npc_count(i16::from(last.npc_count));
 }
 
 fn translate_menu_input(
@@ -491,10 +517,10 @@ fn apply_lobby_commands(
                     audio.write(PlayAudioCue::human(AudioCue::Ready));
                 }
             }
-            LobbyCommand::ChangeCompetitors(delta) => {
-                let requested = i16::from(lobby.total_competitors) + i16::from(delta);
-                lobby.set_total_competitors(requested);
-                last.total_competitors = lobby.total_competitors;
+            LobbyCommand::ChangeNpcCount(delta) => {
+                let requested = i16::from(lobby.npc_count()) + i16::from(delta);
+                lobby.set_npc_count(requested);
+                last.npc_count = lobby.npc_count();
                 persistence.dirty = true;
             }
             LobbyCommand::CycleColor(device, direction) => {
@@ -530,7 +556,7 @@ fn prepare_match_setup(lobby: &Lobby, setup: &mut MatchSetup) {
         seed: previous_seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1),
-        total_competitors: lobby.total_competitors,
+        total_competitors: lobby.total_competitors(),
         humans: lobby
             .players
             .iter()
@@ -551,26 +577,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_competitors_never_drops_below_humans() {
+    fn robot_count_is_explicit_and_clamped_to_available_slots() {
         let profiles = ProfileStore::default();
         let mut lobby = Lobby::default();
+        assert_eq!(lobby.npc_count(), 0);
         for index in 0..5 {
             lobby.join(InputDeviceId::Gamepad(index), &profiles);
         }
-        lobby.set_total_competitors(2);
-        assert_eq!(lobby.total_competitors, 5);
-        assert_eq!(lobby.npc_count(), 0);
+        lobby.set_npc_count(99);
+        assert_eq!(lobby.npc_count(), 7);
+        assert_eq!(lobby.total_competitors(), 12);
     }
 
     #[test]
-    fn start_requires_one_connected_ready_human() {
+    fn start_requires_two_connected_ready_humans() {
         let profiles = ProfileStore::default();
         let mut lobby = Lobby::default();
         lobby.join(InputDeviceId::Mouse, &profiles);
         assert!(!lobby.can_start());
         lobby.players[0].ready = true;
+        assert!(!lobby.can_start());
+        lobby.set_npc_count(1);
+        assert!(!lobby.can_start());
+        lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
+        lobby.players[1].ready = true;
         assert!(lobby.can_start());
-        lobby.players[0].connected = false;
+        lobby.players[1].connected = false;
         assert!(!lobby.can_start());
     }
 
@@ -586,7 +618,28 @@ mod tests {
 
         assert_eq!(setup.humans.len(), 1);
         assert_eq!(setup.humans[0].device, InputDeviceId::Mouse);
-        assert_eq!(setup.total_competitors, lobby.total_competitors);
+        assert_eq!(setup.total_competitors, lobby.total_competitors());
+    }
+
+    #[test]
+    fn version_one_lobby_preferences_migrate_to_robot_count() {
+        let migrated: LastLobbySettings =
+            serde_json::from_str(r#"{"schema_version":1,"total_competitors":8}"#).unwrap();
+        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.npc_count, 6);
+    }
+
+    #[test]
+    fn version_two_lobby_preferences_round_trip() {
+        let settings = LastLobbySettings {
+            schema_version: 2,
+            npc_count: 4,
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LastLobbySettings>(&encoded).unwrap(),
+            settings
+        );
     }
 
     #[test]
