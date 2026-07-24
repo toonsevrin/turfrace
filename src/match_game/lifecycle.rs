@@ -20,6 +20,35 @@ pub(super) fn begin_from_lobby(world: &mut World) {
     world.resource_mut::<MatchLoadingFrames>().0 = 0;
 }
 
+const ATTRACT_NPC_COUNT: u8 = 6;
+const ATTRACT_SEED_START: u64 = 0xA77A_C7A5_5EED;
+const SEED_STEP: u64 = 6_364_136_223_846_793_005;
+
+#[derive(Resource, Debug, Clone, Copy)]
+pub(super) struct AttractSeedSequence(pub u64);
+
+impl Default for AttractSeedSequence {
+    fn default() -> Self {
+        Self(ATTRACT_SEED_START)
+    }
+}
+
+pub(super) fn begin_attract_match(world: &mut World) {
+    let seed = {
+        let mut sequence = world.resource_mut::<AttractSeedSequence>();
+        let seed = sequence.0;
+        sequence.0 = seed.wrapping_mul(SEED_STEP).wrapping_add(1);
+        seed
+    };
+    let setup = MatchSetup {
+        seed,
+        total_competitors: ATTRACT_NPC_COUNT,
+        humans: Vec::new(),
+        replay_same_field: false,
+    };
+    start_match_for(world, &setup, MatchPurpose::Attract);
+}
+
 #[derive(Resource, Default)]
 pub(super) struct MatchLoadingFrames(pub u8);
 
@@ -37,6 +66,10 @@ pub(super) fn finish_match_loading(
 
 /// Fully resets authoritative state using a lobby composition. Useful for rematches and tests.
 pub fn start_match(world: &mut World, setup: &MatchSetup) {
+    start_match_for(world, setup, MatchPurpose::Playable);
+}
+
+pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: MatchPurpose) {
     despawn_competitors(world);
     let config = world.resource::<GameConfig>().clone();
     let count = usize::from(setup.total_competitors.clamp(2, 12));
@@ -54,13 +87,18 @@ pub fn start_match(world: &mut World, setup: &MatchSetup) {
     // integrations. Gameplay ownership remains in the vector map.
     territory.rebuild_sample_cache(&mut board);
     let counts = board.owner_counts;
+    let (phase, countdown_remaining) = match purpose {
+        MatchPurpose::Playable => (MatchPhase::Countdown, 3.0),
+        MatchPurpose::Attract => (MatchPhase::Running, 0.0),
+    };
     world.insert_resource(board);
     world.insert_resource(territory);
     world.insert_resource(MatchSession {
         seed: setup.seed,
-        phase: MatchPhase::Countdown,
+        purpose,
+        phase,
         elapsed_seconds: 0.0,
-        countdown_remaining: 3.0,
+        countdown_remaining,
         winner: None,
         result_hold_remaining: 0.0,
     });

@@ -18,8 +18,8 @@ use crate::{
 
 use super::capture_systems::{detect_closures, resolve_captures};
 use super::lifecycle::{
-    MatchLoadingFrames, advance_countdown, advance_result_hold, begin_from_lobby, cleanup_match,
-    finish_match_loading,
+    AttractSeedSequence, MatchLoadingFrames, advance_countdown, advance_result_hold,
+    begin_attract_match, begin_from_lobby, cleanup_match, finish_match_loading,
 };
 use super::model::*;
 use super::respawn::advance_respawns;
@@ -71,6 +71,28 @@ struct EliminationResources<'w> {
 
 pub struct MatchPlugin;
 
+fn match_is_counting_down(state: Res<State<AppState>>, session: Res<MatchSession>) -> bool {
+    session.phase == MatchPhase::Countdown
+        && session.purpose == MatchPurpose::Playable
+        && *state.get() == AppState::Countdown
+}
+
+fn match_is_running(state: Res<State<AppState>>, session: Res<MatchSession>) -> bool {
+    simulation_is_active(state.get(), &session)
+}
+
+fn simulation_is_active(state: &AppState, session: &MatchSession) -> bool {
+    session.phase == MatchPhase::Running
+        && matches!(
+            (state, session.purpose),
+            (AppState::Playing, MatchPurpose::Playable) | (AppState::Home, MatchPurpose::Attract)
+        )
+}
+
+fn match_is_attract(session: Res<MatchSession>) -> bool {
+    session.purpose == MatchPurpose::Attract
+}
+
 impl Plugin for MatchPlugin {
     fn build(&self, app: &mut App) {
         let sets = (
@@ -100,85 +122,42 @@ impl Plugin for MatchPlugin {
             .init_resource::<PendingCaptures>()
             .init_resource::<DisplacementCredits>()
             .init_resource::<MatchLoadingFrames>()
+            .init_resource::<AttractSeedSequence>()
             .init_resource::<Time<Fixed>>()
             .configure_sets(FixedUpdate, sets)
             .add_systems(Startup, configure_fixed_timestep)
             .add_systems(OnEnter(AppState::MatchLoading), begin_from_lobby)
+            .add_systems(OnEnter(AppState::Home), begin_attract_match)
+            .add_systems(
+                OnExit(AppState::Home),
+                cleanup_match.run_if(match_is_attract),
+            )
             .add_systems(
                 Update,
                 finish_match_loading.run_if(in_state(AppState::MatchLoading)),
             )
             .add_systems(OnEnter(AppState::Lobby), cleanup_match)
-            .add_systems(OnEnter(AppState::Home), cleanup_match)
             .add_systems(
                 FixedUpdate,
-                advance_countdown.run_if(in_state(AppState::Countdown)),
+                advance_countdown.run_if(match_is_counting_down),
             )
             .add_systems(
                 FixedUpdate,
-                npc_think
-                    .in_set(MatchSystemSet::NpcThink)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                move_competitors
-                    .in_set(MatchSystemSet::MoveCompetitors)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                extend_trails
-                    .in_set(MatchSystemSet::ExtendTrails)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                detect_trail_collisions
-                    .in_set(MatchSystemSet::DetectTrailCollisions)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                resolve_deaths
-                    .in_set(MatchSystemSet::ResolveDeaths)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                detect_closures
-                    .in_set(MatchSystemSet::DetectClosures)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                resolve_captures
-                    .in_set(MatchSystemSet::ResolveCaptures)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                resolve_territory_consequences
-                    .in_set(MatchSystemSet::ResolveTerritoryConsequences)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                check_victory
-                    .in_set(MatchSystemSet::CheckVictory)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                advance_respawns
-                    .in_set(MatchSystemSet::AdvanceRespawns)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                FixedUpdate,
-                update_rankings
-                    .in_set(MatchSystemSet::UpdateRankings)
-                    .run_if(in_state(AppState::Playing)),
+                (
+                    npc_think.in_set(MatchSystemSet::NpcThink),
+                    move_competitors.in_set(MatchSystemSet::MoveCompetitors),
+                    extend_trails.in_set(MatchSystemSet::ExtendTrails),
+                    detect_trail_collisions.in_set(MatchSystemSet::DetectTrailCollisions),
+                    resolve_deaths.in_set(MatchSystemSet::ResolveDeaths),
+                    detect_closures.in_set(MatchSystemSet::DetectClosures),
+                    resolve_captures.in_set(MatchSystemSet::ResolveCaptures),
+                    resolve_territory_consequences
+                        .in_set(MatchSystemSet::ResolveTerritoryConsequences),
+                    check_victory.in_set(MatchSystemSet::CheckVictory),
+                    advance_respawns.in_set(MatchSystemSet::AdvanceRespawns),
+                    update_rankings.in_set(MatchSystemSet::UpdateRankings),
+                )
+                    .run_if(match_is_running),
             )
             .add_systems(
                 Update,
@@ -645,7 +624,7 @@ fn check_victory(
     mut events: ResMut<SimulationEvents>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    if session.phase == MatchPhase::Finished {
+    if session.purpose == MatchPurpose::Attract || session.phase == MatchPhase::Finished {
         return;
     }
     let winner = territory

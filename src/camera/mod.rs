@@ -3,10 +3,12 @@
 mod follow;
 mod layout;
 mod mouse;
+mod spectator;
 
 pub use follow::{CameraFovPulse, CameraTuning, PlayerCamera, ViewportSubject};
 #[allow(unused_imports)]
 pub use layout::{ViewportRect, viewport_layout};
+pub use spectator::SpectatorCamera;
 
 use bevy::prelude::*;
 
@@ -20,8 +22,10 @@ impl Plugin for SplitScreenPlugin {
                 Update,
                 (
                     follow::reconcile_player_cameras,
+                    spectator::reconcile_spectator_camera,
                     layout::update_camera_viewports,
                     follow::follow_subjects,
+                    spectator::fit_spectator_camera,
                 )
                     .chain(),
             )

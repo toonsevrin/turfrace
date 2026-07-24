@@ -1,6 +1,29 @@
 use super::*;
-use crate::{lobby::MatchSetup, match_game::lifecycle::start_match};
+use crate::{
+    lobby::MatchSetup,
+    match_game::lifecycle::{start_match, start_match_for},
+};
 use std::time::Duration;
+
+#[test]
+fn simulation_only_runs_in_the_shell_state_that_owns_the_match() {
+    let playable = MatchSession {
+        purpose: MatchPurpose::Playable,
+        phase: MatchPhase::Running,
+        ..default()
+    };
+    let attract = MatchSession {
+        purpose: MatchPurpose::Attract,
+        phase: MatchPhase::Running,
+        ..default()
+    };
+
+    assert!(simulation_is_active(&AppState::Playing, &playable));
+    assert!(simulation_is_active(&AppState::Home, &attract));
+    assert!(!simulation_is_active(&AppState::Paused, &playable));
+    assert!(!simulation_is_active(&AppState::Home, &playable));
+    assert!(!simulation_is_active(&AppState::Playing, &attract));
+}
 
 #[test]
 fn victory_uses_exact_area_threshold_and_allows_remaining_territory() {
@@ -219,6 +242,62 @@ fn start_match_fills_empty_slots_with_npcs_and_disjoint_seeds() {
     let board = world.resource::<BoardGrid>();
     assert!(board.verify_counts());
     assert!(board.owner_counts[..8].iter().all(|count| *count > 0));
+}
+
+#[test]
+fn attract_matches_start_six_npcs_without_a_countdown() {
+    let mut world = World::new();
+    world.insert_resource(GameConfig::default());
+    world.insert_resource(BoardGrid::default());
+    world.insert_resource(SimulationEvents::default());
+    let setup = MatchSetup {
+        seed: 0xA77A_C7A5_5EED,
+        total_competitors: 6,
+        humans: Vec::new(),
+        replay_same_field: false,
+    };
+    start_match_for(&mut world, &setup, MatchPurpose::Attract);
+
+    assert_eq!(
+        world.resource::<MatchSession>().purpose,
+        MatchPurpose::Attract
+    );
+    assert_eq!(world.resource::<MatchSession>().phase, MatchPhase::Running);
+    let mut query = world.query::<&Competitor>();
+    let competitors: Vec<_> = query.iter(&world).collect();
+    assert_eq!(competitors.len(), 6);
+    assert!(
+        competitors
+            .iter()
+            .all(|competitor| competitor.kind == CompetitorKind::Npc)
+    );
+}
+
+#[test]
+fn attract_matches_do_not_trigger_victory_navigation() {
+    let mut app = App::new();
+    let board = BoardGrid::generate(1, 2, &GameConfig::default());
+    let mut territory = TerritoryMap::from_board(&board);
+    territory.territories[0] = territory.arena.clone();
+    app.init_resource::<NextState<AppState>>()
+        .insert_resource(GameConfig::default())
+        .insert_resource(board)
+        .insert_resource(territory)
+        .insert_resource(MatchSession {
+            purpose: MatchPurpose::Attract,
+            phase: MatchPhase::Running,
+            ..default()
+        })
+        .init_resource::<SimulationEvents>()
+        .add_systems(Update, check_victory);
+
+    app.update();
+    assert_eq!(
+        app.world().resource::<MatchSession>().phase,
+        MatchPhase::Running
+    );
+    assert_eq!(app.world().resource::<MatchSession>().winner, None);
+    assert!(app.world().resource::<SimulationEvents>().0.is_empty());
 }
 
 #[test]

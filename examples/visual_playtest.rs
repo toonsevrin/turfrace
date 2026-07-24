@@ -15,7 +15,7 @@ use bevy::{
 };
 use turfrace::{
     app_state::{AppShellPlugin, AppState},
-    camera::{PlayerCamera, ViewportSubject},
+    camera::{PlayerCamera, SpectatorCamera, ViewportSubject},
     input::InputDeviceId,
     lobby::{HumanSetup, LastLobbySettings, Lobby, LobbyPlayer, MatchSetup},
     match_game::{MatchPhase, MatchPlugin, MatchSession, start_match},
@@ -64,11 +64,8 @@ impl Scenario {
 
     const fn default_capture_frame(self) -> u32 {
         match self {
-            Self::Home
-            | Self::Leaderboard
-            | Self::Settings
-            | Self::LobbyEmpty
-            | Self::LobbyRobots => 30,
+            Self::Leaderboard | Self::Settings | Self::LobbyEmpty | Self::LobbyRobots => 30,
+            Self::Home => 180,
             Self::Lobby | Self::Results | Self::GameOver => 45,
             Self::Match | Self::Capture => 360,
             Self::Countdown => 1,
@@ -126,7 +123,10 @@ fn main() {
                 }),
         )
         .add_plugins((AppShellPlugin, MatchPlugin, PresentationPlugin))
-        .add_systems(Update, drive_harness)
+        // Scenario setup mutates the authoritative world directly. Run it
+        // before ordinary presentation systems so none can retain deferred
+        // commands targeting competitors that setup replaces.
+        .add_systems(First, drive_harness)
         .run();
 }
 
@@ -259,7 +259,16 @@ fn drive_harness(world: &mut World) {
             (camera.slot, subject, transform.translation)
         })
         .collect();
-    info!(?camera_snapshot, "capturing camera snapshot");
+    let spectator_snapshot: Vec<_> = world
+        .query_filtered::<&Transform, With<SpectatorCamera>>()
+        .iter(world)
+        .map(|transform| transform.translation)
+        .collect();
+    info!(
+        ?camera_snapshot,
+        ?spectator_snapshot,
+        "capturing camera snapshot"
+    );
     let screenshot = world
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(output))
@@ -521,14 +530,33 @@ fn scenario_is_visible(world: &mut World) -> bool {
         }
     }
     match scenario {
-        Scenario::Home => state == AppState::Home,
+        Scenario::Home => {
+            state == AppState::Home
+                && world
+                    .query::<&turfrace::match_game::Competitor>()
+                    .iter(world)
+                    .count()
+                    == 6
+                && world
+                    .query_filtered::<Entity, With<SpectatorCamera>>()
+                    .iter(world)
+                    .count()
+                    == 1
+        }
         Scenario::Leaderboard => state == AppState::LocalLeaderboard,
         Scenario::Lobby => state == AppState::Lobby,
         Scenario::LobbyEmpty => state == AppState::Lobby,
         Scenario::LobbyRobots => state == AppState::Lobby,
         Scenario::Match => state == AppState::Playing,
         Scenario::Capture => state == AppState::Playing,
-        Scenario::Countdown => state == AppState::Countdown,
+        Scenario::Countdown => {
+            state == AppState::Countdown
+                && world
+                    .query_filtered::<Entity, With<PlayerCamera>>()
+                    .iter(world)
+                    .count()
+                    == 2
+        }
         Scenario::Respawn => state == AppState::Playing,
         Scenario::Pause => state == AppState::Paused,
         Scenario::Disconnect => state == AppState::Paused,

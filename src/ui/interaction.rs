@@ -36,7 +36,6 @@ pub(super) fn animate_background(
     time: Res<Time>,
     settings: Res<UserSettings>,
     mut trails: Query<(&DecorativeTrail, &mut UiTransform)>,
-    mut racers: Query<(&HomeRacer, &mut UiTransform), Without<DecorativeTrail>>,
     mut ready_prompts: Query<(&ReadyPrompt, &mut BackgroundColor)>,
 ) {
     if settings.reduced_motion {
@@ -48,11 +47,6 @@ pub(super) fn animate_background(
             t.sin() * trail.amplitude,
             (t * 0.73).cos() * trail.amplitude * 0.5,
         );
-    }
-    for (racer, mut transform) in &mut racers {
-        let t = time.elapsed_secs() * racer.speed + racer.phase;
-        transform.translation = Val2::px(t.cos() * racer.radius_x, t.sin() * racer.radius_y);
-        transform.rotation = Rot2::radians(t + std::f32::consts::FRAC_PI_2);
     }
     for (prompt, mut background) in &mut ready_prompts {
         let t = time.elapsed_secs() * 3.0 + prompt.phase;

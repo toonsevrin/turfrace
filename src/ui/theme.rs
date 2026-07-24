@@ -457,12 +457,12 @@ fn spawn_perspective_button_label(
         },))
         .with_children(|stack| {
             for offset in [
-                Vec2::new(-1.0, 0.0),
-                Vec2::new(1.0, 0.0),
-                Vec2::new(0.0, -1.0),
-                Vec2::new(0.0, 1.0),
-                Vec2::new(1.0, 1.0),
+                Vec2::new(-2.0, 0.0),
+                Vec2::new(2.0, 0.0),
+                Vec2::new(0.0, -2.0),
+                Vec2::new(0.0, 2.0),
                 Vec2::new(2.0, 2.0),
+                Vec2::new(3.0, 3.0),
             ] {
                 stack.spawn((
                     Text::new(label),

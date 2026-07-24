@@ -61,14 +61,6 @@ struct DecorativeTrail {
 }
 
 #[derive(Component)]
-struct HomeRacer {
-    phase: f32,
-    speed: f32,
-    radius_x: f32,
-    radius_y: f32,
-}
-
-#[derive(Component)]
 struct ReadyPrompt {
     color: Color,
     phase: f32,

@@ -106,6 +106,7 @@ pub struct LastOwnedCell(pub crate::board::Cell);
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct MatchSession {
     pub seed: u64,
+    pub purpose: MatchPurpose,
     pub phase: MatchPhase,
     pub elapsed_seconds: f32,
     pub countdown_remaining: f32,
@@ -116,6 +117,7 @@ impl Default for MatchSession {
     fn default() -> Self {
         Self {
             seed: 0,
+            purpose: MatchPurpose::Playable,
             phase: MatchPhase::Idle,
             elapsed_seconds: 0.0,
             countdown_remaining: 3.0,
@@ -124,6 +126,17 @@ impl Default for MatchSession {
         }
     }
 }
+
+/// Describes who owns the match lifecycle. The authoritative simulation is
+/// shared by playable matches and the Home attract match; only their shell
+/// behavior differs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MatchPurpose {
+    #[default]
+    Playable,
+    Attract,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatchPhase {
     Idle,
