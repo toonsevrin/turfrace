@@ -103,11 +103,14 @@ pub(super) fn sync_competitor_visuals(
             continue;
         };
         rendered[visual.id as usize] = true;
-        *root_visibility = if visual.alive {
+        let next_root_visibility = if visual.alive {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
+        if *root_visibility != next_root_visibility {
+            *root_visibility = next_root_visibility;
+        }
         let target = Vec3::new(
             visual.position.x,
             player_base_height(&territory, visual.position, trail.is_some()),
@@ -135,24 +138,33 @@ pub(super) fn sync_competitor_visuals(
         proxy.rendered_heading = rendered_heading;
         for child in children.iter() {
             if let Ok(mut visibility) = leader_parts.get_mut(child) {
-                *visibility = if visual.is_leader && visual.alive {
+                let next = if visual.is_leader && visual.alive {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
                 };
+                if *visibility != next {
+                    *visibility = next;
+                }
             }
             if let Ok((mut visibility, mut shield_transform)) = shields.get_mut(child) {
-                *visibility = if visual.spawn_protection > 0.0 && visual.alive {
+                let shield_active = visual.spawn_protection > 0.0 && visual.alive;
+                let next = if shield_active {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
                 };
-                let pulse = if settings.reduced_motion {
-                    1.0
-                } else {
-                    1.0 + (time.elapsed_secs() * 5.0).sin() * 0.07
-                };
-                shield_transform.scale = Vec3::splat(pulse);
+                if *visibility != next {
+                    *visibility = next;
+                }
+                if shield_active {
+                    let pulse = if settings.reduced_motion {
+                        1.0
+                    } else {
+                        1.0 + (time.elapsed_secs() * 5.0).sin() * 0.07
+                    };
+                    shield_transform.scale = Vec3::splat(pulse);
+                }
             }
         }
         let next_subject = if let Some(slot) = visual.human_slot {
@@ -183,7 +195,9 @@ pub(super) fn sync_competitor_visuals(
         };
         if let Ok(mut subject) = subjects.get_mut(proxy.source) {
             if visual.human_slot.is_some() {
-                *subject = next_subject;
+                if *subject != next_subject {
+                    *subject = next_subject;
+                }
             } else {
                 commands.entity(proxy.source).remove::<ViewportSubject>();
             }
@@ -220,6 +234,7 @@ pub(super) fn sync_competitor_visuals(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_proxy(
     commands: &mut Commands,
     assets: &RenderAssets,

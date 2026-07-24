@@ -15,6 +15,7 @@ use bevy::{
 };
 use turfrace::{
     app_state::{AppShellPlugin, AppState},
+    camera::{PlayerCamera, ViewportSubject},
     input::InputDeviceId,
     lobby::{HumanSetup, Lobby, LobbyPlayer, MatchSetup},
     match_game::{MatchPhase, MatchPlugin, MatchSession, start_match},
@@ -28,6 +29,7 @@ enum Scenario {
     Leaderboard,
     Lobby,
     Match,
+    Capture,
     Pause,
     Results,
     Settings,
@@ -40,6 +42,7 @@ impl Scenario {
             "leaderboard" => Some(Self::Leaderboard),
             "lobby" => Some(Self::Lobby),
             "match" => Some(Self::Match),
+            "capture" => Some(Self::Capture),
             "pause" => Some(Self::Pause),
             "results" => Some(Self::Results),
             "settings" => Some(Self::Settings),
@@ -51,7 +54,7 @@ impl Scenario {
         match self {
             Self::Home | Self::Leaderboard | Self::Settings => 30,
             Self::Lobby | Self::Results => 45,
-            Self::Match => 360,
+            Self::Match | Self::Capture => 360,
             Self::Pause => 240,
         }
     }
@@ -64,6 +67,7 @@ struct Harness {
     capture_frame: u32,
     frame: u32,
     configured: bool,
+    capture_triggered: bool,
     screenshot: Option<Entity>,
 }
 
@@ -84,6 +88,7 @@ fn main() {
             capture_frame,
             frame: 0,
             configured: false,
+            capture_triggered: false,
             screenshot: None,
         })
         .add_plugins(
@@ -146,7 +151,7 @@ fn arguments() -> (Scenario, PathBuf, u32, u32, u32) {
             }
             "--help" | "-h" => {
                 println!(
-                    "usage: visual_playtest [--scenario home|leaderboard|lobby|match|pause|results|settings] \
+                    "usage: visual_playtest [--scenario home|leaderboard|lobby|match|capture|pause|results|settings] \
                      [--output PATH.png] [--frames N | --seconds N] \
                      [--width PX] [--height PX]"
                 );
@@ -197,12 +202,47 @@ fn drive_harness(world: &mut World) {
     if !ready {
         return;
     }
+    let trigger_capture = {
+        let harness = world.resource::<Harness>();
+        harness.scenario == Scenario::Capture
+            && !harness.capture_triggered
+            && harness.frame.saturating_add(18) >= harness.capture_frame
+    };
+    if trigger_capture {
+        let area = world
+            .resource::<turfrace::territory_map::TerritoryMap>()
+            .arena_area
+            * 0.08;
+        world
+            .resource_mut::<turfrace::match_game::SimulationEvents>()
+            .0
+            .push(turfrace::match_game::SimulationEvent::Capture {
+                player: turfrace::ids::CompetitorId(0),
+                area,
+                stolen_area: 0.0,
+                cells: 0,
+                stolen: 0,
+                loop_fill: true,
+            });
+        world.resource_mut::<Harness>().capture_triggered = true;
+    }
     let mut harness = world.resource_mut::<Harness>();
     harness.frame += 1;
     if harness.frame < harness.capture_frame {
         return;
     }
     let output = harness.output.clone();
+    let camera_snapshot: Vec<_> = world
+        .query::<(&PlayerCamera, &Transform)>()
+        .iter(world)
+        .map(|(camera, transform)| {
+            let subject = world
+                .get::<ViewportSubject>(camera.subject)
+                .map(|subject| subject.position);
+            (camera.slot, subject, transform.translation)
+        })
+        .collect();
+    info!(?camera_snapshot, "capturing camera snapshot");
     let screenshot = world
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(output))
@@ -216,7 +256,7 @@ fn configure_scenario(world: &mut World) {
         Scenario::Home => {}
         Scenario::Leaderboard => configure_profiles_screen(world, AppState::LocalLeaderboard),
         Scenario::Lobby => configure_lobby(world),
-        Scenario::Match | Scenario::Pause => configure_match(world),
+        Scenario::Match | Scenario::Capture | Scenario::Pause => configure_match(world),
         Scenario::Results => configure_results(world),
         Scenario::Settings => configure_profiles_screen(world, AppState::Settings),
     }
@@ -412,6 +452,7 @@ fn scenario_is_visible(world: &mut World) -> bool {
         Scenario::Leaderboard => state == AppState::LocalLeaderboard,
         Scenario::Lobby => state == AppState::Lobby,
         Scenario::Match => state == AppState::Playing,
+        Scenario::Capture => state == AppState::Playing,
         Scenario::Pause => state == AppState::Paused,
         Scenario::Results => state == AppState::Results,
         Scenario::Settings => state == AppState::Settings,

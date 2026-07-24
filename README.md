@@ -4,6 +4,10 @@ Turfrace is a fast local multiplayer territory game for 2–8 humans, with NPCs 
 
 The v0.1 implementation is a static Rust/Bevy 0.19 WebAssembly application. It has no server, telemetry, or network play. Profiles, preferences, lobby choices, and lifetime statistics remain in browser-local storage.
 
+Territory is exact fixed-point vector geometry with a bounded render/broadphase cache. Every
+competitor has one spawn-anchored island: a capture severs any other lobe, and a cube standing on
+that removed lobe is displaced through the normal respawn flow.
+
 ## Run it
 
 Native development:
@@ -70,6 +74,7 @@ The visual harness boots the real game plugins at a fixed timestep and captures 
 ./scripts/visual-feedback leaderboard
 ./scripts/visual-feedback match --frames 180
 ./scripts/visual-feedback match --seconds 6
+./scripts/visual-feedback capture --seconds 6
 ./scripts/visual-feedback results --width 960 --height 600
 ./scripts/visual-feedback settings
 ./scripts/visual-feedback --all

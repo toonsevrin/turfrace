@@ -1,7 +1,5 @@
 //! Device-independent menu and steering input.
 
-use std::collections::{HashMap, HashSet};
-
 use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -80,11 +78,11 @@ impl Default for LastActiveDevice {
 
 #[derive(Resource, Debug, Default)]
 pub struct ConnectedDevices {
-    gamepads: HashSet<u32>,
+    gamepads: Vec<u32>,
 }
 
 #[derive(Resource, Debug, Default)]
-struct GamepadMenuLatch(HashSet<u32>);
+struct GamepadMenuLatch(Vec<u32>);
 
 impl ConnectedDevices {
     pub fn is_connected(&self, device: InputDeviceId) -> bool {
@@ -123,14 +121,21 @@ fn track_gamepads(
     mut connected: ResMut<ConnectedDevices>,
     mut disconnected: MessageWriter<DeviceDisconnected>,
 ) {
-    let now: HashSet<u32> = gamepads
-        .iter()
-        .map(|entity| entity.index().index())
-        .collect();
-    for id in connected.gamepads.difference(&now) {
-        disconnected.write(DeviceDisconnected(InputDeviceId::Gamepad(*id)));
+    // Reuse a tiny persistent list. At the supported device count a linear
+    // scan is cheaper than hashing and keeps the hot resource allocation-free.
+    connected.gamepads.retain(|id| {
+        let present = gamepads.iter().any(|entity| entity.index().index() == *id);
+        if !present {
+            disconnected.write(DeviceDisconnected(InputDeviceId::Gamepad(*id)));
+        }
+        present
+    });
+    for entity in &gamepads {
+        let id = entity.index().index();
+        if !connected.gamepads.contains(&id) {
+            connected.gamepads.push(id);
+        }
     }
-    connected.gamepads = now;
 }
 
 fn poll_keyboard_menu_input(
@@ -203,8 +208,10 @@ fn poll_gamepad_menus(
         }
         let stick = gamepad.left_stick();
         if latch.0.contains(&entity.index().index()) {
-            if stick.length() < 0.45 {
-                latch.0.remove(&entity.index().index());
+            if stick.length() < 0.45
+                && let Some(index) = latch.0.iter().position(|id| *id == entity.index().index())
+            {
+                latch.0.swap_remove(index);
             }
         } else {
             let action = if stick.y > 0.7 {
@@ -220,7 +227,7 @@ fn poll_gamepad_menus(
             };
             if let Some(action) = action {
                 send(action);
-                latch.0.insert(entity.index().index());
+                latch.0.push(entity.index().index());
             }
         }
     }
@@ -233,23 +240,23 @@ fn build_human_steering_intents(
     settings: Res<UserSettings>,
     mut humans: Query<(&HumanController, &mut SteeringIntent)>,
 ) {
-    let by_id: HashMap<u32, &Gamepad> = gamepads
-        .iter()
-        .map(|(entity, gamepad)| (entity.index().index(), gamepad))
-        .collect();
-
     for (controller, mut intent) in &mut humans {
         let (raw, source) = match controller.device {
             InputDeviceId::Gamepad(id) => (
-                by_id.get(&id).map_or(Vec2::ZERO, |gamepad| {
-                    let left = gamepad.left_stick();
-                    let right = gamepad.right_stick();
-                    screen_direction_to_world(if right.length_squared() > left.length_squared() {
-                        right
-                    } else {
-                        left
-                    })
-                }),
+                gamepads
+                    .iter()
+                    .find(|(entity, _)| entity.index().index() == id)
+                    .map_or(Vec2::ZERO, |(_, gamepad)| {
+                        let left = gamepad.left_stick();
+                        let right = gamepad.right_stick();
+                        screen_direction_to_world(
+                            if right.length_squared() > left.length_squared() {
+                                right
+                            } else {
+                                left
+                            },
+                        )
+                    }),
                 ControlSource::Gamepad,
             ),
             InputDeviceId::KeyboardPrimary => (keyboard_direction(&keys), ControlSource::Keyboard),
@@ -260,11 +267,18 @@ fn build_human_steering_intents(
         } else {
             raw.clamp_length_max(1.0)
         };
-        if processed.length_squared() > 0.0 {
-            intent.desired_direction = processed.normalize();
+        let next = SteeringIntent {
+            desired_direction: if processed.length_squared() > 0.0 {
+                processed.normalize()
+            } else {
+                intent.desired_direction
+            },
+            magnitude: processed.length(),
+            source,
+        };
+        if *intent != next {
+            *intent = next;
         }
-        intent.magnitude = processed.length();
-        intent.source = source;
     }
 }
 
@@ -321,5 +335,16 @@ mod tests {
         keys.press(KeyCode::KeyA);
         keys.press(KeyCode::KeyS);
         assert_eq!(keyboard_direction(&keys), Vec2::new(-1.0, 1.0).normalize());
+    }
+
+    #[test]
+    fn compact_device_registry_distinguishes_connected_gamepads() {
+        let connected = ConnectedDevices {
+            gamepads: vec![1, 7],
+        };
+        assert!(connected.is_connected(InputDeviceId::Gamepad(1)));
+        assert!(!connected.is_connected(InputDeviceId::Gamepad(2)));
+        assert!(connected.is_connected(InputDeviceId::KeyboardPrimary));
+        assert!(connected.is_connected(InputDeviceId::Mouse));
     }
 }

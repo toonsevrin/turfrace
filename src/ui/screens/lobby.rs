@@ -7,9 +7,9 @@ use bevy::window::PrimaryWindow;
 
 fn input_device_label(device: InputDeviceId) -> String {
     match device {
-        InputDeviceId::KeyboardPrimary => "KEYBOARD".to_owned(),
+        InputDeviceId::KeyboardPrimary => "KEY".to_owned(),
         InputDeviceId::Mouse => "MOUSE".to_owned(),
-        InputDeviceId::Gamepad(id) => format!("CONTROLLER {}", id + 1),
+        InputDeviceId::Gamepad(id) => format!("PAD {}", id + 1),
     }
 }
 
@@ -92,12 +92,7 @@ pub(crate) fn spawn_lobby_content(
             ))
             .with_children(|panel| {
                 spawn_title(panel, theme, "LOBBY", 42.0);
-                spawn_subtitle(panel, theme, "KEYBOARD: ENTER / ARROWS / WASD");
-                spawn_subtitle(
-                    panel,
-                    theme,
-                    "MOUSE: JOIN WITH MOUSE   /   CONTROLLER: PRESS A",
-                );
+                spawn_subtitle(panel, theme, "ENTER  /  CLICK  /  A");
                 panel
                     .spawn((Node {
                         width: percent(100),
@@ -143,23 +138,22 @@ pub(crate) fn spawn_lobby_content(
                                 Node {
                                     min_height: px(0),
                                     padding: UiRect::all(px(12)),
-                                    border: UiRect::all(px(2)),
-                                    border_radius: BorderRadius::all(px(0)),
+                                    border: UiRect {
+                                        left: px(3),
+                                        ..default()
+                                    },
                                     flex_direction: FlexDirection::Column,
                                     row_gap: px(6),
                                     ..default()
                                 },
-                                BackgroundColor(color.with_alpha(0.20)),
-                                BorderColor::all(if player.connected { color } else { CORAL }),
+                                BackgroundColor(Color::NONE),
+                                BorderColor::all(if player.connected {
+                                    color.with_alpha(0.72)
+                                } else {
+                                    CORAL.with_alpha(0.72)
+                                }),
                             ))
                             .with_children(|card| {
-                                let status = if !player.connected {
-                                    "OFFLINE"
-                                } else if player.ready {
-                                    "READY"
-                                } else {
-                                    "NOT READY"
-                                };
                                 card.spawn((Node {
                                     width: percent(100),
                                     display: Display::Flex,
@@ -169,7 +163,7 @@ pub(crate) fn spawn_lobby_content(
                                     .with_children(|header| {
                                         header.spawn((
                                             Text::new(format!(
-                                                "P{}  {}  /  {}",
+                                                "P{}  {}   {}",
                                                 slot + 1,
                                                 player.display_name,
                                                 input_device_label(player.device),
@@ -186,13 +180,18 @@ pub(crate) fn spawn_lobby_content(
                                             },
                                         ));
                                         header.spawn((
-                                            Text::new(status),
-                                            TextFont {
-                                                font: theme.body_font.clone(),
-                                                font_size: FontSize::Px(12.0),
+                                            Node {
+                                                width: px(9),
+                                                height: px(9),
                                                 ..default()
                                             },
-                                            TextColor(if player.ready { LIME } else { MUTED }),
+                                            BackgroundColor(if !player.connected {
+                                                CORAL
+                                            } else if player.ready {
+                                                LIME
+                                            } else {
+                                                MUTED.with_alpha(0.38)
+                                            }),
                                         ));
                                     });
                                 card.spawn((Node {
@@ -221,7 +220,7 @@ pub(crate) fn spawn_lobby_content(
                                                 spawn_card_stepper(
                                                     controls,
                                                     theme,
-                                                    &format!("PATTERN {}", player.pattern_id + 1),
+                                                    &format!("PAT {}", player.pattern_id + 1),
                                                     previous_pattern,
                                                     next_pattern,
                                                     42 + slot as u16 * 10,
@@ -229,7 +228,7 @@ pub(crate) fn spawn_lobby_content(
                                                 spawn_mini_button(
                                                     controls,
                                                     theme,
-                                                    "NEW PROFILE",
+                                                    "+ PROFILE",
                                                     UiAction::CreateProfile(slot),
                                                     44 + slot as u16 * 10,
                                                 );
@@ -237,11 +236,7 @@ pub(crate) fn spawn_lobby_content(
                                                     spawn_mini_button(
                                                         controls,
                                                         theme,
-                                                        if player.ready {
-                                                            "UNREADY"
-                                                        } else {
-                                                            "READY UP"
-                                                        },
+                                                        if player.ready { "WAIT" } else { "READY" },
                                                         UiAction::Lobby(LobbyCommand::ToggleReady(
                                                             player.device,
                                                         )),
@@ -313,7 +308,7 @@ pub(crate) fn spawn_lobby_content(
                         );
                         row.spawn((
                             Text::new(format!(
-                                "{} PLAYERS  /  {} CPU",
+                                "{}  /  {} CPU",
                                 lobby.total_competitors,
                                 lobby.npc_count()
                             )),
@@ -338,9 +333,9 @@ pub(crate) fn spawn_lobby_content(
                         );
                     });
                 let start_label = if lobby.can_start() {
-                    "START MATCH"
+                    "START"
                 } else {
-                    "READY 1 TO START"
+                    "1 READY"
                 };
                 spawn_button(
                     panel,
@@ -349,7 +344,7 @@ pub(crate) fn spawn_lobby_content(
                     UiAction::Lobby(LobbyCommand::Start),
                     22,
                 );
-                spawn_button(panel, theme, "BACK", UiAction::State(AppState::Home), 23);
+                spawn_button(panel, theme, "BACK", UiAction::Back(AppState::Home), 23);
             });
         });
 }
@@ -475,14 +470,8 @@ mod tests {
 
     #[test]
     fn lobby_labels_each_supported_input_device() {
-        assert_eq!(
-            input_device_label(InputDeviceId::KeyboardPrimary),
-            "KEYBOARD"
-        );
+        assert_eq!(input_device_label(InputDeviceId::KeyboardPrimary), "KEY");
         assert_eq!(input_device_label(InputDeviceId::Mouse), "MOUSE");
-        assert_eq!(
-            input_device_label(InputDeviceId::Gamepad(1)),
-            "CONTROLLER 2"
-        );
+        assert_eq!(input_device_label(InputDeviceId::Gamepad(1)), "PAD 2");
     }
 }

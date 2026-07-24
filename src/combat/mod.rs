@@ -22,6 +22,18 @@ pub struct TrailCollisionIntent {
     pub impact_time: f32,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CollisionTuning {
+    pub collision_radius: f32,
+    pub trail_width: f32,
+    pub self_exclusion: f32,
+}
+
+#[derive(Default)]
+pub(crate) struct CollisionWorkspace {
+    candidates: [Vec<usize>; MAX_COMPETITORS],
+}
+
 /// Collects all intents from a snapshot; callers apply deaths only after this returns.
 pub fn collect_collision_intents(
     board: &BoardGrid,
@@ -31,21 +43,50 @@ pub fn collect_collision_intents(
     trail_width: f32,
     self_exclusion: f32,
 ) -> Vec<TrailCollisionIntent> {
-    let radius = collision_radius + trail_width * 0.5;
-    let mut trail_by_owner: [Option<&ActiveTrail>; MAX_COMPETITORS] = [None; MAX_COMPETITORS];
-    let mut protection = [false; MAX_COMPETITORS];
+    let mut intents = Vec::new();
+    let mut trail_by_owner = [None; MAX_COMPETITORS];
     for trail in trails {
         trail_by_owner[trail.owner.index()] = Some(*trail);
     }
+    collect_collision_intents_into(
+        board,
+        bodies,
+        &trail_by_owner,
+        CollisionTuning {
+            collision_radius,
+            trail_width,
+            self_exclusion,
+        },
+        &mut intents,
+        &mut CollisionWorkspace::default(),
+    );
+    intents
+}
+
+/// Canonical allocation-reusing collector. The simulation owns both the
+/// destination and workspace, while convenience callers adapt their trails to
+/// the same fixed owner table.
+pub(crate) fn collect_collision_intents_into(
+    board: &BoardGrid,
+    bodies: &[CollisionBody],
+    trail_by_owner: &[Option<&ActiveTrail>; MAX_COMPETITORS],
+    tuning: CollisionTuning,
+    intents: &mut Vec<TrailCollisionIntent>,
+    workspace: &mut CollisionWorkspace,
+) {
+    intents.clear();
+    let radius = tuning.collision_radius + tuning.trail_width * 0.5;
+    let mut protection = [false; MAX_COMPETITORS];
     for body in bodies {
         protection[body.id.index()] = body.protected;
     }
-    let mut intents = Vec::new();
     for body in bodies {
         if body.protected {
             continue;
         }
-        let mut candidates: [Vec<usize>; MAX_COMPETITORS] = std::array::from_fn(|_| Vec::new());
+        for segments in &mut workspace.candidates {
+            segments.clear();
+        }
         let Some((min, max)) = board.clamped_cell_bounds(
             body.previous.min(body.current) - Vec2::splat(radius),
             body.previous.max(body.current) + Vec2::splat(radius),
@@ -56,11 +97,11 @@ pub fn collect_collision_intents(
             for x in min.x..=max.x {
                 let index = board.index(crate::board::Cell::new(x, y)).unwrap();
                 for reference in &board.trail_segment_buckets[index] {
-                    candidates[reference.owner.index()].push(reference.segment);
+                    workspace.candidates[reference.owner.index()].push(reference.segment);
                 }
             }
         }
-        for (owner, segments) in candidates.iter_mut().enumerate() {
+        for (owner, segments) in workspace.candidates.iter_mut().enumerate() {
             if segments.is_empty() || protection[owner] {
                 continue;
             }
@@ -75,7 +116,7 @@ pub fn collect_collision_intents(
                     body.current,
                     radius,
                     trail,
-                    self_exclusion,
+                    tuning.self_exclusion,
                     segments,
                 )
             } else {
@@ -97,7 +138,6 @@ pub fn collect_collision_intents(
             .then_with(|| a.killer.cmp(&b.killer))
     });
     intents.dedup_by_key(|intent| intent.victim);
-    intents
 }
 
 #[cfg(test)]
@@ -168,5 +208,23 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn reusable_collision_collection_keeps_destination_capacity() {
+        let config = GameConfig::default();
+        let board = crate::board::BoardGrid::generate(11, 2, &config);
+        let mut output = Vec::with_capacity(8);
+        let mut workspace = CollisionWorkspace::default();
+        let trails = [None; MAX_COMPETITORS];
+        let tuning = CollisionTuning {
+            collision_radius: config.collision_radius,
+            trail_width: config.trail_width,
+            self_exclusion: config.self_trail_exclusion_distance,
+        };
+        collect_collision_intents_into(&board, &[], &trails, tuning, &mut output, &mut workspace);
+        let capacity = output.capacity();
+        collect_collision_intents_into(&board, &[], &trails, tuning, &mut output, &mut workspace);
+        assert_eq!(output.capacity(), capacity);
     }
 }

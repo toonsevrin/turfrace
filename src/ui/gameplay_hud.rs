@@ -1,7 +1,9 @@
 //! Live match HUD projection and completed-match persistence bridge.
 
 use super::*;
+use crate::render::CompetitorVisual;
 use bevy::ecs::system::SystemParam;
+use bevy::window::PrimaryWindow;
 use std::fmt::Write;
 
 type CompetitorHudQuery<'w, 's> = Query<
@@ -9,8 +11,6 @@ type CompetitorHudQuery<'w, 's> = Query<
     's,
     (
         &'static Competitor,
-        &'static TerritoryRecord,
-        &'static SimulationMatchStatistics,
         &'static LifeState,
         &'static SpawnProtection,
         Option<&'static ActiveTrail>,
@@ -20,9 +20,7 @@ type CompetitorHudQuery<'w, 's> = Query<
 #[derive(SystemParam)]
 pub(super) struct HudData<'w, 's> {
     state: Res<'w, State<AppState>>,
-    config: Res<'w, GameConfig>,
     session: Res<'w, MatchSession>,
-    territory_map: Res<'w, crate::territory_map::TerritoryMap>,
     rankings: Res<'w, Rankings>,
     eliminations: Option<Res<'w, EliminationFeed>>,
     competitors: CompetitorHudQuery<'w, 's>,
@@ -33,22 +31,16 @@ type HudTextQuery<'w, 's> = Query<
     's,
     (
         &'static mut Text,
-        Option<&'static GlobalRankingText>,
+        Option<&'static GlobalRankingRow>,
         Option<&'static MatchAnnouncementText>,
         Option<&'static KillFeedText>,
-        Option<&'static HumanHudSummary>,
-        Option<&'static HumanHudRank>,
         Option<&'static HumanRespawnText>,
-        Option<&'static mut BackgroundColor>,
-        Option<&'static mut BorderColor>,
         Option<&'static mut TextColor>,
     ),
     Or<(
-        With<GlobalRankingText>,
+        With<GlobalRankingRow>,
         With<MatchAnnouncementText>,
         With<KillFeedText>,
-        With<HumanHudSummary>,
-        With<HumanHudRank>,
         With<HumanRespawnText>,
     )>,
 >;
@@ -87,38 +79,43 @@ pub(super) fn spawn_gameplay_hud(
             Pickable::IGNORE,
         ))
         .with_children(|root| {
-            root.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: percent(50),
-                    top: px(72),
-                    width: px(240),
-                    max_width: px(240),
-                    margin: UiRect::left(px(-120)),
-                    padding: UiRect::axes(px(12), px(9)),
-                    border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(6)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.80)),
-                BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.13)),
-            ))
-            .with_children(|panel| {
-                panel.spawn((
-                    Text::new("LEADERS"),
+            for index in 0..3 {
+                root.spawn((
+                    Text::new(""),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(13.0 * text_scale),
+                        font_size: FontSize::Px(14.0 * text_scale),
                         ..default()
                     },
-                    TextColor(CREAM),
+                    TextColor(MUTED),
+                    TextShadow {
+                        offset: Vec2::new(1.0, 1.0),
+                        color: Color::srgba(1.0, 0.97, 0.88, 0.78),
+                    },
+                    TextLayout::justify(Justify::Right),
                     Node {
-                        width: percent(100),
+                        position_type: PositionType::Absolute,
+                        right: px(24),
+                        top: px(18 + index as i32 * 24),
+                        width: px(210),
+                        max_width: px(210),
                         ..default()
                     },
-                    GlobalRankingText,
+                    GlobalRankingRow(index),
                 ));
-            });
+                root.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        right: px(12),
+                        top: px(24 + index as i32 * 24),
+                        width: px(8),
+                        height: px(8),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    GlobalRankingAccent(index),
+                ));
+            }
             root.spawn((
                 Text::new(""),
                 TextFont {
@@ -126,21 +123,20 @@ pub(super) fn spawn_gameplay_hud(
                     font_size: FontSize::Px(13.0 * text_scale),
                     ..default()
                 },
-                TextColor(CREAM),
+                TextColor(INK),
+                TextShadow {
+                    offset: Vec2::new(1.0, 1.0),
+                    color: Color::srgba(1.0, 0.97, 0.88, 0.78),
+                },
                 TextLayout::justify(Justify::Right),
                 Node {
                     position_type: PositionType::Absolute,
                     right: px(18),
-                    top: px(170),
+                    top: px(154),
                     width: px(260),
-                    padding: UiRect::axes(px(10), px(6)),
                     max_width: px(260),
-                    border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(5)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.0)),
-                BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.0)),
                 KillFeedText,
             ));
             root.spawn((
@@ -185,6 +181,8 @@ pub(super) fn reconcile_human_huds(
     theme: Option<Res<UiTheme>>,
     cameras: Query<(Entity, &PlayerCamera)>,
     existing: Query<(Entity, &HumanHudRoot)>,
+    tags: Query<(Entity, &HumanNameTag)>,
+    visuals: Query<(Entity, &CompetitorVisual, &Competitor)>,
     settings: Res<UserSettings>,
 ) {
     let Some(theme) = theme else { return };
@@ -194,120 +192,158 @@ pub(super) fn reconcile_human_huds(
             commands.entity(root).despawn();
         }
     }
-    for (camera, player_camera) in &cameras {
-        if existing.iter().any(|(_, marker)| marker.camera == camera) {
-            continue;
+    for (tag, marker) in &tags {
+        if cameras.get(marker.camera).is_err() || visuals.get(marker.source).is_err() {
+            commands.entity(tag).despawn();
         }
-        commands
-            .spawn((
-                HumanHudRoot { camera },
-                UiTargetCamera(camera),
-                Node {
-                    width: percent(100),
-                    height: percent(100),
-                    position_type: PositionType::Absolute,
-                    ..default()
-                },
-                GlobalZIndex(50),
-                Pickable::IGNORE,
-            ))
-            .with_children(|root| {
+    }
+    for (camera, player_camera) in &cameras {
+        let Some(root_entity) = existing
+            .iter()
+            .find(|(_, marker)| marker.camera == camera)
+            .map(|(root, _)| root)
+        else {
+            commands
+                .spawn((
+                    HumanHudRoot { camera },
+                    UiTargetCamera(camera),
+                    Node {
+                        width: percent(100),
+                        height: percent(100),
+                        position_type: PositionType::Absolute,
+                        ..default()
+                    },
+                    GlobalZIndex(50),
+                    Pickable::IGNORE,
+                ))
+                .with_children(|root| {
+                    root.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font: theme.display_font.clone(),
+                            font_size: FontSize::Px(25.0 * text_scale),
+                            ..default()
+                        },
+                        TextColor(CORAL),
+                        TextShadow {
+                            offset: Vec2::new(3.0, 3.0),
+                            color: INK,
+                        },
+                        TextLayout::justify(Justify::Center),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: percent(46),
+                            left: percent(27),
+                            width: percent(46),
+                            min_width: px(140),
+                            max_width: px(230),
+                            ..default()
+                        },
+                        HumanRespawnText(player_camera.subject),
+                    ));
+                });
+            continue;
+        };
+        commands.entity(root_entity).with_children(|root| {
+            for (source, visual, competitor) in &visuals {
+                if tags
+                    .iter()
+                    .any(|(_, tag)| tag.camera == camera && tag.source == source)
+                {
+                    continue;
+                }
                 root.spawn((
-                    Text::new("PLAYER  TURF 0.0/100%\nKILLS 0  STREAK 0  SPEED +0%"),
+                    Name::new("Player Name Tag"),
+                    HumanNameTag { camera, source },
+                    Text::new(competitor.display_name.clone()),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(14.0 * text_scale),
+                        font_size: FontSize::Px(12.0 * text_scale),
                         ..default()
                     },
-                    TextColor(CREAM),
+                    TextColor(palette_color(visual.color_id)),
                     TextShadow {
-                        offset: Vec2::new(2.0, 2.0),
-                        color: INK,
-                    },
-                    Node {
-                        position_type: PositionType::Absolute,
-                        top: px(16),
-                        left: px(16),
-                        width: percent(78),
-                        max_width: px(310),
-                        min_width: px(170),
-                        overflow: Overflow::clip(),
-                        padding: UiRect::axes(px(11), px(8)),
-                        border: UiRect::left(px(4)),
-                        border_radius: BorderRadius::all(px(5)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.78)),
-                    BorderColor::all(CREAM),
-                    HumanHudSummary(player_camera.subject),
-                ));
-                root.spawn((
-                    Text::new("#1 / 8"),
-                    TextFont {
-                        font: theme.body_font.clone(),
-                        font_size: FontSize::Px(13.0 * text_scale),
-                        ..default()
-                    },
-                    TextColor(CREAM),
-                    TextShadow {
-                        offset: Vec2::new(2.0, 2.0),
-                        color: INK,
-                    },
-                    Node {
-                        position_type: PositionType::Absolute,
-                        bottom: px(16),
-                        left: px(16),
-                        width: px(78),
-                        overflow: Overflow::clip(),
-                        padding: UiRect::axes(px(9), px(6)),
-                        border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(5)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.74)),
-                    BorderColor::all(Color::srgba(0.90, 0.93, 0.88, 0.13)),
-                    HumanHudRank(player_camera.subject),
-                ));
-                root.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font: theme.display_font.clone(),
-                        font_size: FontSize::Px(25.0 * text_scale),
-                        ..default()
-                    },
-                    TextColor(CORAL),
-                    TextShadow {
-                        offset: Vec2::new(3.0, 3.0),
-                        color: INK,
+                        offset: Vec2::new(1.5, 1.5),
+                        color: Color::srgba(1.0, 0.97, 0.88, 0.92),
                     },
                     TextLayout::justify(Justify::Center),
                     Node {
                         position_type: PositionType::Absolute,
-                        top: percent(46),
-                        left: percent(27),
-                        width: percent(46),
-                        min_width: px(140),
-                        max_width: px(230),
+                        width: px(180),
+                        height: px(24),
                         ..default()
                     },
-                    HumanRespawnText(player_camera.subject),
+                    Visibility::Hidden,
                 ));
-            });
+            }
+        });
     }
 }
 
+pub(super) fn update_name_tags(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(Entity, &PlayerCamera, &Camera, &GlobalTransform)>,
+    visuals: Query<&CompetitorVisual>,
+    mut tags: Query<(&HumanNameTag, &mut Node, &mut Visibility)>,
+) {
+    let scale_factor = windows.single().map_or(1.0, Window::scale_factor);
+    for (marker, mut node, mut visibility) in &mut tags {
+        let Some((_, _, camera, camera_transform)) = cameras
+            .iter()
+            .find(|(camera_entity, _, _, _)| *camera_entity == marker.camera)
+        else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        let Ok(visual) = visuals.get(marker.source) else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        if !visual.alive {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        }
+        let world_position = Vec3::new(visual.position.x, 2.9, visual.position.y);
+        let Ok(mut screen_position) = camera.world_to_viewport(camera_transform, world_position)
+        else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        if let Some(viewport) = &camera.viewport {
+            screen_position -= viewport.physical_position.as_vec2() / scale_factor.max(0.001);
+        }
+        node.left = px(screen_position.x - 90.0);
+        node.top = px(screen_position.y - 32.0);
+        if *visibility != Visibility::Inherited {
+            *visibility = Visibility::Inherited;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update_gameplay_hud(
     data: HudData,
     time: Res<Time>,
     mut refresh_remaining: Local<f32>,
+    mut ranking_lines: Local<[String; 3]>,
+    mut announcement_text: Local<String>,
+    mut elimination_text: Local<String>,
+    mut respawn_text: Local<String>,
     mut texts: HudTextQuery,
+    mut accents: Query<(&GlobalRankingAccent, &mut BackgroundColor)>,
 ) {
     let HudData {
         state,
-        config,
         session,
         rankings,
-        territory_map,
         eliminations,
         competitors,
     } = data;
@@ -317,135 +353,134 @@ pub(super) fn update_gameplay_hud(
     }
     *refresh_remaining = 0.1;
 
-    let mut ranking_text = "TOP TURF".to_owned();
-    for entry in rankings.entries.iter().take(3) {
+    for line in &mut *ranking_lines {
+        line.clear();
+    }
+    for (index, entry) in rankings.entries.iter().take(3).enumerate() {
         if let Some((competitor, ..)) = competitors
             .iter()
             .find(|(competitor, ..)| competitor.id == entry.id)
         {
-            let npc = if competitor.kind == CompetitorKind::Npc {
-                " CPU"
-            } else {
-                ""
-            };
-            let _ = write!(
-                ranking_text,
-                "\n{}  {}{}   {:>4.1}%",
+            write_ranking_label(
+                &mut ranking_lines[index],
                 entry.rank,
-                competitor.display_name,
-                npc,
-                config.display_territory_percent(entry.territory_percent)
+                &competitor.display_name,
             );
         }
     }
-    let announcement_text = match *state.get() {
-        AppState::Countdown => format!("{}", session.countdown_remaining.ceil().max(1.0) as u8),
-        AppState::Playing if session.elapsed_seconds < 0.8 => "GO!".to_owned(),
-        AppState::GameOver => session
-            .winner
-            .and_then(|winner| {
-                competitors
+    announcement_text.clear();
+    match *state.get() {
+        AppState::Countdown => {
+            let _ = write!(
+                announcement_text,
+                "{}",
+                session.countdown_remaining.ceil().max(1.0) as u8
+            );
+        }
+        AppState::Playing if session.elapsed_seconds < 0.8 => announcement_text.push_str("GO!"),
+        AppState::GameOver => {
+            if let Some(winner) = session.winner
+                && let Some((competitor, ..)) = competitors
                     .iter()
                     .find(|(competitor, ..)| competitor.id == winner)
-                    .map(|(competitor, ..)| format!("{} WINS!", competitor.display_name))
-            })
-            .unwrap_or_else(|| "GAME OVER".to_owned()),
-        _ => String::new(),
-    };
-    let elimination_text = eliminations.as_ref().map_or_else(String::new, |feed| {
-        feed.0
+            {
+                let _ = write!(announcement_text, "{} WINS!", competitor.display_name);
+            } else {
+                announcement_text.push_str("GAME OVER");
+            }
+        }
+        _ => {}
+    }
+    elimination_text.clear();
+    if let Some(feed) = eliminations.as_ref() {
+        for entry in feed
+            .0
             .iter()
             .rev()
             .filter(|entry| session.elapsed_seconds - entry.match_time <= 5.0)
             .take(4)
-            .filter_map(|entry| elimination_line(entry, &competitors))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
+        {
+            append_elimination_line(&mut elimination_text, entry, &competitors);
+        }
+    }
 
-    for (
-        mut text,
-        global,
-        announcement,
-        kill_feed,
-        summary,
-        rank,
-        respawn,
-        background,
-        border,
-        text_color,
-    ) in &mut texts
-    {
-        if global.is_some() {
-            update_text(&mut text, &ranking_text);
+    for (mut text, row, announcement, kill_feed, respawn, text_color) in &mut texts {
+        if let Some(row) = row {
+            update_text(
+                &mut text,
+                ranking_lines.get(row.0).map_or("", String::as_str),
+            );
+            if let Some(mut text_color) = text_color {
+                let next_color = rankings
+                    .entries
+                    .get(row.0)
+                    .and_then(|entry| {
+                        competitors
+                            .iter()
+                            .find(|(competitor, ..)| competitor.id == entry.id)
+                            .map(|(competitor, ..)| palette_color(competitor.color_id))
+                    })
+                    .unwrap_or(Color::NONE);
+                set_text_color_if_changed(&mut text_color, next_color);
+            }
         } else if announcement.is_some() {
             update_text(&mut text, &announcement_text);
         } else if kill_feed.is_some() {
             update_text(&mut text, &elimination_text);
-            if let Some(mut background) = background {
-                background.0 = Color::srgba(
-                    0.035,
-                    0.055,
-                    0.09,
-                    if text.0.is_empty() { 0.0 } else { 0.90 },
-                );
-            }
-        } else if let Some(marker) = summary {
-            let Ok((competitor, _territory, stats, life, protection, trail)) =
-                competitors.get(marker.0)
-            else {
-                continue;
-            };
-            let percent =
-                config.display_territory_percent(territory_map.area_percent(competitor.id));
-            let status = if !life.is_alive() {
-                " DOWN"
-            } else if protection.active() {
-                " SHIELD"
-            } else if trail.is_some() {
-                " DRAW"
-            } else {
-                ""
-            };
-            update_text(
-                &mut text,
-                &human_hud_summary(
-                    &competitor.display_name,
-                    percent,
-                    stats.kills,
-                    stats.kill_streak,
-                    (config.speed_multiplier_for_kills(stats.kills) - 1.0) * 100.0,
-                    status,
-                ),
-            );
-            if let Some(mut border) = border {
-                border.set_all(palette_color(competitor.color_id));
-            }
-        } else if let Some(marker) = rank {
-            let Ok((competitor, ..)) = competitors.get(marker.0) else {
-                continue;
-            };
-            let rank = rankings
-                .rank_of(competitor.id)
-                .map_or(0, |entry| entry.rank);
-            update_text(&mut text, &format!("#{rank} OF {}", rankings.entries.len()));
-        } else if let Some(marker) = respawn {
-            let Ok((_, _, _, life, protection, _)) = competitors.get(marker.0) else {
-                continue;
-            };
-            let next = if !life.is_alive() {
-                format!("BACK IN {:.1}", life.respawn_remaining.max(0.0))
-            } else if protection.active() {
-                format!("SHIELDED {:.1}", protection.remaining)
-            } else {
-                String::new()
-            };
-            update_text(&mut text, &next);
             if let Some(mut text_color) = text_color {
-                text_color.0 = if next.is_empty() { Color::NONE } else { CORAL };
+                let next_color = if elimination_text.is_empty() {
+                    Color::NONE
+                } else {
+                    INK
+                };
+                set_text_color_if_changed(&mut text_color, next_color);
+            }
+        } else if let Some(marker) = respawn {
+            let Ok((_, life, protection, _)) = competitors.get(marker.0) else {
+                continue;
+            };
+            respawn_text.clear();
+            if !life.is_alive() {
+                let _ = write!(
+                    respawn_text,
+                    "BACK IN {:.1}",
+                    life.respawn_remaining.max(0.0)
+                );
+            } else if protection.active() {
+                let _ = write!(respawn_text, "SHIELDED {:.1}", protection.remaining);
+            }
+            update_text(&mut text, &respawn_text);
+            if let Some(mut text_color) = text_color {
+                set_text_color_if_changed(
+                    &mut text_color,
+                    if respawn_text.is_empty() {
+                        Color::NONE
+                    } else {
+                        CORAL
+                    },
+                );
             }
         }
     }
+    for (accent, mut background) in &mut accents {
+        let next_color = rankings
+            .entries
+            .get(accent.0)
+            .and_then(|entry| {
+                competitors
+                    .iter()
+                    .find(|(competitor, ..)| competitor.id == entry.id)
+                    .map(|(competitor, ..)| palette_color(competitor.color_id).with_alpha(0.86))
+            })
+            .unwrap_or(Color::NONE);
+        if background.0 != next_color {
+            background.0 = next_color;
+        }
+    }
+}
+
+pub(super) fn write_ranking_label(target: &mut String, rank: u8, name: &str) {
+    let _ = write!(target, "{rank}  {name}");
 }
 
 fn update_text(text: &mut Text, next: &str) {
@@ -455,42 +490,46 @@ fn update_text(text: &mut Text, next: &str) {
     }
 }
 
-fn human_hud_summary(
-    name: &str,
-    territory_percent: f32,
-    kills: u32,
-    streak: u32,
-    speed_bonus_percent: f32,
-    status: &str,
-) -> String {
-    format!(
-        "{name}{status}  TURF {territory_percent:.1}/100%\n\
-         KILLS {kills}  STREAK {streak}  SPEED +{speed_bonus_percent:.0}%"
-    )
+fn set_text_color_if_changed(text_color: &mut TextColor, next: Color) {
+    if text_color.0 != next {
+        text_color.0 = next;
+    }
 }
 
-fn elimination_line(
+fn append_elimination_line(
+    target: &mut String,
     entry: &crate::match_game::EliminationRecord,
     competitors: &CompetitorHudQuery,
-) -> Option<String> {
-    let victim = competitors
+) {
+    let Some((victim, ..)) = competitors
         .iter()
-        .find(|(competitor, ..)| competitor.id == entry.victim)?
-        .0;
+        .find(|(competitor, ..)| competitor.id == entry.victim)
+    else {
+        return;
+    };
+    if !target.is_empty() {
+        target.push('\n');
+    }
     let killer = entry.killer.and_then(|id| {
         competitors
             .iter()
             .find(|(competitor, ..)| competitor.id == id)
             .map(|(competitor, ..)| competitor.display_name.as_str())
     });
-    Some(match (entry.cause, killer) {
-        (DeathCause::SelfTrail, _) => format!("{} CUT THEMSELVES", victim.display_name),
-        (DeathCause::Displaced, Some(killer)) => {
-            format!("{killer} ERASED {}", victim.display_name)
+    match (entry.cause, killer) {
+        (DeathCause::SelfTrail, _) => {
+            let _ = write!(target, "{} CUT THEMSELVES", victim.display_name);
         }
-        (_, Some(killer)) => format!("{killer} CUT {}", victim.display_name),
-        _ => format!("{} WIPED OUT", victim.display_name),
-    })
+        (DeathCause::Displaced, Some(killer)) => {
+            let _ = write!(target, "{killer} ERASED {}", victim.display_name);
+        }
+        (_, Some(killer)) => {
+            let _ = write!(target, "{killer} CUT {}", victim.display_name);
+        }
+        _ => {
+            let _ = write!(target, "{} WIPED OUT", victim.display_name);
+        }
+    }
 }
 
 pub(super) fn collect_match_results(
@@ -596,19 +635,4 @@ pub(super) fn collect_match_results(
     }
     persisted.0 = Some(session.seed);
     persistence.dirty = true;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::human_hud_summary;
-
-    #[test]
-    fn human_summary_keeps_status_out_of_the_dense_progression_line() {
-        let summary = human_hud_summary("KEY KID", 0.3, 1, 1, 3.5, " DOWN");
-        assert_eq!(
-            summary,
-            "KEY KID DOWN  TURF 0.3/100%\nKILLS 1  STREAK 1  SPEED +4%"
-        );
-        assert!(summary.lines().all(|line| line.chars().count() <= 30));
-    }
 }

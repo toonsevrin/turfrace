@@ -158,6 +158,28 @@ fn rankings_follow_all_tie_breaks() {
         ));
     }
     app.update();
+    let capacity_after_first_update = app.world().resource::<Rankings>().entries.capacity();
+    let ranking_events_after_first_update = app
+        .world()
+        .resource::<SimulationEvents>()
+        .0
+        .iter()
+        .filter(|event| matches!(event, SimulationEvent::RankingChanged))
+        .count();
+    app.update();
+    assert_eq!(
+        app.world().resource::<Rankings>().entries.capacity(),
+        capacity_after_first_update
+    );
+    assert_eq!(
+        app.world()
+            .resource::<SimulationEvents>()
+            .0
+            .iter()
+            .filter(|event| matches!(event, SimulationEvent::RankingChanged))
+            .count(),
+        ranking_events_after_first_update
+    );
     let ids: Vec<_> = app
         .world()
         .resource::<Rankings>()
@@ -212,7 +234,7 @@ fn death_immediately_clears_territory_and_active_trail() {
 
     let mut app = App::new();
     let mut territory = TerritoryMap::from_board(&board);
-    territory.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
+    territory.seed_owner(Vec2::ZERO, config.starting_territory_radius, id);
     app.insert_resource(config)
         .insert_resource(board)
         .insert_resource(territory)
@@ -350,7 +372,7 @@ fn leaving_owned_seed_ends_protection_after_minimum_time() {
         Vec2::new(4.0, 0.0),
         &{
             let mut territory = TerritoryMap::from_board(&board);
-            territory.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
+            territory.seed_owner(Vec2::ZERO, config.starting_territory_radius, id);
             territory
         },
         &config,
@@ -368,7 +390,7 @@ fn respawn_seed_displacement_is_credited() {
     board.claim_disk(Vec2::ZERO, 1.0, victim);
     let mut territory = TerritoryMap::from_board(&board);
     territory.clear_owner(victim);
-    territory.claim_disk(Vec2::ZERO, 1.0, victim);
+    territory.seed_owner(Vec2::ZERO, 1.0, victim);
     let mut credits = DisplacementCredits::default();
     claim_respawn_seed(
         &mut board,
@@ -376,10 +398,142 @@ fn respawn_seed_displacement_is_credited() {
         Vec2::ZERO,
         config.starting_territory_radius,
         respawning,
+        &[(victim, Vec2::ZERO)],
         &mut credits,
     );
     assert_eq!(board.owner_counts[victim.index()], 0);
     assert_eq!(credits.0, vec![(victim, respawning)]);
+}
+
+#[test]
+fn severed_occupied_island_runs_the_full_displacement_lifecycle() {
+    let config = GameConfig::default();
+    let mut board = BoardGrid::generate(31, 2, &config);
+    let mut territory = TerritoryMap::from_board(&board);
+    let victim = CompetitorId(0);
+    let attacker = CompetitorId(1);
+    let rectangle = |min: Vec2, max: Vec2| {
+        crate::geometry::MultiPolygon::from_outer(&[
+            min,
+            Vec2::new(max.x, min.y),
+            max,
+            Vec2::new(min.x, max.y),
+        ])
+    };
+
+    territory.seed_owner(Vec2::new(-5.0, 0.0), 1.5, victim);
+    let dumbbell = rectangle(Vec2::new(-7.0, -2.0), Vec2::new(-2.0, 2.0))
+        .union(&rectangle(Vec2::new(-2.0, -0.5), Vec2::new(2.0, 0.5)))
+        .union(&rectangle(Vec2::new(2.0, -2.0), Vec2::new(7.0, 2.0)));
+    territory.apply_claim(victim, dumbbell);
+    territory.seed_owner(Vec2::new(0.0, -4.0), 1.5, attacker);
+    territory.rebuild_sample_cache(&mut board);
+
+    let mut app = App::new();
+    app.insert_resource(config.clone())
+        .insert_resource(board)
+        .insert_resource(territory)
+        .init_resource::<PendingCaptures>()
+        .init_resource::<DisplacementCredits>()
+        .init_resource::<SimulationEvents>()
+        .insert_resource(Time::<Fixed>::from_hz(config.fixed_hz))
+        .add_systems(
+            Update,
+            (resolve_captures, resolve_territory_consequences).chain(),
+        );
+
+    let spawn_competitor = |world: &mut World, id, position| {
+        let last_owned = world
+            .resource::<BoardGrid>()
+            .world_to_cell(position)
+            .expect("fixture positions are on the board");
+        world
+            .spawn((
+                Competitor {
+                    id,
+                    display_name: format!("Player {}", id.0),
+                    kind: CompetitorKind::Npc,
+                    color_id: id.0,
+                    pattern_id: id.0,
+                },
+                CompetitorMotion::new(position, Vec2::Y),
+                LifeState::alive(),
+                SpawnProtection {
+                    remaining: 0.0,
+                    elapsed: 1.0,
+                },
+                TerritoryRecord::default(),
+                MatchStatistics::default(),
+                LastOwnedCell(last_owned),
+            ))
+            .id()
+    };
+    let victim_entity = spawn_competitor(app.world_mut(), victim, Vec2::new(5.0, 0.0));
+    let attacker_entity = spawn_competitor(app.world_mut(), attacker, Vec2::new(0.0, 2.0));
+    let start = Vec2::new(0.0, -3.0);
+    let mut trail = ActiveTrail::new(
+        attacker,
+        app.world()
+            .resource::<BoardGrid>()
+            .world_to_cell(start)
+            .expect("trail starts on the board"),
+        start,
+        Vec2::Y,
+    );
+    trail.append_exact(Vec2::new(0.0, 2.0));
+    app.world_mut()
+        .entity_mut(attacker_entity)
+        .insert(trail.clone());
+    app.world_mut()
+        .resource_mut::<PendingCaptures>()
+        .0
+        .push(PendingCapture {
+            player: attacker,
+            entity: attacker_entity,
+            time: 0.5,
+            trail,
+        });
+
+    app.update();
+
+    let world = app.world();
+    assert!(
+        !world
+            .entity(victim_entity)
+            .get::<LifeState>()
+            .unwrap()
+            .is_alive()
+    );
+    assert_eq!(
+        world
+            .entity(victim_entity)
+            .get::<MatchStatistics>()
+            .unwrap()
+            .deaths,
+        1
+    );
+    assert_eq!(
+        world
+            .entity(attacker_entity)
+            .get::<MatchStatistics>()
+            .unwrap()
+            .kills,
+        1
+    );
+    assert!(
+        world
+            .resource::<SimulationEvents>()
+            .0
+            .iter()
+            .any(|event| matches!(
+                event,
+                SimulationEvent::Death {
+                    victim: event_victim,
+                    killer: Some(event_killer),
+                    cause: DeathCause::Displaced,
+                } if *event_victim == victim && *event_killer == attacker
+            ))
+    );
 }
 
 #[test]

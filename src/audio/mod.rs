@@ -6,6 +6,7 @@ use bevy::{audio::Volume, prelude::*, window::WindowFocused};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AudioCue {
+    Ambient,
     MenuMove,
     MenuConfirm,
     MenuBack,
@@ -74,7 +75,12 @@ impl Plugin for GameAudioPlugin {
         app.init_resource::<AudioSettings>()
             .add_message::<PlayAudioCue>()
             .add_systems(Startup, setup_tones)
-            .add_systems(Update, (track_window_focus, play_cues).chain());
+            .init_resource::<AmbientClock>()
+            .add_systems(Update, (track_window_focus, play_cues).chain())
+            .add_systems(
+                Update,
+                play_ambient.run_if(in_state(crate::app_state::AppState::Playing)),
+            );
     }
 }
 
@@ -84,8 +90,24 @@ struct ToneBank(HashMap<AudioCue, Vec<Handle<Pitch>>>);
 #[derive(Resource, Default)]
 struct RateLimiter(HashMap<AudioCue, f32>);
 
+#[derive(Resource)]
+struct AmbientClock {
+    remaining: f32,
+    step: u8,
+}
+
+impl Default for AmbientClock {
+    fn default() -> Self {
+        Self {
+            remaining: 0.0,
+            step: 0,
+        }
+    }
+}
+
 fn setup_tones(mut commands: Commands, mut pitches: ResMut<Assets<Pitch>>) {
     let specs = [
+        (AudioCue::Ambient, 220.0, 700),
         (AudioCue::MenuMove, 420.0, 45),
         (AudioCue::MenuConfirm, 660.0, 75),
         (AudioCue::MenuBack, 280.0, 70),
@@ -109,14 +131,7 @@ fn setup_tones(mut commands: Commands, mut pitches: ResMut<Assets<Pitch>>) {
         specs
             .into_iter()
             .map(|(cue, hz, ms)| {
-                let ratios: &[f32] = match cue {
-                    AudioCue::MenuConfirm | AudioCue::Ready | AudioCue::Respawn => &[1.0, 1.5],
-                    AudioCue::Go | AudioCue::Capture | AudioCue::LeaderChange => &[1.0, 1.25],
-                    AudioCue::Victory => &[1.0, 1.25, 1.5],
-                    AudioCue::TrailCut | AudioCue::SelfCollision | AudioCue::Death => &[1.0, 0.75],
-                    _ => &[1.0],
-                };
-                let layers = ratios
+                let layers = tone_ratios(cue)
                     .iter()
                     .map(|ratio| pitches.add(Pitch::new(hz * ratio, Duration::from_millis(ms))))
                     .collect();
@@ -125,6 +140,66 @@ fn setup_tones(mut commands: Commands, mut pitches: ResMut<Assets<Pitch>>) {
             .collect(),
     ));
     commands.init_resource::<RateLimiter>();
+}
+
+/// Compact harmonic signatures make events identifiable without streamed
+/// assets. Consonant upward stacks reward progress; downward and sub-octave
+/// stacks communicate danger even when the screen is busy.
+fn tone_ratios(cue: AudioCue) -> &'static [f32] {
+    match cue {
+        AudioCue::Ambient => &[1.0, 1.0, 1.0, 1.0],
+        AudioCue::MenuMove => &[1.0, 2.0],
+        AudioCue::MenuConfirm | AudioCue::Ready | AudioCue::Respawn => &[1.0, 1.5, 2.0],
+        AudioCue::PlayerJoin => &[1.0, 1.25, 1.5],
+        AudioCue::Go | AudioCue::LeaderChange => &[1.0, 1.25, 1.5],
+        AudioCue::Capture => &[0.5, 1.0, 1.25, 1.5],
+        AudioCue::Kill => &[0.5, 1.0, 1.5, 2.0],
+        AudioCue::Victory => &[0.5, 1.0, 1.25, 1.5, 2.0],
+        AudioCue::TrailCut | AudioCue::SelfCollision => &[1.0, 0.75, 0.5],
+        AudioCue::Death => &[1.0, 0.75, 0.5, 0.375],
+        AudioCue::Pause => &[1.0, 0.5],
+        AudioCue::Resume => &[0.5, 1.0],
+        _ => &[1.0],
+    }
+}
+
+fn ambient_step_hz(step: u8) -> f32 {
+    // A minor-pentatonic four-note bed stays legible below gameplay sounds and
+    // never needs a decoded music asset or a browser fetch.
+    [220.0, 261.63, 293.66, 329.63][usize::from(step % 4)]
+}
+
+fn play_ambient(
+    mut commands: Commands,
+    time: Res<Time>,
+    settings: Res<AudioSettings>,
+    bank: Res<ToneBank>,
+    mut clock: ResMut<AmbientClock>,
+) {
+    clock.remaining -= time.delta_secs();
+    if clock.remaining > 0.0
+        || settings.muted
+        || (settings.mute_when_unfocused && !settings.focused)
+    {
+        return;
+    }
+    let Some(tones) = bank.0.get(&AudioCue::Ambient) else {
+        return;
+    };
+    let step = clock.step;
+    clock.step = clock.step.wrapping_add(1);
+    clock.remaining = 1.55;
+    let index = (step % 4) as usize;
+    if let Some(tone) = tones.get(index.min(tones.len().saturating_sub(1))) {
+        commands.spawn((
+            AudioPlayer(tone.clone()),
+            PlaybackSettings::DESPAWN
+                .with_volume(Volume::Linear(
+                    (settings.master_volume * settings.music_volume * 0.045).clamp(0.0, 1.0),
+                ))
+                .with_speed((ambient_step_hz(step) / 220.0).clamp(0.5, 2.0)),
+        ));
+    }
 }
 
 fn play_cues(
@@ -177,5 +252,30 @@ fn track_window_focus(
 ) {
     for event in events.read() {
         settings.focused = event.focused;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positive_and_danger_cues_have_opposite_harmonic_motion() {
+        assert!(
+            tone_ratios(AudioCue::Capture)
+                .iter()
+                .any(|ratio| *ratio > 1.0)
+        );
+        assert!(
+            tone_ratios(AudioCue::Death)
+                .iter()
+                .any(|ratio| *ratio < 0.5)
+        );
+    }
+
+    #[test]
+    fn ambient_bed_uses_a_repeatable_four_note_scale() {
+        assert_eq!(ambient_step_hz(0), ambient_step_hz(4));
+        assert_ne!(ambient_step_hz(0), ambient_step_hz(1));
     }
 }

@@ -21,7 +21,7 @@ use crate::{
     lobby::{Lobby, LobbyCommand, LobbyCommandMessage, MatchDisconnectNotice, MatchSetup},
     match_game::{
         Competitor, CompetitorKind, DeathCause, EliminationFeed, LifeState, MatchSession,
-        MatchStatistics as SimulationMatchStatistics, Rankings, SpawnProtection, TerritoryRecord,
+        MatchStatistics as SimulationMatchStatistics, Rankings, SpawnProtection,
     },
     palette::palette_color,
     profiles::{
@@ -63,6 +63,7 @@ struct DecorativeTrail {
 #[derive(Component, Clone, Debug)]
 enum UiAction {
     State(AppState),
+    Back(AppState),
     Settings,
     SettingsBack,
     Resume,
@@ -101,6 +102,17 @@ enum SettingField {
 #[derive(Component)]
 struct FocusOrder(u16);
 
+/// Menu controls use a narrow color key and animated type instead of a filled
+/// selection rectangle. Editor keyboard keys intentionally keep their own
+/// compact square treatment.
+#[derive(Component)]
+struct IntegratedMenuButton;
+
+#[derive(Component)]
+struct IntegratedButtonLabel {
+    idle: Color,
+}
+
 #[derive(Resource, Default)]
 struct UiFocus {
     entity: Option<Entity>,
@@ -125,7 +137,10 @@ struct NameEditorValue;
 struct GameplayHudRoot;
 
 #[derive(Component)]
-struct GlobalRankingText;
+struct GlobalRankingRow(usize);
+
+#[derive(Component)]
+struct GlobalRankingAccent(usize);
 
 #[derive(Component)]
 struct KillFeedText;
@@ -139,13 +154,13 @@ struct HumanHudRoot {
 }
 
 #[derive(Component)]
-struct HumanHudSummary(Entity);
-
-#[derive(Component)]
-struct HumanHudRank(Entity);
-
-#[derive(Component)]
 struct HumanRespawnText(Entity);
+
+#[derive(Component)]
+struct HumanNameTag {
+    camera: Entity,
+    source: Entity,
+}
 
 #[derive(Resource, Default)]
 struct Confirmation {
@@ -248,7 +263,10 @@ impl Plugin for UiPlugin {
                     tick_confirmation,
                 ),
             )
-            .add_systems(Update, (reconcile_human_huds, update_gameplay_hud));
+            .add_systems(
+                Update,
+                (reconcile_human_huds, update_gameplay_hud, update_name_tags),
+            );
     }
 }
 
@@ -283,5 +301,13 @@ mod tests {
         settings.normalize();
         assert_eq!(settings.master_volume, 1.0);
         assert_eq!(settings.screen_shake, 0.0);
+    }
+
+    #[test]
+    fn match_ranking_label_stays_quiet_and_omits_percentage() {
+        let mut label = String::new();
+        write_ranking_label(&mut label, 2, "MOUSE ACE");
+        assert_eq!(label, "2  MOUSE ACE");
+        assert!(!label.contains('%'));
     }
 }

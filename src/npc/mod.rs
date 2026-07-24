@@ -32,7 +32,7 @@ impl NpcDifficulty {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NpcPersonality {
     Cautious,
     Balanced,
@@ -166,6 +166,7 @@ pub struct DefaultNpcBrain {
     phase: f32,
     outside_target: f32,
     side: f32,
+    patrol_window: u32,
 }
 impl DefaultNpcBrain {
     pub fn new(id: CompetitorId, personality: NpcPersonality) -> Self {
@@ -182,6 +183,7 @@ impl DefaultNpcBrain {
             phase,
             outside_target,
             side: if id.0.is_multiple_of(2) { 1.0 } else { -1.0 },
+            patrol_window: u32::MAX,
         }
     }
 }
@@ -195,6 +197,17 @@ impl NpcBrain for DefaultNpcBrain {
                     .normalize_or(s.heading),
                 debug_state: NpcDebugState::Recovering,
             };
+        }
+        if s.trail_length == 0.0 {
+            let patrol_window = (c.match_time.max(0.0) / 7.0) as u32;
+            if self.patrol_window == u32::MAX {
+                self.patrol_window = patrol_window;
+            } else if patrol_window != self.patrol_window {
+                if should_flip_patrol_side(patrol_window, self.id) {
+                    self.side = -self.side;
+                }
+                self.patrol_window = patrol_window;
+            }
         }
         if c.board.signed_distance(s.position) < 2.0 {
             return NpcIntent {
@@ -223,7 +236,16 @@ impl NpcBrain for DefaultNpcBrain {
                 .iter()
                 .filter(|p| p.alive && p.id != self.id)
                 .any(|p| p.position.distance(s.position) < 5.0);
-            if (s.trail_length >= self.outside_target || threatened)
+            // Each excursion has a changing appetite. This keeps even two
+            // bots with the same personality from drawing the same safe loop
+            // forever, while remaining deterministic for replays.
+            let appetite = 0.72
+                + 0.46
+                    * (self.phase * 1.7 + c.match_time * 0.037 + self.id.0 as f32)
+                        .sin()
+                        .abs()
+                    * ranking_pressure(c.ranking, self.id);
+            if (s.trail_length >= self.outside_target * appetite || threatened)
                 && let Some(home) = c.board.nearest_owned(s.position)
             {
                 return NpcIntent {
@@ -248,9 +270,9 @@ impl NpcBrain for DefaultNpcBrain {
                 .min_by(|a, b| a.distance.total_cmp(&b.distance))
             && target.distance
                 < if self.personality == NpcPersonality::Raider {
-                    7.0
+                    7.0 * ranking_pressure(c.ranking, self.id)
                 } else {
-                    4.0
+                    4.0 * ranking_pressure(c.ranking, self.id)
                 }
         {
             return NpcIntent {
@@ -259,11 +281,40 @@ impl NpcBrain for DefaultNpcBrain {
             };
         }
 
+        let patrol = patrol_direction(s, c.nearby_competitors, self.side, self.phase);
+        let weave_strength = personality_weave_strength(self.personality);
+        let weave = perpendicular(patrol)
+            * (self.phase * (1.4 + self.id.0 as f32 * 0.07)).sin()
+            * weave_strength;
         NpcIntent {
-            desired_direction: patrol_direction(s, c.nearby_competitors, self.side, self.phase),
+            desired_direction: (patrol + weave).normalize_or(s.heading),
             debug_state: NpcDebugState::Patrolling,
         }
     }
+}
+
+/// Trailing bots accept longer excursions and opportunistic cuts, while the
+/// leader protects its island. This makes behavior react to the match rather
+/// than remaining a fixed personality script.
+fn ranking_pressure(ranking: &RankingSnapshot, id: CompetitorId) -> f32 {
+    let Some(index) = ranking
+        .ordered
+        .iter()
+        .position(|competitor| *competitor == id)
+    else {
+        return 1.0;
+    };
+    if ranking.ordered.len() <= 1 {
+        return 1.0;
+    }
+    0.82 + 0.36 * index as f32 / (ranking.ordered.len() - 1) as f32
+}
+
+fn should_flip_patrol_side(window: u32, id: CompetitorId) -> bool {
+    window
+        .wrapping_mul(1_664_525)
+        .wrapping_add(u32::from(id.0).wrapping_mul(1_013_904_223))
+        .is_multiple_of(3)
 }
 
 fn patrol_direction(
@@ -293,6 +344,15 @@ fn perpendicular(v: Vec2) -> Vec2 {
     Vec2::new(-v.y, v.x)
 }
 
+fn personality_weave_strength(personality: NpcPersonality) -> f32 {
+    match personality {
+        NpcPersonality::Cautious => 0.001,
+        NpcPersonality::Balanced => 0.003,
+        NpcPersonality::Raider => 0.006,
+        NpcPersonality::Greedy => 0.01,
+    }
+}
+
 pub fn deterministic_npc_name(index: usize) -> &'static str {
     const NAMES: [&str; 12] = [
         "BIX", "MOKO", "ZAP", "TILLY", "CRUMB", "NOVA", "PIP", "RUNE", "JUNO", "KIP", "DOT",
@@ -301,10 +361,11 @@ pub fn deterministic_npc_name(index: usize) -> &'static str {
     NAMES[index % NAMES.len()]
 }
 pub fn deterministic_personality(seed: u64, id: CompetitorId) -> NpcPersonality {
-    match ((seed.rotate_left(id.0 as u32) ^ id.0 as u64) % 10) as u8 {
+    match ((seed.rotate_left(id.0 as u32) ^ id.0 as u64) % 12) as u8 {
         0..=2 => NpcPersonality::Cautious,
-        3..=7 => NpcPersonality::Balanced,
-        8..=9 => NpcPersonality::Raider,
+        3..=6 => NpcPersonality::Balanced,
+        7..=9 => NpcPersonality::Raider,
+        10..=11 => NpcPersonality::Greedy,
         _ => unreachable!(),
     }
 }
@@ -323,6 +384,54 @@ mod tests {
         assert_eq!(
             deterministic_personality(42, CompetitorId(3)),
             deterministic_personality(42, CompetitorId(3))
+        );
+    }
+
+    #[test]
+    fn personality_roster_includes_every_strategy() {
+        let personalities: std::collections::HashSet<_> = (0..512)
+            .map(|seed| deterministic_personality(seed, CompetitorId((seed % 12) as u8)))
+            .collect();
+        assert_eq!(personalities.len(), 4);
+    }
+
+    #[test]
+    fn aggressive_personalities_weave_more_than_cautious_bots() {
+        assert!(
+            personality_weave_strength(NpcPersonality::Greedy)
+                > personality_weave_strength(NpcPersonality::Cautious)
+        );
+        assert!(
+            personality_weave_strength(NpcPersonality::Raider)
+                > personality_weave_strength(NpcPersonality::Balanced)
+        );
+    }
+
+    #[test]
+    fn trailing_bots_take_more_risks_than_the_leader() {
+        let ranking = RankingSnapshot {
+            ordered: vec![CompetitorId(0), CompetitorId(1), CompetitorId(2)],
+        };
+        assert!(
+            ranking_pressure(&ranking, CompetitorId(2))
+                > ranking_pressure(&ranking, CompetitorId(0))
+        );
+        assert!(ranking_pressure(&ranking, CompetitorId(0)) < 1.0);
+        assert!(ranking_pressure(&ranking, CompetitorId(2)) > 1.0);
+    }
+
+    #[test]
+    fn patrol_side_changes_are_deterministic_but_not_constant() {
+        let decisions: Vec<_> = (1..12)
+            .map(|window| should_flip_patrol_side(window, CompetitorId(3)))
+            .collect();
+        assert!(decisions.iter().any(|decision| *decision));
+        assert!(decisions.iter().any(|decision| !*decision));
+        assert_eq!(
+            decisions,
+            (1..12)
+                .map(|window| should_flip_patrol_side(window, CompetitorId(3)))
+                .collect::<Vec<_>>()
         );
     }
 

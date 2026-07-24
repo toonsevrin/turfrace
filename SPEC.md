@@ -221,17 +221,25 @@ All combat is based on active trails and loss of territory. This avoids ambiguou
 
 ## 6.1 Safe movement
 
-A player is considered safe while the center of their cube is over a grid cell owned by that player.
+A player is considered safe while the center of their cube is inside that player’s exact vector
+territory. The ownership grid mirrors this state for trail rasterization and broadphase only.
 
 While safe:
 
 * No active trail is drawn.
-* The player may move freely through any connected or disconnected territory they own.
+* The player may move freely through the single territory island connected to their spawn anchor.
 * Opponents may still steal the cell from underneath them through a capture.
+
+### 6.1.1 Single-island invariant
+
+Each competitor stores the center of their current spawn seed as a persistent anchor. After every
+committed capture, territory polygons that no longer contain that anchor are removed. A competitor
+standing on removed geometry dies with cause `Displaced`; a competitor still on the anchor-connected
+polygon is unaffected. This invariant makes it impossible for one competitor to own two islands.
 
 ## 6.2 Starting a trail
 
-A trail starts when the player’s center crosses from an owned cell into a cell that is:
+A trail starts when the player’s center crosses from exact owned territory into space that is:
 
 * Unclaimed, or
 * Owned by another competitor.
@@ -287,7 +295,7 @@ The system:
 
 If no owned path exists between the start and end cells, the trail did not form a valid enclosed region. This can occur when:
 
-* The player returned to a disconnected territory island.
+* The player reaches a narrow bridge or corridor without enclosing an interior.
 * Opponents stole the trail’s original anchor.
 * The original territory was split while the player was outside.
 
@@ -418,14 +426,11 @@ up to a 28% cap, and the bonus persists through respawns.
 
 The killer receives escalating non-authoritative feedback as total kills rise:
 
-* A colored particle burst, ground ring, and short kill popup appear at the
-  killer's position.
-* The popup shows the current streak, with stronger tier labels at 2, 4, and 7
-  total kills.
+* A colored particle burst and ground ring appear at the killer's position.
 * The killer's local camera briefly punches its FOV, while total kills and the
   current streak also widen the persistent gameplay FOV.
-* The per-player HUD shows total kills, current streak, and the earned speed
-  bonus.
+* The quiet HUD relies on cube lean, trail treatment, camera response, and audio
+  rather than numeric speed, kill, or streak telemetry.
 
 ## 7.6 Spawn protection
 
@@ -534,7 +539,8 @@ Examples:
 * Eight humans and no NPCs: the top three humans appear.
 * Fewer than three total competitors: display all competitors.
 
-A local human outside the top three still sees their own rank and percentage in their viewport HUD.
+Local viewports do not duplicate rank and percentage telemetry; players read their standing from
+the shared leaderboard and their cube's color/name cues.
 
 Respawning players remain in the full rankings at zero territory and are shown dimmed if they appear due to a very small competitor count.
 
@@ -698,9 +704,9 @@ Starting seed disks must not overlap.
 
 # 11. Authoritative capture algorithm
 
-Gameplay is continuous visually, but territory ownership is grid-authoritative.
-
-This avoids fragile polygon-boolean operations while preserving smooth movement.
+Gameplay is continuous visually, but exact fixed-point vector multipolygons are authoritative for
+territory ownership. The low-resolution grid is a derived cache for rendering and broadphase work;
+it never decides containment, capture, ranking, or elimination.
 
 ## 11.1 Trail sampling
 
@@ -732,89 +738,47 @@ For each player, track:
 
 ## 11.3 Closing path
 
-When the cube enters owned territory:
+When the cube crosses back into the player’s exact vector territory, interpolate the boundary
+entry time and build a stroked corridor from the active trail points. If the trail intersects a
+current outer contour, choose the smaller valid lobe bounded by the trail and that contour. The
+candidate is clipped to the arena and unioned with the corridor. If no valid lobe exists, the
+corridor alone is committed as a bridge capture.
 
-1. Identify the trail start-owned cell.
-2. Identify the current entry-owned cell.
-3. Run A* through cells currently owned by the player.
-4. Allow eight-direction movement.
-5. Do not allow diagonal corner-cutting through non-owned cells.
-6. Use costs `1.0` orthogonally and `sqrt(2)` diagonally.
-7. If a path is found, simplify its cell-center polyline by removing collinear points.
-8. Combine:
+## 11.4 Vector capture
 
-   * The active trail from start to end.
-   * The owned path from end back to start.
+Capture geometry uses deterministic fixed-point `MultiPolygon` booleans:
 
-This forms the capture polygon.
+1. Stroke the trail into a capsule corridor.
+2. Union the corridor with the selected loop lobe, when present.
+3. Intersect the result with the arena.
+4. Difference the claim from every other owner.
+5. Union the claim into the capturing owner.
+6. Retain only each owner’s polygon containing its spawn anchor; report removed polygons.
 
-## 11.4 Polygon fill
-
-Use an even-odd scanline fill over grid-cell centers.
-
-```text
-for every playable cell in polygon bounding box:
-    if point_in_polygon(cell_center, closure_polygon):
-        mark cell for capture
-```
-
-Then union the result with every trail corridor cell.
-
-Clip all results to the playable field mask.
-
-The even-odd rule handles touching edges and unusual but valid polygons consistently.
+The sample grid is refreshed only over changed geometry AABBs for rendering and broadphase. Exact
+vector areas and containment remain authoritative for statistics, displacement, ranking, and the
+95% victory threshold.
 
 ## 11.5 Applying ownership
 
-For every captured cell:
+After a committed vector mutation:
 
-1. Record its previous owner.
-2. Set its owner to the capturing player.
-3. Decrement the previous owner’s count if applicable.
-4. Increment the capturing player’s count if ownership changed.
-5. Mark its render chunk dirty.
-
-After all cells have been changed:
-
-* Clear the capturing player’s active trail.
-* Detect competitors reduced to zero territory.
-* Start trails for safe competitors whose current cells were stolen.
+* Clear the capturing player’s active trail and its raster bits.
+* Emit displacement credits for owners reduced to zero or cubes standing on severed polygons.
+* Start trails for safe competitors whose current ground was stolen.
+* Refresh changed board-cache AABBs and owner mesh revisions.
 * Emit capture statistics and visual events.
-* Recalculate rankings.
-* Check victory.
+* Recalculate rankings and check victory.
 
 ## 11.6 Closure pseudocode
 
 ```rust
-fn resolve_closure(player: PlayerId, board: &mut BoardGrid, trail: &ActiveTrail) {
-    let trail_cells = rasterize_trail(trail);
-
-    let path = find_owned_path(
-        board,
-        player,
-        trail.start_owned_cell,
-        trail.end_owned_cell,
-    );
-
-    let mut claimed = CellSet::from(trail_cells);
-
-    if let Some(owned_path) = path {
-        let polygon = build_closure_polygon(
-            &trail.points,
-            &owned_path,
-        );
-
-        for cell in cells_in_bounds(polygon.bounding_box()) {
-            if board.is_playable(cell)
-                && point_in_polygon(board.cell_center(cell), &polygon)
-            {
-                claimed.insert(cell);
-            }
-        }
-    }
-
-    apply_capture(player, claimed, board);
-    clear_active_trail(player, board);
+fn resolve_closure(player: PlayerId, map: &mut TerritoryMap, trail: &ActiveTrail) {
+    let result = map.calculate_capture(player, trail, TRAIL_WIDTH);
+    let committed = map.apply_claim(player, result.claim);
+    refresh_changed_cache_aabbs(&committed);
+    clear_active_trail(player);
+    kill_cubes_on(committed.disconnected_by_owner);
 }
 ```
 
@@ -1227,29 +1191,29 @@ Names are limited to 16 displayed characters and sanitized for control character
 
 A global UI camera renders:
 
-* Top-three leaderboard in the top-right.
+* A compact top-three leaderboard in the top-right, using player-color rows and
+  thin square accent rails without a panel background.
 * Compact kill feed.
 * Pause and game-over overlays.
 
 Leaderboard row:
 
 ```text
-[rank] [color/pattern] [name] [NPC marker if applicable] [percentage]
+[rank] [name] [color key]
 ```
 
-The panel scales down when six or more human viewports are active.
+The live rows omit territory percentage: rank movement and player color provide the immediate
+signal, while detailed percentages remain available on the results and local-record screens. The
+rows remain legible at narrow viewports and require no title or panel.
 
 ### Per-player HUD
 
 Each human viewport contains:
 
-* Top-left: profile name and percentage.
-* Bottom-left: current rank, such as `#5 / 8`.
-* Trail-active indicator while outside territory.
-* Total kills, current kill streak, and earned speed bonus.
+* Player names projected above each world cube in that player's color.
 * Respawn countdown when dead.
 * Small spawn-protection timer or shield.
-* Optional home-direction arrow.
+* Movement, trail, camera, and effect cues instead of duplicated numeric telemetry.
 
 ## 15.7 Pause screen
 
@@ -1491,7 +1455,7 @@ Default brains may share a common planner with weighted states:
 * Frequently makes short loops through enemy territory.
 * Accepts greater proximity to opponents.
 
-A fourth `Greedy` personality targeting 4–10% captures MAY be included if stable during testing.
+A fourth `Greedy` personality targeting 4–10% captures is included in the production roster.
 
 ## 17.5 NPC decision logic
 
@@ -1516,6 +1480,11 @@ While drawing:
 * Enter Hunting only when the route to an enemy trail is shorter than the safe return margin.
 * Avoid the NPC’s own existing trail using a repulsion field.
 * Replan when territory is stolen.
+
+Risk also responds to the live ranking. The leader shortens excursions to defend its connected
+island, while trailing NPCs accept longer routes and wider trail-interception opportunities.
+Deterministic patrol windows may reverse an NPC's preferred turning side so repeated matches do
+not collapse into a fixed clockwise/counterclockwise script.
 
 NPCs require no general obstacle pathfinding because the field contains no solid internal obstacles.
 
@@ -1720,8 +1689,7 @@ On successful capture:
 
 * Newly captured cells rise from 0 to 0.10 units over approximately 0.25 seconds, or
 * A bright outline sweeps around the new boundary if height animation is too expensive.
-* A percentage popup appears above the cube, for example `+2.4%`.
-* Small particles travel inward from the trail.
+* A short ring and bounded particle burst acknowledge the new boundary.
 * Sound pitch scales mildly with capture size.
 
 Authoritative ownership changes immediately. The animation is cosmetic.
@@ -1733,7 +1701,7 @@ The following SHOULD be prioritized because they are inexpensive and improve pre
 * Blob shadows under cubes.
 * Black cube outlines.
 * Floating leader crown.
-* Capture percentage popup.
+* Player-color name tags above cubes.
 * Colored viewport accent line.
 * Trail shimmer shader.
 * Cube lean while turning.
@@ -2290,6 +2258,7 @@ For randomized field seeds and capture shapes:
 * Every generated field has sufficient spawn capacity.
 * Capture results are deterministic for the same board and trail.
 * Capture cannot change cells outside the field.
+* Every non-empty competitor territory contains its spawn anchor and has one connected outer island.
 
 ## 25.3 Integration tests
 
@@ -2306,6 +2275,7 @@ For randomized field seeds and capture shapes:
 * Death clears all territory.
 * First three deaths respawn after 5, 10, and 15 seconds.
 * NPCs can complete captures and cut trails.
+* Severing a non-anchor island removes it and kills a cube standing on that island.
 * NPC soak test runs for at least one simulated hour without invalid state.
 * Match cannot continue after exact full-field capture.
 
@@ -2433,7 +2403,7 @@ Add:
 
 * NPC interface.
 * Perception queries.
-* Cautious, Balanced, and Raider personalities.
+* Cautious, Balanced, Raider, and Greedy personalities.
 * Normal difficulty.
 * Long-running simulation tests.
 
@@ -2464,7 +2434,7 @@ These decisions remove ambiguity for implementation:
 * Cubes do not physically collide with one another.
 * Touching one’s own established trail is fatal.
 * Trail collisions resolve before capture closures.
-* Territory ownership is grid-authoritative.
+* Territory ownership is exact fixed-point vector-authoritative; the sample grid is derived.
 * Movement remains continuous and visually smooth.
 * A valid loop is closed using a path through currently owned territory.
 * A closure without such a path claims only the trail corridor.

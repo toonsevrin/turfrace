@@ -23,7 +23,7 @@ run_scenario() {
 
 if [[ ${1-} == --all ]]; then
     shift
-    for scenario in home leaderboard lobby match pause results settings; do
+    for scenario in home leaderboard lobby match capture pause results settings; do
         run_scenario "$scenario" "$@"
     done
     exit 0
@@ -34,9 +34,9 @@ if [[ $# -gt 0 ]]; then
     shift
 fi
 case "$scenario" in
-    home|leaderboard|lobby|match|pause|results|settings) ;;
+    home|leaderboard|lobby|match|capture|pause|results|settings) ;;
     *)
-        printf 'usage: %s [--all|home|leaderboard|lobby|match|pause|results|settings] [--frames N | --seconds N] [--width PX] [--height PX]\n' "$0" >&2
+        printf 'usage: %s [--all|home|leaderboard|lobby|match|capture|pause|results|settings] [--frames N | --seconds N] [--width PX] [--height PX]\n' "$0" >&2
         exit 2
         ;;
 esac

@@ -26,6 +26,7 @@ pub fn apply_capture(map: &mut TerritoryMap, player: CompetitorId, result: &mut 
     let applied = map.apply_claim(player, result.claim.clone());
     result.claimed_area = applied.claimed_area;
     result.stolen_by_owner = applied.stolen_by_owner;
+    result.disconnected_by_owner = applied.disconnected_by_owner;
 }
 
 pub fn apply_equal_time_captures(
@@ -60,8 +61,17 @@ mod tests {
     fn bridge_capture_is_vector_corridor_only() {
         let mut map = TerritoryMap::new(arena());
         let player = CompetitorId(0);
-        map.claim_disk(Vec2::new(-6.0, 0.0), 3.0, player);
-        map.claim_disk(Vec2::new(6.0, 0.0), 3.0, player);
+        map.seed_owner(Vec2::new(-6.0, 0.0), 3.0, player);
+        // Build an intentionally disconnected fixture to exercise the
+        // corridor-only geometry fallback. Production seeding cannot create
+        // this state.
+        map.territories[player.index()] =
+            map.territories[player.index()].union(&MultiPolygon::from_outer(&[
+                Vec2::new(3.0, -3.0),
+                Vec2::new(9.0, -3.0),
+                Vec2::new(9.0, 3.0),
+                Vec2::new(3.0, 3.0),
+            ]));
         let mut trail = ActiveTrail::new(
             player,
             crate::board::Cell::new(0, 0),
@@ -98,5 +108,46 @@ mod tests {
         apply_equal_time_captures(&mut map, &mut captures);
         assert!(map.territories[low.index()].contains_world(Vec2::ZERO));
         assert!(!map.territories[high.index()].contains_world(Vec2::ZERO));
+    }
+
+    #[test]
+    fn applied_capture_reports_spawn_disconnected_territory() {
+        let mut map = TerritoryMap::new(arena());
+        let victim = CompetitorId(0);
+        let attacker = CompetitorId(1);
+        map.seed_owner(Vec2::new(-6.0, 0.0), 2.0, victim);
+        map.apply_claim(
+            victim,
+            MultiPolygon::from_outer(&[
+                Vec2::new(-6.0, -0.5),
+                Vec2::new(6.0, -0.5),
+                Vec2::new(6.0, 0.5),
+                Vec2::new(-6.0, 0.5),
+            ]),
+        );
+        map.apply_claim(
+            victim,
+            MultiPolygon::from_outer(&[
+                Vec2::new(4.0, -2.0),
+                Vec2::new(8.0, -2.0),
+                Vec2::new(8.0, 2.0),
+                Vec2::new(4.0, 2.0),
+            ]),
+        );
+        let mut result = CaptureResult {
+            claim: MultiPolygon::from_outer(&[
+                Vec2::new(-0.4, -2.0),
+                Vec2::new(0.4, -2.0),
+                Vec2::new(0.4, 2.0),
+                Vec2::new(-0.4, 2.0),
+            ]),
+            ..Default::default()
+        };
+
+        apply_capture(&mut map, attacker, &mut result);
+
+        assert!(result.disconnected_by_owner.iter().any(
+            |(owner, removed)| *owner == victim && removed.contains_world(Vec2::new(6.0, 0.0))
+        ));
     }
 }

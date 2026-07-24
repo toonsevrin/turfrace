@@ -32,7 +32,11 @@ pub(super) fn update_ui_scale(
     }
 }
 
-pub(super) fn setup_ui(mut commands: Commands, assets: Res<AssetServer>) {
+pub(super) fn setup_ui(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    presentation: Res<crate::render::PresentationSettings>,
+) {
     let display_font = FontSource::Handle(assets.load("fonts/Bungee-Regular.ttf"));
     // Keep the expressive display face for titles. The built-in mono face is
     // intentionally used for body copy: it is available in native and WASM
@@ -44,6 +48,7 @@ pub(super) fn setup_ui(mut commands: Commands, assets: Res<AssetServer>) {
     });
     commands.spawn((
         Camera2d,
+        presentation.msaa(),
         CameraRenderGraph::new(Core2d),
         Camera {
             order: 100,
@@ -95,10 +100,56 @@ pub(super) fn panel_node(width: Val) -> Node {
 }
 
 pub(super) fn spawn_background(parent: &mut ChildSpawnerCommands) {
-    // The shell uses the same paper tone as the arena. Profile cards are the
-    // only intentional menu fills, so the title and controls stand directly
-    // on the field instead of sitting in another slab.
-    let _ = parent;
+    // Soft moving turf marks give every screen the same visual vocabulary as
+    // play without placing the menu on a rectangular panel.
+    for (index, (left, top, size, color)) in [
+        (
+            percent(8),
+            percent(13),
+            150.0,
+            Color::srgba(0.12, 0.38, 0.92, 0.08),
+        ),
+        (
+            percent(82),
+            percent(18),
+            96.0,
+            Color::srgba(1.0, 0.28, 0.12, 0.10),
+        ),
+        (
+            percent(12),
+            percent(72),
+            78.0,
+            Color::srgba(0.10, 0.68, 0.34, 0.09),
+        ),
+        (
+            percent(76),
+            percent(70),
+            180.0,
+            Color::srgba(0.64, 0.18, 0.90, 0.07),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        parent.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left,
+                top,
+                width: px(size),
+                height: px(size),
+                border_radius: BorderRadius::all(percent(50)),
+                ..default()
+            },
+            BackgroundColor(color),
+            UiTransform::default(),
+            DecorativeTrail {
+                phase: index as f32 * 1.7,
+                speed: 0.18 + index as f32 * 0.025,
+                amplitude: 14.0 + index as f32 * 2.0,
+            },
+        ));
+    }
 }
 
 pub(super) fn spawn_title(
@@ -250,8 +301,8 @@ pub(super) fn spawn_compact_menu_button(
             min_height: 34.0,
             horizontal_padding: 10.0,
             font_size: 15.0,
-            width: percent(76),
-            max_width: px(360),
+            width: Val::Auto,
+            max_width: Val::Auto,
             align_self: AlignSelf::Center,
             label_style: ButtonLabelStyle::Utility,
             frame_style: ButtonFrameStyle::QuietRule,
@@ -305,22 +356,14 @@ fn spawn_button_sized(
     } else {
         metrics.width
     };
-    let (border, justify_content) = match metrics.frame_style {
-        ButtonFrameStyle::MenuRule => (
-            UiRect {
-                left: px(4),
-                right: px(0),
-                top: px(0),
-                bottom: px(1),
-            },
-            JustifyContent::FlexStart,
-        ),
-        ButtonFrameStyle::Box => (UiRect::all(px(1)), JustifyContent::Center),
-        ButtonFrameStyle::QuietRule => (UiRect::bottom(px(1)), JustifyContent::Center),
+    let justify_content = match metrics.frame_style {
+        ButtonFrameStyle::MenuRule => JustifyContent::FlexStart,
+        ButtonFrameStyle::Box | ButtonFrameStyle::QuietRule => JustifyContent::Center,
     };
     parent
         .spawn((
             Button,
+            IntegratedMenuButton,
             action,
             FocusOrder(order),
             Node {
@@ -329,15 +372,17 @@ fn spawn_button_sized(
                 min_width: px(58),
                 min_height: px(metrics.min_height),
                 padding: UiRect::axes(px(metrics.horizontal_padding), px(7)),
-                border,
-                border_radius: BorderRadius::all(px(0)),
+                // Reserve a stable three-pixel color key so focus never
+                // changes the control's measure or introduces a panel.
+                border: UiRect::left(px(3)),
                 align_self: metrics.align_self,
                 justify_content,
                 align_items: AlignItems::Center,
                 ..default()
             },
+            UiTransform::default(),
             BackgroundColor(Color::NONE),
-            BorderColor::all(INK),
+            BorderColor::all(Color::NONE),
         ))
         .with_children(|button| match metrics.label_style {
             ButtonLabelStyle::Perspective => {
@@ -352,6 +397,7 @@ fn spawn_button_sized(
                         ..default()
                     },
                     TextColor(INK),
+                    IntegratedButtonLabel { idle: INK },
                 ));
             }
         });
@@ -405,6 +451,7 @@ fn spawn_perspective_button_label(
                     ..default()
                 },
                 TextColor(CREAM),
+                IntegratedButtonLabel { idle: CREAM },
                 TextLayout::justify(Justify::Left),
                 Node {
                     position_type: PositionType::Absolute,

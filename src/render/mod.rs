@@ -49,6 +49,27 @@ impl Default for PresentationSettings {
     }
 }
 
+impl PresentationSettings {
+    pub(crate) fn msaa(&self) -> Msaa {
+        match self.quality {
+            GraphicsQuality::Low | GraphicsQuality::Medium => Msaa::Off,
+            GraphicsQuality::High => Msaa::Sample4,
+        }
+    }
+
+    pub(crate) fn gameplay_msaa(&self, local_player_count: usize) -> Msaa {
+        if local_player_count > 1 {
+            // WebGL2-compatible wgpu backends can lose earlier split views
+            // when several window cameras render without a multisampled
+            // attachment. Four samples are guaranteed by WebGPU and preserve
+            // every local viewport.
+            Msaa::Sample4
+        } else {
+            self.msaa()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsQuality {
     Low,

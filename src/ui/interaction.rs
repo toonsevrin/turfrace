@@ -11,6 +11,13 @@ type ChangedActionButtons<'w, 's> = Query<
 >;
 
 #[derive(SystemParam)]
+pub(super) struct ControllerNavOutput<'w> {
+    focus: ResMut<'w, UiFocus>,
+    activated: MessageWriter<'w, UiActivated>,
+    audio: MessageWriter<'w, PlayAudioCue>,
+}
+
+#[derive(SystemParam)]
 pub(super) struct UiActionResources<'w> {
     state: Res<'w, State<AppState>>,
     next: ResMut<'w, NextState<AppState>>,
@@ -53,11 +60,26 @@ pub(super) fn button_interactions(
             Interaction::Pressed => {
                 focus.entity = Some(entity);
                 activated.write(UiActivated(action.clone()));
-                audio.write(PlayAudioCue::human(audio_cue_for_action(action)));
+                if let Some(cue) = audio_cue_for_interaction(*interaction, action) {
+                    audio.write(PlayAudioCue::human(cue));
+                }
             }
-            Interaction::Hovered => focus.entity = Some(entity),
+            Interaction::Hovered => {
+                focus.entity = Some(entity);
+                if let Some(cue) = audio_cue_for_interaction(*interaction, action) {
+                    audio.write(PlayAudioCue::human(cue));
+                }
+            }
             Interaction::None => {}
         }
+    }
+}
+
+fn audio_cue_for_interaction(interaction: Interaction, action: &UiAction) -> Option<AudioCue> {
+    match interaction {
+        Interaction::Pressed => Some(audio_cue_for_action(action)),
+        Interaction::Hovered => Some(AudioCue::MenuMove),
+        Interaction::None => None,
     }
 }
 
@@ -65,36 +87,46 @@ pub(super) fn controller_navigation(
     mut inputs: MessageReader<MenuInput>,
     state: Res<State<AppState>>,
     buttons: Query<(Entity, &FocusOrder, &UiAction), With<Button>>,
-    mut focus: ResMut<UiFocus>,
-    mut activated: MessageWriter<UiActivated>,
-    mut audio: MessageWriter<PlayAudioCue>,
+    mut ordered: Local<Vec<(Entity, u16)>>,
+    mut output: ControllerNavOutput,
     editor: Res<NameEditor>,
 ) {
-    let mut ordered: Vec<_> = buttons.iter().collect();
-    ordered.sort_by_key(|(_, order, _)| order.0);
+    // Menu input is sparse. Avoid collecting, allocating, and sorting the
+    // entire button tree on every rendered frame while nobody is navigating.
+    let has_input = !inputs.is_empty();
+    if !has_input && output.focus.entity.is_some() {
+        return;
+    }
+    ordered.clear();
+    ordered.extend(buttons.iter().map(|(entity, order, _)| (entity, order.0)));
+    ordered.sort_unstable_by_key(|(_, order)| *order);
     if ordered.is_empty() {
         return;
     }
-    if focus.entity.is_none() {
-        focus.entity = Some(ordered[0].0);
+    if output.focus.entity.is_none() {
+        output.focus.entity = Some(ordered[0].0);
+    }
+    if !has_input {
+        return;
     }
     for input in inputs.read() {
         match input.action {
             MenuAction::Up | MenuAction::Left => {
                 let current = ordered
                     .iter()
-                    .position(|(entity, _, _)| Some(*entity) == focus.entity)
+                    .position(|(entity, _)| Some(*entity) == output.focus.entity)
                     .unwrap_or(0);
-                focus.entity = Some(ordered[(current + ordered.len() - 1) % ordered.len()].0);
-                audio.write(PlayAudioCue::human(AudioCue::MenuMove));
+                output.focus.entity =
+                    Some(ordered[(current + ordered.len() - 1) % ordered.len()].0);
+                output.audio.write(PlayAudioCue::human(AudioCue::MenuMove));
             }
             MenuAction::Down | MenuAction::Right => {
                 let current = ordered
                     .iter()
-                    .position(|(entity, _, _)| Some(*entity) == focus.entity)
+                    .position(|(entity, _)| Some(*entity) == output.focus.entity)
                     .unwrap_or(0);
-                focus.entity = Some(ordered[(current + 1) % ordered.len()].0);
-                audio.write(PlayAudioCue::human(AudioCue::MenuMove));
+                output.focus.entity = Some(ordered[(current + 1) % ordered.len()].0);
+                output.audio.write(PlayAudioCue::human(AudioCue::MenuMove));
             }
             MenuAction::Confirm | MenuAction::Secondary => {
                 if !activates_focused_button(
@@ -105,12 +137,15 @@ pub(super) fn controller_navigation(
                 ) {
                     continue;
                 }
-                if let Some((_, _, action)) = ordered
+                if let Some((entity, _)) = ordered
                     .iter()
-                    .find(|(entity, _, _)| Some(*entity) == focus.entity)
+                    .find(|(entity, _)| Some(*entity) == output.focus.entity)
+                    && let Ok((_, _, action)) = buttons.get(*entity)
                 {
-                    activated.write(UiActivated((*action).clone()));
-                    audio.write(PlayAudioCue::human(audio_cue_for_action(action)));
+                    output.activated.write(UiActivated(action.clone()));
+                    output
+                        .audio
+                        .write(PlayAudioCue::human(audio_cue_for_action(action)));
                 }
             }
             _ => {}
@@ -133,31 +168,79 @@ fn activates_focused_button(
 pub(super) fn audio_cue_for_action(action: &UiAction) -> AudioCue {
     match action {
         UiAction::Resume => AudioCue::Resume,
-        UiAction::SettingsBack | UiAction::EditorCancel => AudioCue::MenuBack,
+        UiAction::Back(_) | UiAction::SettingsBack | UiAction::EditorCancel => AudioCue::MenuBack,
         _ => AudioCue::MenuConfirm,
     }
 }
 
+#[derive(Default)]
+pub(super) struct FocusVisualState {
+    selected: Option<Entity>,
+    pressed: Option<Entity>,
+    remaining: f32,
+}
+
 pub(super) fn update_button_focus(
+    time: Res<Time>,
     focus: Res<UiFocus>,
     mut buttons: Query<
-        (Entity, &Interaction, &mut BackgroundColor, &mut BorderColor),
-        With<Button>,
+        (
+            Entity,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            &mut UiTransform,
+        ),
+        With<IntegratedMenuButton>,
     >,
+    children: Query<&Children>,
+    mut labels: Query<(&IntegratedButtonLabel, &mut TextColor)>,
+    mut visual_state: Local<FocusVisualState>,
 ) {
-    if !focus.is_changed()
-        && !buttons
-            .iter()
-            .any(|(_, interaction, _, _)| *interaction == Interaction::Pressed)
-    {
+    let pressed = buttons.iter_mut().find_map(|(entity, interaction, ..)| {
+        (*interaction == Interaction::Pressed).then_some(entity)
+    });
+    if visual_state.selected != focus.entity || visual_state.pressed != pressed {
+        visual_state.selected = focus.entity;
+        visual_state.pressed = pressed;
+        visual_state.remaining = 0.34;
+    } else if visual_state.remaining <= 0.0 {
         return;
     }
-    for (entity, interaction, mut background, mut border) in &mut buttons {
+    visual_state.remaining = (visual_state.remaining - time.delta_secs()).max(0.0);
+    let alpha = if visual_state.remaining == 0.0 {
+        1.0
+    } else {
+        1.0 - 2.0_f32.powf(-time.delta_secs().min(0.1) / 0.075)
+    };
+    for (entity, interaction, mut background, mut border, mut transform) in &mut buttons {
         let selected = focus.entity == Some(entity) || *interaction == Interaction::Hovered;
-        // Controls stay open on the paper shell. Focus is communicated by the
-        // coral rule so the menu never grows another filled slab behind text.
         background.0 = Color::NONE;
-        border.set_all(if selected { CORAL } else { INK });
+        border.set_all(if selected { CORAL } else { Color::NONE });
+        if let Ok(button_children) = children.get(entity) {
+            for child in button_children.iter() {
+                if let Ok((label, mut color)) = labels.get_mut(child) {
+                    color.0 = if selected { CORAL } else { label.idle };
+                }
+                if let Ok(grandchildren) = children.get(child) {
+                    for grandchild in grandchildren.iter() {
+                        if let Ok((label, mut color)) = labels.get_mut(grandchild) {
+                            color.0 = if selected { CORAL } else { label.idle };
+                        }
+                    }
+                }
+            }
+        }
+        let target_scale = if *interaction == Interaction::Pressed {
+            0.975
+        } else if selected {
+            1.025
+        } else {
+            1.0
+        };
+        transform.scale = transform
+            .scale
+            .lerp(Vec2::splat(target_scale), alpha.clamp(0.0, 1.0));
     }
 }
 
@@ -185,6 +268,7 @@ pub(super) fn dispatch_ui_actions(
     for message in activated.read() {
         match &message.0 {
             UiAction::State(target) => next.set(*target),
+            UiAction::Back(target) => next.set(*target),
             UiAction::Settings => {
                 settings_return.0 = *state.get();
                 next.set(AppState::Settings);
@@ -606,5 +690,23 @@ mod tests {
             true,
             InputDeviceId::KeyboardPrimary,
         ));
+    }
+
+    #[test]
+    fn pointer_focus_and_activation_have_distinct_audio_cues() {
+        let action = UiAction::Resume;
+        assert_eq!(
+            audio_cue_for_interaction(Interaction::Hovered, &action),
+            Some(AudioCue::MenuMove)
+        );
+        assert_eq!(
+            audio_cue_for_interaction(Interaction::Pressed, &action),
+            Some(AudioCue::Resume)
+        );
+        assert_eq!(audio_cue_for_interaction(Interaction::None, &action), None);
+        assert_eq!(
+            audio_cue_for_action(&UiAction::Back(AppState::Home)),
+            AudioCue::MenuBack
+        );
     }
 }

@@ -13,12 +13,20 @@ use crate::{
     trail::ActiveTrail,
 };
 
+mod connectivity;
+mod spatial_index;
+
+use connectivity::retain_spawn_components;
+use spatial_index::TerritorySpatialIndex;
+
 const CIRCLE_SAMPLES: usize = 32;
 const STROKE_SAMPLES: usize = 12;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorCaptureResult {
     pub claim: MultiPolygon,
+    /// Territory removed because it was severed from an owner's spawn anchor.
+    pub disconnected_by_owner: Vec<(CompetitorId, MultiPolygon)>,
     pub claimed_area: f32,
     pub stolen_by_owner: Vec<(CompetitorId, f32)>,
     pub used_loop_fill: bool,
@@ -30,6 +38,7 @@ pub struct TerritoryMap {
     pub territories: [MultiPolygon; MAX_COMPETITORS],
     pub arena_area: f32,
     pub revision: u64,
+    spawn_anchors: [Option<Vec2>; MAX_COMPETITORS],
     index: TerritorySpatialIndex,
 }
 
@@ -47,6 +56,7 @@ impl TerritoryMap {
             territories: std::array::from_fn(|_| MultiPolygon::empty()),
             arena_area,
             revision: 1,
+            spawn_anchors: [None; MAX_COMPETITORS],
             index: TerritorySpatialIndex::default(),
         }
     }
@@ -80,27 +90,30 @@ impl TerritoryMap {
     }
 
     pub fn owner_at(&self, point: Vec2) -> OwnerId {
-        let candidates = self.index.candidates(point);
-        if candidates.is_empty() {
-            for (index, territory) in self.territories.iter().enumerate() {
-                if territory.contains_world(point) {
+        if let Some(mask) = self.index.candidate_mask(point) {
+            for index in 0..MAX_COMPETITORS {
+                if mask & (1 << index) != 0 && self.territories[index].contains_world(point) {
                     return CompetitorId(index as u8).owner();
                 }
             }
-        } else {
-            for &index in candidates {
-                if self.territories[index as usize].contains_world(point) {
-                    return CompetitorId(index).owner();
-                }
+            return OwnerId::UNCLAIMED;
+        }
+        for (index, territory) in self.territories.iter().enumerate() {
+            if territory.contains_world(point) {
+                return CompetitorId(index as u8).owner();
             }
         }
         OwnerId::UNCLAIMED
     }
 
     pub fn owns(&self, point: Vec2, player: CompetitorId) -> bool {
-        let candidates = self.index.candidates(point);
-        (candidates.is_empty() || candidates.contains(&(player.index() as u8)))
-            && self.territories[player.index()].contains_world(point)
+        self.index.candidate_mask(point).map_or_else(
+            || self.territories[player.index()].contains_world(point),
+            |mask| {
+                mask & (1 << player.index()) != 0
+                    && self.territories[player.index()].contains_world(point)
+            },
+        )
     }
 
     pub fn boundary_crossing(&self, player: CompetitorId, from: Vec2, to: Vec2) -> Vec2 {
@@ -176,13 +189,29 @@ impl TerritoryMap {
         Vec2::ZERO
     }
 
-    pub fn claim_disk(&mut self, center: Vec2, radius: f32, player: CompetitorId) -> f32 {
+    /// Establishes a fresh spawn seed for an owner with no existing territory.
+    ///
+    /// Seeding is a lifecycle transition, not a general-purpose claim mode:
+    /// callers must clear the owner first. The commit still enforces every
+    /// other owner's spawn connectivity and reports any territory it removes.
+    pub fn seed_owner(
+        &mut self,
+        center: Vec2,
+        radius: f32,
+        player: CompetitorId,
+    ) -> VectorCaptureResult {
+        assert!(
+            self.territories[player.index()].is_empty(),
+            "cannot seed an owner that still has territory"
+        );
+        self.spawn_anchors[player.index()] = Some(center);
         let disk = circle(center, radius, CIRCLE_SAMPLES);
-        self.apply_claim(player, disk).claimed_area
+        self.apply_claim(player, disk)
     }
 
     pub fn clear_owner(&mut self, player: CompetitorId) -> f32 {
         let old = self.area(player);
+        self.spawn_anchors[player.index()] = None;
         if old > 0.0 {
             self.territories[player.index()] = MultiPolygon::empty();
             self.rebuild_index();
@@ -192,6 +221,36 @@ impl TerritoryMap {
     }
 
     pub fn calculate_capture(
+        &self,
+        player: CompetitorId,
+        trail: &ActiveTrail,
+        trail_width: f32,
+    ) -> VectorCaptureResult {
+        let mut result = self.prepare_capture(player, trail, trail_width);
+        let territory = &self.territories[player.index()];
+        let before = territory.area();
+        result.claimed_area = (territory.union(&result.claim).area() - before).max(0.0);
+        result.stolen_by_owner = self
+            .territories
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != player.index())
+            .map(|(index, other)| {
+                let stolen = other.intersection(&result.claim).area();
+                (CompetitorId(index as u8), stolen)
+            })
+            .filter(|(_, area)| *area > 1e-5)
+            .collect();
+        result
+    }
+
+    /// Builds capture geometry without measuring speculative ownership.
+    ///
+    /// The simulation commits every pending claim immediately afterward, at
+    /// which point [`Self::apply_claim`] computes authoritative area and theft
+    /// metrics. Keeping that hot path geometry-only avoids repeating one union
+    /// and up to seven opponent intersections at every trail closure.
+    pub(crate) fn prepare_capture(
         &self,
         player: CompetitorId,
         trail: &ActiveTrail,
@@ -211,25 +270,12 @@ impl TerritoryMap {
             used_loop_fill = true;
         }
         claim = claim.intersection(&self.arena);
-        let before = self.area(player);
-        let after = territory.union(&claim).area();
-        let claimed_area = (after - before).max(0.0);
-        let stolen_by_owner = self
-            .territories
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != player.index())
-            .map(|(index, other)| {
-                let stolen = other.intersection(&claim).area();
-                (CompetitorId(index as u8), stolen)
-            })
-            .filter(|(_, area)| *area > 1e-5)
-            .collect();
 
         VectorCaptureResult {
             claim,
-            claimed_area,
-            stolen_by_owner,
+            disconnected_by_owner: Vec::new(),
+            claimed_area: 0.0,
+            stolen_by_owner: Vec::new(),
             used_loop_fill,
         }
     }
@@ -255,6 +301,8 @@ impl TerritoryMap {
             }
         }
         self.territories[player.index()] = self.territories[player.index()].union(&claim);
+        let disconnected_by_owner =
+            retain_spawn_components(&mut self.territories, &mut self.spawn_anchors);
         self.rebuild_index();
         let claimed_area = (self.area(player) - before).max(0.0);
         if claimed_area > 1e-5 || !stolen_by_owner.is_empty() {
@@ -262,6 +310,7 @@ impl TerritoryMap {
         }
         VectorCaptureResult {
             claim,
+            disconnected_by_owner,
             claimed_area,
             stolen_by_owner,
             used_loop_fill: false,
@@ -277,13 +326,55 @@ impl TerritoryMap {
     ) {
         captures.sort_by_key(|(player, _)| *player);
         let mut committed = MultiPolygon::empty();
-        for (player, result) in captures {
-            let claim = result.claim.difference(&committed);
-            result.claim = claim.clone();
-            let applied = self.apply_claim(*player, claim);
+        let capture_count = captures.len();
+        for (index, (player, result)) in captures.iter_mut().enumerate() {
+            // The overwhelmingly common one-player closure needs no
+            // arbitration geometry. In a simultaneous group, the first claim
+            // likewise has nothing to subtract, and the final committed union
+            // would never be observed.
+            if !committed.is_empty() {
+                result.claim = result.claim.difference(&committed);
+            }
+            let applied = self.apply_claim(*player, result.claim.clone());
             result.claimed_area = applied.claimed_area;
             result.stolen_by_owner = applied.stolen_by_owner;
-            committed = committed.union(&result.claim);
+            result.disconnected_by_owner = applied.disconnected_by_owner;
+            if index + 1 < capture_count {
+                if committed.is_empty() {
+                    committed.clone_from(&result.claim);
+                } else {
+                    committed = committed.union(&result.claim);
+                }
+            }
+        }
+    }
+
+    /// Refreshes only cells covered by geometry that can have changed.
+    ///
+    /// Exact vector geometry remains authoritative. This cache exists for
+    /// rendering and broadphase queries, so a local capture must not trigger a
+    /// full-arena polygon containment pass.
+    pub fn refresh_sample_cache(&self, board: &mut BoardGrid, changed: &MultiPolygon) {
+        let Some((min, max)) = changed.bounds() else {
+            return;
+        };
+        self.refresh_sample_cache_bounds(board, min.world(), max.world());
+    }
+
+    fn refresh_sample_cache_bounds(&self, board: &mut BoardGrid, min: Vec2, max: Vec2) {
+        let Some((min, max)) = board.clamped_cell_bounds(min, max) else {
+            return;
+        };
+        for y in min.y..=max.y {
+            for x in min.x..=max.x {
+                let cell = crate::board::Cell::new(x, y);
+                let Some(index) = board.index(cell) else {
+                    continue;
+                };
+                if board.field_mask[index] {
+                    board.set_owner_index(index, self.owner_at(board.cell_center(cell)));
+                }
+            }
         }
     }
 
@@ -367,73 +458,7 @@ impl TerritoryMap {
     }
 
     fn rebuild_index(&mut self) {
-        self.index = TerritorySpatialIndex::build(&self.arena, &self.territories);
-    }
-}
-
-const INDEX_SIDE: usize = 64;
-
-#[derive(Clone, Debug, Default, PartialEq)]
-struct TerritorySpatialIndex {
-    origin: Vec2,
-    cell_size: Vec2,
-    cells: Vec<Vec<u8>>,
-}
-
-impl TerritorySpatialIndex {
-    fn build(arena: &MultiPolygon, territories: &[MultiPolygon; MAX_COMPETITORS]) -> Self {
-        let Some((min, max)) = arena.bounds() else {
-            return Self::default();
-        };
-        let origin = min.world();
-        let extent = (max.world() - origin).max(Vec2::splat(1.0));
-        let cell_size = extent / INDEX_SIDE as f32;
-        let mut index = Self {
-            origin,
-            cell_size,
-            cells: vec![Vec::new(); INDEX_SIDE * INDEX_SIDE],
-        };
-        for (owner, territory) in territories.iter().enumerate() {
-            let Some((min, max)) = territory.bounds() else {
-                continue;
-            };
-            let (a, b) = index.bounds(min.world(), max.world());
-            for y in a.1..=b.1 {
-                for x in a.0..=b.0 {
-                    let slot = y * INDEX_SIDE + x;
-                    if !index.cells[slot].contains(&(owner as u8)) {
-                        index.cells[slot].push(owner as u8);
-                    }
-                }
-            }
-        }
-        index
-    }
-
-    fn bounds(&self, min: Vec2, max: Vec2) -> ((usize, usize), (usize, usize)) {
-        let to_cell = |point: Vec2| {
-            let relative = (point - self.origin) / self.cell_size;
-            (
-                relative.x.floor().clamp(0.0, (INDEX_SIDE - 1) as f32) as usize,
-                relative.y.floor().clamp(0.0, (INDEX_SIDE - 1) as f32) as usize,
-            )
-        };
-        (to_cell(min), to_cell(max))
-    }
-
-    fn candidates(&self, point: Vec2) -> &[u8] {
-        if self.cells.is_empty()
-            || point.x < self.origin.x
-            || point.y < self.origin.y
-            || point.x > self.origin.x + self.cell_size.x * INDEX_SIDE as f32
-            || point.y > self.origin.y + self.cell_size.y * INDEX_SIDE as f32
-        {
-            return &[];
-        }
-        let relative = (point - self.origin) / self.cell_size;
-        let x = relative.x.floor().clamp(0.0, (INDEX_SIDE - 1) as f32) as usize;
-        let y = relative.y.floor().clamp(0.0, (INDEX_SIDE - 1) as f32) as usize;
-        &self.cells[y * INDEX_SIDE + x]
+        self.index.rebuild(&self.arena, &self.territories);
     }
 }
 
@@ -460,7 +485,7 @@ fn trail_points(trail: &ActiveTrail) -> Vec<Vec2> {
 
 fn stroke_polyline(points: &[Vec2], width: f32) -> MultiPolygon {
     let radius = width.max(0.01) * 0.5;
-    let mut contours = Vec::with_capacity(points.len().saturating_mul(3));
+    let mut contours = Vec::with_capacity(points.len().saturating_mul(2).saturating_sub(1));
     for segment in points.windows(2) {
         let a = segment[0];
         let b = segment[1];
@@ -472,11 +497,12 @@ fn stroke_polyline(points: &[Vec2], width: f32) -> MultiPolygon {
                 .map(Point::from_world)
                 .collect(),
         );
-        contours.push(circle_contour(a, radius, STROKE_SAMPLES));
-        contours.push(circle_contour(b, radius, STROKE_SAMPLES));
     }
-    if points.len() == 1 {
-        contours.push(circle_contour(points[0], radius, STROKE_SAMPLES));
+    // One disk per unique sample joins adjacent quads and rounds both ends.
+    // Adding a disk for both endpoints of every segment duplicated every
+    // interior contour and made long-trail overlay work almost twice as large.
+    for &point in points {
+        contours.push(circle_contour(point, radius, STROKE_SAMPLES));
     }
     MultiPolygon::from_union_contours(contours)
 }
@@ -577,6 +603,106 @@ fn closed_loop(
 mod tests {
     use super::*;
 
+    #[test]
+    fn capture_removes_territory_severed_from_spawn_anchor() {
+        let arena = MultiPolygon::from_outer(&[
+            Vec2::new(-12.0, -8.0),
+            Vec2::new(12.0, -8.0),
+            Vec2::new(12.0, 8.0),
+            Vec2::new(-12.0, 8.0),
+        ]);
+        let mut map = TerritoryMap::new(arena);
+        let victim = CompetitorId(0);
+        let attacker = CompetitorId(1);
+        let left = rectangle(Vec2::new(-8.0, -3.0), Vec2::new(-2.0, 3.0));
+        let bridge = rectangle(Vec2::new(-2.0, -0.6), Vec2::new(2.0, 0.6));
+        let right = rectangle(Vec2::new(2.0, -3.0), Vec2::new(8.0, 3.0));
+        map.territories[victim.index()] = left.union(&bridge).union(&right);
+        map.spawn_anchors[victim.index()] = Some(Vec2::new(-5.0, 0.0));
+        map.rebuild_index();
+
+        let cut = rectangle(Vec2::new(-0.4, -2.0), Vec2::new(0.4, 2.0));
+        let result = map.apply_claim(attacker, cut);
+
+        assert!(map.owns(Vec2::new(-5.0, 0.0), victim));
+        assert!(!map.owns(Vec2::new(5.0, 0.0), victim));
+        assert_eq!(map.territories[victim.index()].polygons.len(), 1);
+        assert!(result.disconnected_by_owner.iter().any(
+            |(owner, removed)| *owner == victim && removed.contains_world(Vec2::new(5.0, 0.0))
+        ));
+    }
+
+    #[test]
+    fn losing_the_spawn_anchor_removes_all_remaining_islands() {
+        let mut map = TerritoryMap::new(arena());
+        let victim = CompetitorId(0);
+        let attacker = CompetitorId(1);
+        map.spawn_anchors[victim.index()] = Some(Vec2::new(-5.0, 0.0));
+        map.territories[victim.index()] = rectangle(Vec2::new(-8.0, -2.0), Vec2::new(8.0, 2.0));
+        map.rebuild_index();
+
+        let result = map.apply_claim(
+            attacker,
+            rectangle(Vec2::new(-6.0, -3.0), Vec2::new(-4.0, 3.0)),
+        );
+
+        assert!(map.territories[victim.index()].is_empty());
+        assert!(map.spawn_anchors[victim.index()].is_none());
+        assert!(result.disconnected_by_owner.iter().any(
+            |(owner, removed)| *owner == victim && removed.contains_world(Vec2::new(5.0, 0.0))
+        ));
+    }
+
+    #[test]
+    fn seed_anchor_is_replaced_after_a_full_clear() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        map.seed_owner(Vec2::new(-6.0, 0.0), 2.0, player);
+        assert_eq!(
+            map.spawn_anchors[player.index()],
+            Some(Vec2::new(-6.0, 0.0))
+        );
+
+        map.clear_owner(player);
+        assert!(map.spawn_anchors[player.index()].is_none());
+        map.seed_owner(Vec2::new(6.0, 0.0), 2.0, player);
+        assert_eq!(map.spawn_anchors[player.index()], Some(Vec2::new(6.0, 0.0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot seed an owner that still has territory")]
+    fn seeding_requires_the_previous_lifecycle_to_be_cleared() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        map.seed_owner(Vec2::new(-6.0, 0.0), 2.0, player);
+
+        map.seed_owner(Vec2::new(6.0, 0.0), 2.0, player);
+    }
+
+    #[test]
+    fn spatial_index_uses_compact_candidate_masks() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        map.seed_owner(Vec2::new(-6.0, 0.0), 2.0, player);
+        let allocation = map.index.cells.as_ptr();
+
+        map.apply_claim(
+            player,
+            rectangle(Vec2::new(-6.0, -1.0), Vec2::new(6.0, 1.0)),
+        );
+        assert_eq!(map.index.cells.len(), spatial_index::INDEX_CELL_COUNT);
+        assert_eq!(map.index.cells.as_ptr(), allocation);
+        assert_eq!(
+            map.index.candidate_mask(Vec2::new(-6.0, 0.0)),
+            Some(1 << player.index())
+        );
+        assert_eq!(map.index.candidate_mask(Vec2::new(15.0, 15.0)), Some(0));
+    }
+
+    fn rectangle(min: Vec2, max: Vec2) -> MultiPolygon {
+        MultiPolygon::from_outer(&[min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)])
+    }
+
     fn arena() -> MultiPolygon {
         MultiPolygon::from_outer(&[
             Vec2::new(-20.0, -20.0),
@@ -591,19 +717,33 @@ mod tests {
         let mut map = TerritoryMap::new(arena());
         let a = CompetitorId(0);
         let b = CompetitorId(1);
-        map.claim_disk(Vec2::new(-3.0, 0.0), 3.0, a);
-        map.claim_disk(Vec2::new(3.0, 0.0), 3.0, b);
+        map.seed_owner(Vec2::new(-3.0, 0.0), 3.0, a);
+        map.seed_owner(Vec2::new(3.0, 0.0), 3.0, b);
         let before = map.area(b);
         let claim = MultiPolygon::from_outer(&[
-            Vec2::new(0.0, -2.0),
+            Vec2::new(-1.0, -2.0),
             Vec2::new(5.0, -2.0),
             Vec2::new(5.0, 2.0),
-            Vec2::new(0.0, 2.0),
+            Vec2::new(-1.0, 2.0),
         ]);
         let result = map.apply_claim(a, claim);
         assert!(result.claimed_area > 0.0);
         assert!(map.area(b) < before);
         assert_eq!(map.owner_at(Vec2::new(4.0, 0.0)), a.owner());
+    }
+
+    #[test]
+    fn single_equal_time_capture_keeps_geometry_and_commits_metrics() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        let claim = rectangle(Vec2::new(-3.0, -2.0), Vec2::new(3.0, 2.0));
+        let mut captures = [(player, VectorCaptureResult { claim, ..default() })];
+
+        map.apply_equal_time_captures(&mut captures);
+
+        assert!(captures[0].1.claim.contains_world(Vec2::ZERO));
+        assert!(captures[0].1.claimed_area > 0.0);
+        assert!(map.owns(Vec2::ZERO, player));
     }
 
     #[test]
@@ -675,7 +815,7 @@ mod tests {
     #[test]
     fn areas_are_stable_under_repeated_normalization() {
         let mut map = TerritoryMap::new(arena());
-        map.claim_disk(Vec2::ZERO, 4.0, CompetitorId(0));
+        map.seed_owner(Vec2::ZERO, 4.0, CompetitorId(0));
         let first = map.area(CompetitorId(0));
         for _ in 0..3 {
             map.territories[0] = map.territories[0].normalize();
@@ -703,6 +843,38 @@ mod tests {
         assert!(result.used_loop_fill);
         assert!(result.claimed_area > 20.0);
         assert!(result.claim.contains_world(Vec2::new(0.0, -10.0)));
+    }
+
+    #[test]
+    fn prepared_capture_matches_fully_calculated_capture_after_commit() {
+        let mut calculated_map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        let victim = CompetitorId(1);
+        calculated_map.seed_owner(Vec2::new(-6.0, 0.0), 4.0, player);
+        calculated_map.seed_owner(Vec2::new(0.0, 0.0), 3.0, victim);
+        let mut prepared_map = calculated_map.clone();
+        let mut trail = ActiveTrail::new(
+            player,
+            crate::board::Cell::new(0, 0),
+            Vec2::new(-4.0, -2.0),
+            Vec2::X,
+        );
+        trail.append_exact(Vec2::new(2.0, -2.0));
+
+        let calculated = calculated_map.calculate_capture(player, &trail, 0.6);
+        let prepared = prepared_map.prepare_capture(player, &trail, 0.6);
+        assert_eq!(prepared.claimed_area, 0.0);
+        assert!(prepared.stolen_by_owner.is_empty());
+
+        let calculated_applied = calculated_map.apply_claim(player, calculated.claim);
+        let prepared_applied = prepared_map.apply_claim(player, prepared.claim);
+        assert!((calculated_applied.claimed_area - prepared_applied.claimed_area).abs() < 0.001);
+        assert_eq!(
+            calculated_applied.stolen_by_owner.len(),
+            prepared_applied.stolen_by_owner.len()
+        );
+        assert!((calculated_map.area(player) - prepared_map.area(player)).abs() < 0.001);
+        assert!((calculated_map.area(victim) - prepared_map.area(victim)).abs() < 0.001);
     }
 
     #[test]

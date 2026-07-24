@@ -8,7 +8,10 @@ const CAP_SEGMENTS: usize = 10;
 const TRAIL_CLEARANCE: f32 = 0.03;
 const TRAIL_TRAVERSAL_HEIGHT: f32 = TERRITORY_SURFACE_HEIGHT + TRAIL_CLEARANCE;
 
-pub const MAX_RENDER_TRAIL_POINTS: usize = 512;
+/// Trails can remain authoritative at full resolution, but their cosmetic
+/// ribbon never needs hundreds of vertices on an old browser GPU. A bounded
+/// 256-point sample also keeps capture-time mesh uploads predictable.
+pub const MAX_RENDER_TRAIL_POINTS: usize = 256;
 
 /// Render-only trail polyline. Gameplay collision continues to use its own
 /// exact sampled path and head. The visual path has a fixed budget.

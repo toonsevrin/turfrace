@@ -22,6 +22,9 @@ pub(super) struct FieldSurface;
 pub(super) struct FieldShadow;
 
 #[derive(Component)]
+pub(super) struct FieldDepth;
+
+#[derive(Component)]
 pub(super) struct FieldBorder;
 
 pub(super) fn setup_stage(
@@ -47,6 +50,7 @@ pub(super) fn sync_field_mesh(
     mut flat: ResMut<Assets<FlatMaterial>>,
     surface: Query<(Entity, &Mesh3d), With<FieldSurface>>,
     shadow: Query<(Entity, &Mesh3d), With<FieldShadow>>,
+    depth: Query<(Entity, &Mesh3d), With<FieldDepth>>,
     border: Query<(Entity, &Mesh3d), With<FieldBorder>>,
     mut last_revision: Local<Option<u64>>,
 ) {
@@ -58,7 +62,7 @@ pub(super) fn sync_field_mesh(
     };
     *last_revision = Some(field.revision);
 
-    let field_mesh = build_field_mesh(&field.contour, 0.0, true);
+    let field_mesh = build_field_mesh(&field.contour, 0.0, false);
     if let Ok((entity, mesh)) = surface.single() {
         retired.0.push_back((mesh.0.clone(), 0));
         commands
@@ -70,6 +74,25 @@ pub(super) fn sync_field_mesh(
             FieldSurface,
             Mesh3d(meshes.add(field_mesh)),
             MeshMaterial3d::<PaperMaterial>(render_assets.paper_material.clone()),
+        ));
+    }
+
+    // Give the paper slab a real side profile. The old top mesh carried a
+    // barely visible skirt with the same paper material, so oblique cameras
+    // still read the arena as a paper-thin decal. A dedicated warm edge mesh
+    // keeps the top surface bright while making the boundary legible.
+    let depth_mesh = build_field_depth_mesh(&field.contour, -0.18);
+    if let Ok((entity, mesh)) = depth.single() {
+        retired.0.push_back((mesh.0.clone(), 0));
+        commands
+            .entity(entity)
+            .insert(Mesh3d(meshes.add(depth_mesh)));
+    } else {
+        commands.spawn((
+            Name::new("Paper Field Edge"),
+            FieldDepth,
+            Mesh3d(meshes.add(depth_mesh)),
+            MeshMaterial3d(flat.add(FlatMaterial::new(Color::srgb_u8(184, 169, 149), 0.72))),
         ));
     }
 
@@ -189,6 +212,42 @@ fn build_field_mesh(contour: &[Vec2], height: f32, include_skirt: bool) -> Mesh 
     mesh
 }
 
+fn build_field_depth_mesh(contour: &[Vec2], bottom: f32) -> Mesh {
+    let mut positions = Vec::with_capacity(contour.len() * 2);
+    let mut normals = Vec::with_capacity(contour.len() * 2);
+    let mut uvs = Vec::with_capacity(contour.len() * 2);
+    let mut indices = Vec::with_capacity(contour.len() * 6);
+    for (index, point) in contour.iter().copied().enumerate() {
+        let next = contour[(index + 1) % contour.len()];
+        let tangent =
+            (next - contour[(index + contour.len() - 1) % contour.len()]).normalize_or(Vec2::Y);
+        let outward = Vec2::new(tangent.y, -tangent.x);
+        let outward = if outward.dot(point) < 0.0 {
+            -outward
+        } else {
+            outward
+        };
+        positions.push([point.x, 0.0, point.y]);
+        positions.push([point.x, bottom, point.y]);
+        normals.extend_from_slice(&[[outward.x, 0.0, outward.y]; 2]);
+        uvs.extend_from_slice(&[[index as f32, 0.0], [index as f32, 1.0]]);
+    }
+    for index in 0..contour.len() {
+        let next = (index + 1) % contour.len();
+        let a = (index * 2) as u32;
+        let b = a + 1;
+        let c = (next * 2) as u32;
+        let d = c + 1;
+        indices.extend_from_slice(&[a, c, b, c, d, b]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +276,25 @@ mod tests {
             (b - a).cross(c - a).y > 0.0,
             "field top must face cameras above"
         );
+    }
+
+    #[test]
+    fn field_depth_mesh_has_a_visible_vertical_profile() {
+        let contour = vec![
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(-1.0, 1.0),
+        ];
+        let mesh = build_field_depth_mesh(&contour, -0.18);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert_eq!(mesh.count_vertices(), contour.len() * 2);
+        assert!(positions.iter().any(|point| point[1] == 0.0));
+        assert!(positions.iter().any(|point| point[1] == -0.18));
+        assert_eq!(mesh.indices().unwrap().len(), contour.len() * 6);
     }
 }

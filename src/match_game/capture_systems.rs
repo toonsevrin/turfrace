@@ -3,7 +3,8 @@ use bevy::prelude::*;
 use crate::{
     board::BoardGrid,
     config::GameConfig,
-    territory_map::TerritoryMap,
+    ids::CompetitorId,
+    territory_map::{TerritoryMap, VectorCaptureResult},
     trail::{ActiveTrail, clear_trail_bits},
 };
 
@@ -47,7 +48,12 @@ pub(super) fn resolve_captures(
     mut pending: ResMut<PendingCaptures>,
     mut displaced: ResMut<DisplacementCredits>,
     mut events: ResMut<SimulationEvents>,
-    mut query: Query<(&Competitor, &mut MatchStatistics)>,
+    mut captures: Local<Vec<(CompetitorId, VectorCaptureResult)>>,
+    mut query: Query<(
+        &Competitor,
+        &crate::movement::CompetitorMotion,
+        &mut MatchStatistics,
+    )>,
 ) {
     pending.0.sort_by(|a, b| {
         a.time
@@ -69,10 +75,13 @@ pub(super) fn resolve_captures(
             &mut territory,
             &mut displaced,
             &mut events,
+            &mut captures,
             &mut query,
         );
         offset = end;
     }
+    pending.0 = items;
+    pending.0.clear();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -84,21 +93,32 @@ fn resolve_capture_group(
     territory: &mut TerritoryMap,
     displaced: &mut DisplacementCredits,
     events: &mut SimulationEvents,
-    query: &mut Query<(&Competitor, &mut MatchStatistics)>,
+    captures: &mut Vec<(CompetitorId, VectorCaptureResult)>,
+    query: &mut Query<(
+        &Competitor,
+        &crate::movement::CompetitorMotion,
+        &mut MatchStatistics,
+    )>,
 ) {
-    let mut captures: Vec<_> = pending
-        .iter()
-        .map(|capture| {
-            (
-                capture.player,
-                territory.calculate_capture(capture.player, &capture.trail, config.trail_width),
-            )
-        })
-        .collect();
+    captures.clear();
+    captures.extend(pending.iter().map(|capture| {
+        (
+            capture.player,
+            territory.prepare_capture(capture.player, &capture.trail, config.trail_width),
+        )
+    }));
     let revision = territory.revision;
-    territory.apply_equal_time_captures(&mut captures);
+    territory.apply_equal_time_captures(captures);
     if territory.revision != revision {
-        territory.rebuild_sample_cache(board);
+        // Refresh each changed AABB directly. Unioning all capture geometry
+        // merely to derive one bounding box can cost more than the bounded
+        // sample scans themselves for a large late-match lobe.
+        for (_, result) in captures.iter() {
+            territory.refresh_sample_cache(board, &result.claim);
+            for (_, removed) in &result.disconnected_by_owner {
+                territory.refresh_sample_cache(board, removed);
+            }
+        }
     }
 
     for pending in pending {
@@ -117,10 +137,27 @@ fn resolve_capture_group(
                 .filter(|(victim, _)| territory.area(*victim) <= 1e-4)
                 .map(|(victim, _)| (*victim, pending.player)),
         );
+        displaced.0.extend(
+            query
+                .iter()
+                .filter(|(competitor, motion, _)| {
+                    is_on_disconnected_section(
+                        &result.disconnected_by_owner,
+                        competitor.id,
+                        motion.position,
+                    )
+                })
+                .map(|(competitor, _, _)| (competitor.id, pending.player)),
+        );
+        displaced.0.sort_unstable();
+        displaced.0.dedup();
         let cell_area = board.cell_size * board.cell_size;
         let cells = area_as_cells(result.claimed_area, cell_area);
         let stolen = area_as_cells(stolen_area, cell_area);
-        if let Some((_, mut stats)) = query.iter_mut().find(|(c, _)| c.id == pending.player) {
+        if let Some((_, _, mut stats)) = query
+            .iter_mut()
+            .find(|(competitor, _, _)| competitor.id == pending.player)
+        {
             stats.captures_completed += 1;
             stats.area_captured_total += result.claimed_area;
             stats.area_stolen_total += stolen_area;
@@ -140,6 +177,49 @@ fn resolve_capture_group(
     }
 }
 
+fn is_on_disconnected_section(
+    disconnected: &[(CompetitorId, crate::geometry::MultiPolygon)],
+    player: CompetitorId,
+    position: Vec2,
+) -> bool {
+    disconnected
+        .iter()
+        .any(|(owner, removed)| *owner == player && removed.contains_world(position))
+}
+
 fn area_as_cells(area: f32, cell_area: f32) -> u32 {
     (area / cell_area).round().max(0.0) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::MultiPolygon;
+
+    #[test]
+    fn only_players_standing_on_the_severed_island_are_displaced() {
+        let victim = CompetitorId(1);
+        let removed = MultiPolygon::from_outer(&[
+            Vec2::new(4.0, -2.0),
+            Vec2::new(8.0, -2.0),
+            Vec2::new(8.0, 2.0),
+            Vec2::new(4.0, 2.0),
+        ]);
+        let disconnected = vec![(victim, removed)];
+        assert!(is_on_disconnected_section(
+            &disconnected,
+            victim,
+            Vec2::new(6.0, 0.0)
+        ));
+        assert!(!is_on_disconnected_section(
+            &disconnected,
+            victim,
+            Vec2::ZERO
+        ));
+        assert!(!is_on_disconnected_section(
+            &disconnected,
+            CompetitorId(2),
+            Vec2::new(6.0, 0.0)
+        ));
+    }
 }

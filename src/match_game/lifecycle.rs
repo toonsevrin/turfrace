@@ -44,7 +44,7 @@ pub fn start_match(world: &mut World, setup: &MatchSetup) {
     let mut territory = TerritoryMap::from_board(&board);
     let spawns = choose_initial_spawns(&board, count, 8.0, setup.seed);
     for (index, &spawn) in spawns.iter().enumerate() {
-        territory.claim_disk(
+        territory.seed_owner(
             spawn,
             config.starting_territory_radius,
             CompetitorId(index as u8),

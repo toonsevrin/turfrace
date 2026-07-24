@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT_DIR"
+
+duration=${1:-6}
+./scripts/visual-feedback match --seconds "$duration" >/dev/null
+python3 scripts/crop_png.py \
+    target/visual-feedback/match.png \
+    target/visual-feedback/scoreboard.png \
+    --x 1000 --y 0 --width 280 --height 110
+printf 'SCOREBOARD target/visual-feedback/scoreboard.png\n'

@@ -1,6 +1,6 @@
 # Turfrace performance audit
 
-Date: 2026-07-22  
+Date: 2026-07-24; extended playtest pass: 2026-07-23–24
 Scope: authoritative simulation, startup, dynamic geometry, WebAssembly/WebGL2, NPCs, HUD, and deployment.
 
 ## Executive summary
@@ -50,22 +50,69 @@ software rasterization and is not representative of physical GPU throughput.
 - Ambient and directional light entities were removed because gameplay materials no longer need
   Bevy's lighting or shadow pipeline.
 - Territory steady-state shading is one opaque material pass with a compact pattern function.
-- Trail meshes remain persistent, update only on committed samples, and have a 512-point render
-  budget with continuous joins and round caps.
+- Trail meshes remain persistent, update only on committed samples, and have a 256-point default
+  render budget (128 on Low quality, 384 on High) with continuous joins and round caps.
 
 ### Simulation and allocation
 
 - Trails retain an exact head while sampling bounded history for raster/collision/render work.
 - Trail rasterization is incremental and collision uses per-cell segment buckets grouped by owner.
 - A uniform territory AABB index narrows exact polygon containment queries. The sample grid keeps
-  per-owner indexes only as a derived broadphase cache; death and seed claims update it once per
-  committed vector change.
+  per-owner indexes only as a derived broadphase cache; death, seed, and capture claims refresh
+  only the changed geometry AABB instead of rescanning the full board.
 - Board generation uses exact radial-sector classification instead of testing every contour edge
   for every cell.
 - NPC perception no longer clones every active trail polyline. It builds compact nearest-point
   perceptions only when an NPC think batch is due.
 - NPCs avoid nearby competitors, opportunistically hunt exposed trails by personality, and use
-  stable outward patrol steering.
+  stable outward patrol steering. Deterministic appetite, personality-specific hunting, and
+  bounded patrol weave add variation without compromising the authoritative soak invariants.
+
+### Extended playtest pass
+
+- Every competitor now retains a deterministic spawn anchor. After a committed capture, any
+  polygon disconnected from that anchor is removed, and a competitor standing on removed geometry
+  receives a displacement credit and dies through the normal respawn path. This makes two-island
+  ownership impossible while keeping the vector map authoritative.
+- Capture and death cache invalidation is AABB-bounded, collision-intent destinations and body
+  snapshots reuse capacity, pending event vectors retain their allocations between fixed updates,
+  and presentation camera/input/effect reconciliation avoids per-frame temporary hash
+  collections. These changes target the capture-time FPS gap and steady-state browser GC.
+- The 64×64 exact-containment index now stores one contiguous 16-bit owner mask per cell instead of
+  4,096 heap-backed vectors. Known-empty turf returns immediately rather than falling back to all
+  twelve exact polygons, and index rebuilds become a single contiguous clear plus bit fills.
+- Live closure resolution builds speculative claim geometry without also measuring a union and
+  every opponent intersection that the commit step immediately repeats. Single captures also skip
+  empty arbitration difference/union operations; simultaneous captures build only the committed
+  geometry needed by a later contender.
+- Fixed-tick ranking, respawn candidate, and NPC perception buffers now retain their small
+  capacities between updates, eliminating recurring eight-player vector churn while preserving
+  deterministic ordering and ranking-change events.
+- Equal-time capture resolution also reuses its vector-result scratch buffer, so simultaneous
+  closures do not repeatedly allocate a result list during the capture-time FPS spike.
+- Effects use quality-dependent particle budgets and bounded lifetimes; captures get a brief
+  expanding ring pulse. Procedural harmonic cues plus a sparse in-match ambient bed make menu,
+  capture, kill, respawn, and victory states distinct without streamed audio assets.
+- Menu backgrounds use animated, translucent turf marks and focus uses a narrow coral key,
+  colored type, and a short scale transition rather than opaque rectangles, rounded controls, or
+  underline rules. Settled controls stop writing UI style components until focus changes again.
+- The arena now renders a dedicated warm paper edge beneath the bright top surface, giving
+  oblique cameras a readable shallow slab profile. Live HUD copy is reduced to player identity,
+  a compact color-coded leaderboard, and event announcements; dark diagnostic panels, duplicate
+  rank/percentage readouts, and numeric speed readouts are gone, with color/tint carrying state.
+- The top-right leaderboard is now three independent player-color rows with square accent rails;
+  it omits territory percentage and redundant titling. `scripts/scoreboard-preview` captures a
+  tight 280×110 crop for fast visual iteration without a panel mockup.
+- Low and Medium quality disable multisampling for menus and single-player rendering. Split-screen
+  keeps WebGPU-guaranteed 4× attachments for every composited window camera because WebGL2
+  compatibility testing showed that mixed or 1× multi-view attachments can blank an earlier view.
+  The policy therefore takes the safe performance win without risking a missing local viewport.
+- Stable camera projection, viewport snapshots, crown/shield visibility, player-name color, and
+  expired shake/pulse state use compare-before-write or idle early-outs instead of dirtying ECS
+  components every rendered frame.
+- Live HUD ranking, announcement, respawn, and elimination buffers retain their text capacity;
+  unchanged colors and labels also skip component writes, keeping browser garbage collection out
+  of the fixed-tick match loop.
 
 ### Lifecycle, respawn, and HUD
 
@@ -110,7 +157,8 @@ software rasterization and is not representative of physical GPU throughput.
 
 ## Measurements
 
-- Release WASM: 38,956,183 bytes raw and 8,941,290 bytes gzip.
+- Release WASM: 39,234,439 bytes raw and 9,034,638 bytes gzip after the extended presentation,
+  audio, and topology work.
 - Identical 1280x720 Chrome SwiftShader trace, before flat-material conversion: 4.04-second cold
   driver block; subsequent intervals around 370-400 ms.
 - Identical trace after conversion: 0.73-second largest cold block; subsequent intervals around
@@ -129,7 +177,7 @@ software rasterization and is not representative of physical GPU throughput.
 - Trail-bit changes never invalidate territory presentation.
 - Ownership changes invoke only fixed-point booleans, bounded vector triangulation, and mesh swaps.
 - No full-board scan occurs for gameplay containment or capture decisions; the sample cache is
-  rebuilt once after a committed geometry mutation.
+  refreshed only over the changed capture/death/seed AABB after a committed geometry mutation.
 - Release deployment rejects debug artifacts and records raw/gzip size.
 - Physical-hardware gates should target p95 fixed-update and presentation CPU below 8 ms for eight
   competitors at the agreed viewport configuration.

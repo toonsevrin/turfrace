@@ -66,7 +66,6 @@ pub(super) fn spawn_leaderboard(
             ))
             .with_children(|panel| {
                 spawn_title(panel, &theme, "LEADERBOARD", 42.0);
-                spawn_subtitle(panel, &theme, "LOCAL RECORDS");
                 let leaderboard = profiles.sorted_leaderboard();
                 if leaderboard.is_empty() {
                     spawn_subtitle(panel, &theme, "NO MATCHES YET");
@@ -84,12 +83,11 @@ pub(super) fn spawn_leaderboard(
                                 width: percent(100),
                                 min_height: px(38),
                                 padding: UiRect::axes(px(10), px(6)),
-                                border: UiRect::bottom(px(1)),
+                                column_gap: px(8),
                                 align_items: AlignItems::Center,
                                 ..default()
                             },
                             BackgroundColor(Color::NONE),
-                            BorderColor::all(Color::srgba(0.40, 0.52, 0.65, 0.34)),
                         ))
                         .with_children(|row| {
                             row.spawn((
@@ -99,35 +97,47 @@ pub(super) fn spawn_leaderboard(
                                     font_size: FontSize::Px(18.0),
                                     ..default()
                                 },
-                                TextColor(if rank == 0 { LIME } else { MUTED }),
+                                TextColor(palette_color(rank as u8)),
                                 Node {
                                     width: px(52),
                                     ..default()
                                 },
                             ));
                             row.spawn((
-                                Text::new(format!(
-                                    "{}   W{} / G{}   {:.0}%   K{}",
-                                    profile.display_name,
-                                    stats.wins,
-                                    stats.games_played,
-                                    win_rate,
-                                    stats.kills
-                                )),
+                                Text::new(profile.display_name.clone()),
                                 TextFont {
                                     font: theme.body_font.clone(),
                                     font_size: FontSize::Px(17.0),
                                     ..default()
                                 },
-                                TextColor(if rank == 0 { INK } else { MUTED }),
+                                TextColor(palette_color(rank as u8)),
                                 Node {
                                     flex_grow: 1.0,
                                     ..default()
                                 },
                             ));
+                            for (value, width) in [
+                                (format!("{}/{}", stats.wins, stats.games_played), 76.0),
+                                (format!("{win_rate:.0}%"), 58.0),
+                                (format!("K{}", stats.kills), 48.0),
+                            ] {
+                                row.spawn((
+                                    Text::new(value),
+                                    TextFont {
+                                        font: theme.body_font.clone(),
+                                        font_size: FontSize::Px(16.0),
+                                        ..default()
+                                    },
+                                    TextColor(palette_color(rank as u8)),
+                                    Node {
+                                        width: px(width),
+                                        ..default()
+                                    },
+                                ));
+                            }
                         });
                 }
-                spawn_button(panel, &theme, "BACK", UiAction::State(AppState::Home), 0);
+                spawn_button(panel, &theme, "BACK", UiAction::Back(AppState::Home), 0);
             });
         });
 }
@@ -217,10 +227,8 @@ fn settings_section(parent: &mut ChildSpawnerCommands, theme: &UiTheme, label: &
             width: percent(100),
             margin: UiRect::top(px(2)),
             padding: UiRect::bottom(px(3)),
-            border: UiRect::bottom(px(1)),
             ..default()
         },
-        BorderColor::all(Color::srgba(0.24, 0.31, 0.40, 0.32)),
     ));
 }
 
@@ -528,23 +536,16 @@ pub(super) fn spawn_pause(
                 spawn_button(
                     panel,
                     &theme,
-                    "RECONNECT",
-                    UiAction::State(AppState::Paused),
+                    "RESTART MATCH",
+                    UiAction::State(AppState::MatchLoading),
                     2,
                 );
                 spawn_button(
                     panel,
                     &theme,
-                    "RESTART MATCH",
-                    UiAction::State(AppState::MatchLoading),
-                    3,
-                );
-                spawn_button(
-                    panel,
-                    &theme,
                     "RETURN TO LOBBY",
-                    UiAction::State(AppState::Lobby),
-                    4,
+                    UiAction::Back(AppState::Lobby),
+                    3,
                 );
             });
         });
@@ -635,6 +636,7 @@ pub(super) fn spawn_results(
                     .spawn((Node {
                         width: percent(100),
                         padding: UiRect::axes(px(10), px(2)),
+                        column_gap: px(6),
                         ..default()
                     },))
                     .with_children(|header| {
@@ -656,20 +658,19 @@ pub(super) fn spawn_results(
                                 width: percent(100),
                                 min_height: px(30),
                                 padding: UiRect::axes(px(10), px(2)),
-                                border: UiRect::all(px(1)),
+                                column_gap: px(6),
                                 border_radius: BorderRadius::all(px(0)),
                                 align_items: AlignItems::Center,
                                 ..default()
                             },
                             BackgroundColor(Color::NONE),
-                            BorderColor::all(Color::srgba(0.75, 0.85, 0.90, 0.16)),
                         ))
                         .with_children(|line| {
                             line.spawn((
                                 Node {
                                     width: px(8),
                                     height: px(20),
-                                    margin: UiRect::right(px(9)),
+                                    margin: UiRect::right(px(3)),
                                     border_radius: BorderRadius::all(px(0)),
                                     ..default()
                                 },
@@ -682,7 +683,7 @@ pub(super) fn spawn_results(
                                     font_size: FontSize::Px(13.0),
                                     ..default()
                                 },
-                                TextColor(if row.placement == 1 { LIME } else { INK }),
+                                TextColor(palette_color(row.color_id)),
                                 Node {
                                     width: px(48),
                                     ..default()
@@ -695,7 +696,7 @@ pub(super) fn spawn_results(
                                     font_size: FontSize::Px(13.0),
                                     ..default()
                                 },
-                                TextColor(if row.placement == 1 { LIME } else { INK }),
+                                TextColor(palette_color(row.color_id)),
                                 Node {
                                     flex_grow: 1.0,
                                     ..default()
@@ -742,16 +743,10 @@ pub(super) fn spawn_results(
                     panel,
                     &theme,
                     "LOBBY",
-                    UiAction::State(AppState::Lobby),
+                    UiAction::Back(AppState::Lobby),
                     2,
                 );
-                spawn_compact_menu_button(
-                    panel,
-                    &theme,
-                    "HOME",
-                    UiAction::State(AppState::Home),
-                    3,
-                );
+                spawn_compact_menu_button(panel, &theme, "HOME", UiAction::Back(AppState::Home), 3);
             });
         });
 }

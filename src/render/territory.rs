@@ -32,6 +32,9 @@ pub struct TerritoryVisual {
     pub arena: MultiPolygon,
     pub pattern_ids: [u8; 12],
     pub color_ids: [u8; 12],
+    /// Per-owner invalidation prevents one capture from retriangulating every
+    /// competitor's unchanged surface.
+    pub owner_revisions: [u64; 12],
     pub revision: u64,
 }
 
@@ -47,6 +50,7 @@ impl Default for TerritoryVisual {
             arena: MultiPolygon::empty(),
             pattern_ids: [0; 12],
             color_ids: std::array::from_fn(|index| index as u8),
+            owner_revisions: [0; 12],
             revision: 0,
         }
     }
@@ -129,6 +133,7 @@ pub(super) fn sync_territory_surface(
         &MeshMaterial3d<TerritoryMaterial>,
     )>,
     mut last_revision: Local<u64>,
+    mut last_owner_revisions: Local<[u64; 12]>,
 ) {
     if !territory.is_valid() {
         for (entity, _, _, _) in &surface {
@@ -152,6 +157,10 @@ pub(super) fn sync_territory_surface(
     }
 
     for owner in 1..=12_u8 {
+        let slot = owner as usize - 1;
+        if !settings.is_changed() && last_owner_revisions[slot] == territory.owner_revisions[slot] {
+            continue;
+        }
         let mesh = build_owner_mesh(&territory, owner);
         let Some(mesh) = mesh else {
             if let Some((entity, _, _)) = existing[owner as usize - 1].take() {
@@ -179,6 +188,7 @@ pub(super) fn sync_territory_surface(
             ));
         }
     }
+    *last_owner_revisions = territory.owner_revisions;
     *last_revision = territory.revision;
 }
 

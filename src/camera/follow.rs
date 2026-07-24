@@ -1,9 +1,7 @@
-use std::collections::{HashMap, HashSet};
-
 use bevy::prelude::*;
 
 /// Render-facing description of a local human who needs a viewport.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct ViewportSubject {
     pub slot: u8,
     pub color_id: u8,
@@ -82,27 +80,30 @@ pub(super) fn reconcile_player_cameras(
     cameras: Query<(Entity, &PlayerCamera)>,
     decorations: Query<(Entity, &ViewportDecoration)>,
     tuning: Res<CameraTuning>,
+    presentation: Res<crate::render::PresentationSettings>,
 ) {
-    let existing: HashMap<Entity, Entity> = cameras
-        .iter()
-        .map(|(camera, marker)| (marker.subject, camera))
-        .collect();
-    let subjects_present: HashSet<Entity> = subjects.iter().map(|(entity, _)| entity).collect();
-
+    // There are at most eight local players. Linear scans over those tiny
+    // queries avoid allocating three hash collections every render frame.
     for (camera_entity, marker) in &cameras {
-        if !subjects_present.contains(&marker.subject) {
+        if !subjects.iter().any(|(entity, _)| entity == marker.subject) {
             commands.entity(camera_entity).despawn();
         }
     }
-    let cameras_present: HashSet<Entity> = cameras.iter().map(|(entity, _)| entity).collect();
     for (entity, decoration) in &decorations {
-        if !cameras_present.contains(&decoration.0) {
+        if !cameras
+            .iter()
+            .any(|(camera_entity, _)| camera_entity == decoration.0)
+        {
             commands.entity(entity).despawn();
         }
     }
 
+    let local_player_count = subjects.iter().count();
     for (subject_entity, subject) in &subjects {
-        if existing.contains_key(&subject_entity) {
+        if cameras
+            .iter()
+            .any(|(_, marker)| marker.subject == subject_entity)
+        {
             continue;
         }
         let focus = Vec3::new(subject.position.x, 0.0, subject.position.y);
@@ -110,6 +111,7 @@ pub(super) fn reconcile_player_cameras(
             .spawn((
                 Name::new(format!("Player {} Camera", subject.slot + 1)),
                 Camera3d::default(),
+                presentation.gameplay_msaa(local_player_count),
                 Projection::Perspective(PerspectiveProjection {
                     fov: tuning.vertical_fov_radians,
                     ..default()
@@ -204,12 +206,22 @@ pub(super) fn follow_subjects(
         let streak_fov =
             subject.kill_streak.min(4) as f32 * tuning.kill_streak_fov_per_kill_radians;
         let pulse_fov = pulse.map_or(0.0, |mut pulse| {
+            if pulse.remaining <= 0.0 {
+                return 0.0;
+            }
             pulse.remaining = (pulse.remaining - dt).max(0.0);
             let progress = 1.0 - pulse.remaining / pulse.total.max(0.001);
             pulse.amount_radians * (progress * std::f32::consts::PI).sin().max(0.0)
         });
-        if let Projection::Perspective(perspective) = projection.as_mut() {
-            perspective.fov = tuning.vertical_fov_radians + persistent_fov + streak_fov + pulse_fov;
+        let next_fov = tuning.vertical_fov_radians + persistent_fov + streak_fov + pulse_fov;
+        let current_fov = match &*projection {
+            Projection::Perspective(perspective) => Some(perspective.fov),
+            _ => None,
+        };
+        if current_fov.is_some_and(|current| (current - next_fov).abs() > 1.0e-5)
+            && let Projection::Perspective(perspective) = &mut *projection
+        {
+            perspective.fov = next_fov;
         }
     }
 }
