@@ -1,7 +1,7 @@
 //! Device registration cards and match-composition controls.
 
 use super::super::*;
-use crate::lobby::MAX_HUMANS;
+use crate::lobby::{MAX_HUMANS, MIN_COMPETITORS};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::window::PrimaryWindow;
 
@@ -503,21 +503,30 @@ pub(crate) fn spawn_lobby_content(
                             23,
                         );
                     });
-                let start_label = if lobby.can_start() {
-                    "START RACE"
-                } else {
-                    "READY UP"
-                };
                 spawn_button(
                     panel,
                     theme,
-                    start_label,
+                    lobby_start_label(lobby),
                     UiAction::Lobby(LobbyCommand::Start),
                     24,
                 );
                 spawn_button(panel, theme, "BACK", UiAction::Back(AppState::Home), 25);
             });
         });
+}
+
+fn lobby_start_label(lobby: &Lobby) -> &'static str {
+    if lobby.can_start() {
+        "START RACE"
+    } else if lobby.players.is_empty() {
+        "JOIN A PLAYER"
+    } else if lobby.total_competitors() < MIN_COMPETITORS {
+        "ADD AN OPPONENT"
+    } else if lobby.players.iter().any(|player| !player.connected) {
+        "WAITING FOR PLAYERS"
+    } else {
+        "READY UP"
+    }
 }
 
 pub(crate) fn lobby_fingerprint(lobby: &Lobby, compact: bool) -> String {
@@ -654,5 +663,24 @@ mod tests {
         lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
         assert_eq!(lobby.npc_count(), 0);
         assert_eq!(lobby.max_npc_count(), 10);
+    }
+
+    #[test]
+    fn start_label_only_describes_the_blocking_lobby_requirement() {
+        let profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        assert_eq!(lobby_start_label(&lobby), "JOIN A PLAYER");
+
+        lobby.join(InputDeviceId::Mouse, &profiles);
+        assert_eq!(lobby_start_label(&lobby), "ADD AN OPPONENT");
+
+        lobby.set_npc_count(1);
+        assert_eq!(lobby_start_label(&lobby), "READY UP");
+
+        lobby.players[0].ready = true;
+        assert_eq!(lobby_start_label(&lobby), "START RACE");
+
+        lobby.players[0].connected = false;
+        assert_eq!(lobby_start_label(&lobby), "WAITING FOR PLAYERS");
     }
 }

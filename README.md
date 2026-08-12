@@ -1,6 +1,6 @@
 # Turfrace
 
-Turfrace is a fast local multiplayer territory game for 2–8 humans, with NPCs filling a configurable 2–12 competitor field. Draw loops, steal turf, and cut exposed trails; the first competitor to control 95% of the irregular paper arena wins.
+Turfrace is a fast local multiplayer territory game for 1–8 humans, with NPCs filling a configurable 2–12 competitor field. A single human can race the bots in a full-screen view. Draw loops, steal turf, and cut exposed trails; the first competitor to control 95% of the irregular paper arena wins.
 
 The v0.1 implementation is a static Rust/Bevy 0.19 WebAssembly application. It has no server, telemetry, or network play. Profiles, preferences, lobby choices, and lifetime statistics remain in browser-local storage. Fresh lobbies start with no robots; add them explicitly with the robot stepper.
 

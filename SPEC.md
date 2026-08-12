@@ -2,7 +2,7 @@
 
 ## 1. Product definition
 
-**Turfrace** is a competitive local multiplayer territory-control game for 2–8 human players. Players continuously steer colored cubes around a dynamically generated white playing field. Leaving owned territory creates a vulnerable trail. Returning to owned territory converts the trail into permanent territory and claims the enclosed area. Opponents can kill a player by touching that player’s active trail.
+**Turfrace** is a competitive local multiplayer territory-control game for 1–8 human players. Players continuously steer colored cubes around a dynamically generated white playing field. Leaving owned territory creates a vulnerable trail. Returning to owned territory converts the trail into permanent territory and claims the enclosed area. Opponents can kill a player by touching that player’s active trail.
 
 The match ends immediately when one competitor controls at least 95% of the claimable playing field.
 
@@ -39,7 +39,7 @@ Production deployment SHOULD use HTTPS because parts of the Gamepad API may be r
 
 The initial version includes:
 
-* 2–8 local human players.
+* 1–8 local human players; a solo human races against one or more explicitly added NPCs.
 * Mouse control for one player.
 * Multiple simultaneous gamepads.
 * NPC competitors explicitly added to the field.
@@ -81,7 +81,7 @@ A deterministic developer replay log is recommended for debugging, but it does n
 
 | Setting                             |                             Default |
 | ----------------------------------- | ----------------------------------: |
-| Human players                       |                                 2–8 |
+| Human players                       |                                 1–8 |
 | Robots                              |                                   0 |
 | Total competitor range              |                                2–12 |
 | Total competitors                   |             `human players + robots` |
@@ -1145,7 +1145,8 @@ A shared focus token is assigned to the device that most recently moved the glob
 
 The standard game requires:
 
-* At least two human players.
+* At least one joined human player.
+* The combined human and robot field contains at least two competitors.
 * Every joined player marked ready.
 * The combined human and robot field does not exceed 12 competitors.
 
@@ -1164,7 +1165,7 @@ total_competitors = joined_humans + npc_count
 0 <= npc_count <= 12 - joined_humans
 ```
 
-At least two joined humans are required to start.
+At least one joined human is required to start, and at least one robot must be added when playing solo.
 If another human joins a full field, reduce the robot count to keep the total within 12.
 
 NPC names, colors, patterns, and behavior styles are assigned when the match starts.
@@ -2115,7 +2116,7 @@ This is a useful enhancement for a static game but is not required for initial g
 
 At 1920 × 1080 on a recent desktop or laptop browser:
 
-* 60 FPS target with 2–8 human viewports.
+* 60 FPS target with 1–8 human viewports.
 * Simulation must remain at 60 fixed updates per second.
 * Minimum acceptable sustained frame rate: 45 FPS on Medium.
 * Low mode should remain playable at 30 FPS on weaker hardware.
@@ -2235,7 +2236,7 @@ This allows gameplay bugs to be replayed exactly.
 
 The initial version is complete when all of the following are true:
 
-1. Two to eight humans can join with unique gamepads, with one optional mouse player.
+1. One to eight humans can join with unique gamepads, with one optional mouse player; a solo human can play against robots.
 2. The lobby defaults to zero robots; robots are added explicitly.
 3. The combined human and robot field can be configured from 2 to 12 competitors.
 4. Every cube moves continuously and responds to heading input.

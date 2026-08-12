@@ -53,7 +53,11 @@ impl Lobby {
     }
 
     pub fn can_start(&self) -> bool {
-        self.players.len() >= usize::from(MIN_COMPETITORS)
+        // NPCs count toward the minimum field size. This lets one local
+        // player start a full-screen race against at least one robot while
+        // still preventing a race with no opponent.
+        self.total_competitors() >= MIN_COMPETITORS
+            && !self.players.is_empty()
             && self
                 .players
                 .iter()
@@ -628,20 +632,32 @@ mod tests {
     }
 
     #[test]
-    fn start_requires_two_connected_ready_humans() {
+    fn start_requires_two_connected_ready_total_competitors() {
         let profiles = ProfileStore::default();
         let mut lobby = Lobby::default();
         lobby.join(InputDeviceId::Mouse, &profiles);
-        assert!(!lobby.can_start());
         lobby.players[0].ready = true;
         assert!(!lobby.can_start());
+
         lobby.set_npc_count(1);
-        assert!(!lobby.can_start());
-        lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
-        lobby.players[1].ready = true;
         assert!(lobby.can_start());
-        lobby.players[1].connected = false;
+
+        lobby.players[0].connected = false;
         assert!(!lobby.can_start());
+    }
+
+    #[test]
+    fn two_ready_humans_can_start_without_robots() {
+        let profiles = ProfileStore::default();
+        let mut lobby = Lobby::default();
+        lobby.join(InputDeviceId::Mouse, &profiles);
+        lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
+        lobby
+            .players
+            .iter_mut()
+            .for_each(|player| player.ready = true);
+
+        assert!(lobby.can_start());
     }
 
     #[test]
@@ -650,12 +666,14 @@ mod tests {
         let mut lobby = Lobby::default();
         lobby.join(InputDeviceId::Mouse, &profiles);
         lobby.players[0].ready = true;
+        lobby.set_npc_count(1);
         let mut setup = MatchSetup::default();
 
         prepare_match_setup(&lobby, &mut setup);
 
         assert_eq!(setup.humans.len(), 1);
         assert_eq!(setup.humans[0].device, InputDeviceId::Mouse);
+        assert_eq!(setup.total_competitors, 2);
         assert_eq!(setup.total_competitors, lobby.total_competitors());
     }
 

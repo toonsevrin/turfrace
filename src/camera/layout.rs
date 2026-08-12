@@ -90,6 +90,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_player_uses_the_full_canvas_without_a_split() {
+        let layout = viewport_layout(1, UVec2::new(1280, 720), 3);
+
+        assert_eq!(
+            layout,
+            vec![ViewportRect {
+                position: UVec2::ZERO,
+                size: UVec2::new(1280, 720),
+            }]
+        );
+    }
+
+    #[test]
     fn three_players_center_the_last_viewport() {
         let layout = viewport_layout(3, UVec2::new(1920, 1080), 2);
         assert_eq!(layout.len(), 3);
