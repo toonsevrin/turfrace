@@ -1,10 +1,98 @@
 //! Live match HUD projection and completed-match persistence bridge.
 
 use super::*;
-use crate::render::CompetitorVisual;
+use crate::render::{CompetitorProxy, CompetitorVisual};
 use bevy::ecs::system::SystemParam;
-use bevy::window::PrimaryWindow;
 use std::fmt::Write;
+
+#[cfg(debug_assertions)]
+#[derive(Resource, Default)]
+pub(super) struct NpcOverlayState {
+    visible: bool,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Component)]
+pub(super) struct NpcDebugOverlay;
+
+#[cfg(debug_assertions)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_npc_debug_overlay(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    state: Res<State<AppState>>,
+    theme: Res<UiTheme>,
+    mut overlay_state: ResMut<NpcOverlayState>,
+    overlays: Query<Entity, With<NpcDebugOverlay>>,
+    mut overlay_text: Query<&mut Text, With<NpcDebugOverlay>>,
+    npcs: Query<(&Competitor, &crate::npc::NpcController)>,
+) {
+    if keyboard.just_pressed(KeyCode::F8) {
+        overlay_state.visible = !overlay_state.visible;
+    }
+    if !overlay_state.visible || !matches!(*state.get(), AppState::Playing | AppState::Countdown) {
+        for entity in &overlays {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    let mut content = String::from("NPC DEBUG [F8]\n");
+    for (competitor, controller) in &npcs {
+        let observed = controller
+            .memory
+            .opponents
+            .iter()
+            .filter(|estimate| estimate.observations > 0)
+            .count();
+        let _ = writeln!(
+            content,
+            "{} {:?} a={:?} risk={:.2} area={:.1} r={:.1} safe={} wp={}/{} opp={} traits s{:.2} a{:.2} g{:.2} e{:.2} c{:.2} ad{:.2} co{:.2} t{:.2}",
+            competitor.display_name,
+            controller.brain_kind,
+            controller.last_decision.action,
+            controller.last_decision.risk_budget,
+            controller.memory.planned_capture_area,
+            controller.traits.perception_radius(),
+            controller.safety_override,
+            controller.memory.waypoint_index,
+            controller.memory.waypoint_count,
+            observed,
+            controller.traits.skill,
+            controller.traits.aggression,
+            controller.traits.greed,
+            controller.traits.exploration,
+            controller.traits.composure,
+            controller.traits.adaptability,
+            controller.traits.commitment,
+            controller.traits.turning_bias,
+        );
+    }
+    if let Ok(mut text) = overlay_text.single_mut() {
+        if text.0 != content {
+            text.0 = content;
+        }
+        return;
+    }
+    commands.spawn((
+        NpcDebugOverlay,
+        Text::new(content),
+        TextFont {
+            font: theme.body_font.clone(),
+            font_size: FontSize::Px(9.0),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(8),
+            top: px(8),
+            max_width: percent(92),
+            ..default()
+        },
+        GlobalZIndex(200),
+        Pickable::IGNORE,
+    ));
+}
 
 type CompetitorHudQuery<'w, 's> = Query<
     'w,
@@ -120,18 +208,18 @@ pub(super) fn spawn_gameplay_hud(
                 Node {
                     position_type: PositionType::Absolute,
                     right: px(18),
-                    top: px(112),
-                    width: px(292),
-                    min_height: px(42),
-                    padding: UiRect::axes(px(14), px(9)),
+                    top: px(104),
+                    width: px(258),
+                    min_height: px(34),
+                    padding: UiRect::axes(px(10), px(6)),
                     border: UiRect::left(px(4)),
                     border_radius: BorderRadius::all(px(5)),
                     justify_content: JustifyContent::FlexEnd,
                     align_items: AlignItems::Center,
                     ..default()
                 },
-                BackgroundColor(INK.with_alpha(0.90)),
-                BorderColor::all(CORAL),
+                BackgroundColor(Color::NONE),
+                BorderColor::all(CORAL.with_alpha(0.78)),
                 UiTransform::default(),
                 Visibility::Hidden,
                 KillFeedPanel,
@@ -144,10 +232,10 @@ pub(super) fn spawn_gameplay_hud(
                         font_size: FontSize::Px(13.0 * text_scale),
                         ..default()
                     },
-                    TextColor(CREAM),
+                    TextColor(INK),
                     TextShadow {
-                        offset: Vec2::new(2.0, 2.0),
-                        color: Color::BLACK.with_alpha(0.92),
+                        offset: Vec2::new(1.0, 1.0),
+                        color: PAPER.with_alpha(0.90),
                     },
                     TextLayout::justify(Justify::Right),
                     Node {
@@ -276,7 +364,7 @@ pub(super) fn reconcile_human_huds(
             continue;
         };
         commands.entity(root_entity).with_children(|root| {
-            for (source, visual, competitor) in &visuals {
+            for (source, _, competitor) in &visuals {
                 if tags
                     .iter()
                     .any(|(_, tag)| tag.camera == camera && tag.source == source)
@@ -289,20 +377,26 @@ pub(super) fn reconcile_human_huds(
                     Text::new(competitor.display_name.clone()),
                     TextFont {
                         font: theme.body_font.clone(),
-                        font_size: FontSize::Px(12.0 * text_scale),
+                        font_size: FontSize::Px(11.0 * text_scale),
                         ..default()
                     },
-                    TextColor(palette_color(visual.color_id)),
+                    TextColor(INK),
                     TextShadow {
-                        offset: Vec2::new(1.5, 1.5),
-                        color: Color::srgba(1.0, 0.97, 0.88, 0.92),
+                        offset: Vec2::new(1.0, 1.0),
+                        color: PAPER.with_alpha(0.92),
                     },
                     TextLayout::justify(Justify::Center),
                     Node {
                         position_type: PositionType::Absolute,
-                        width: px(180),
-                        height: px(24),
+                        width: px(NAME_TAG_WIDTH),
+                        height: px(22),
                         ..default()
+                    },
+                    // Projected labels should retain the camera's subpixel motion.
+                    // UI pixel rounding otherwise makes them step independently of
+                    // the continuously rendered cube underneath.
+                    LayoutConfig {
+                        use_rounding: false,
                     },
                     Visibility::Hidden,
                 ));
@@ -311,18 +405,18 @@ pub(super) fn reconcile_human_huds(
     }
 }
 
+const NAME_TAG_WIDTH: f32 = 180.0;
+const NAME_TAG_VERTICAL_OFFSET: f32 = 32.0;
+
 pub(super) fn update_name_tags(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(Entity, &PlayerCamera, &Camera, &GlobalTransform)>,
+    ui_scale: Res<UiScale>,
+    cameras: Query<(&Camera, &Transform), With<PlayerCamera>>,
     visuals: Query<&CompetitorVisual>,
+    proxies: Query<(&CompetitorProxy, &Transform)>,
     mut tags: Query<(&HumanNameTag, &mut Node, &mut Visibility)>,
 ) {
-    let scale_factor = windows.single().map_or(1.0, Window::scale_factor);
     for (marker, mut node, mut visibility) in &mut tags {
-        let Some((_, _, camera, camera_transform)) = cameras
-            .iter()
-            .find(|(camera_entity, _, _, _)| *camera_entity == marker.camera)
-        else {
+        let Ok((camera, camera_transform)) = cameras.get(marker.camera) else {
             if *visibility != Visibility::Hidden {
                 *visibility = Visibility::Hidden;
             }
@@ -340,23 +434,50 @@ pub(super) fn update_name_tags(
             }
             continue;
         }
-        let world_position = Vec3::new(visual.position.x, 2.9, visual.position.y);
-        let Ok(mut screen_position) = camera.world_to_viewport(camera_transform, world_position)
+        let Some((_, competitor_transform)) = proxies
+            .iter()
+            .find(|(proxy, _)| proxy.source == marker.source)
         else {
             if *visibility != Visibility::Hidden {
                 *visibility = Visibility::Hidden;
             }
             continue;
         };
-        if let Some(viewport) = &camera.viewport {
-            screen_position -= viewport.physical_position.as_vec2() / scale_factor.max(0.001);
-        }
-        node.left = px(screen_position.x - 90.0);
-        node.top = px(screen_position.y - 32.0);
+        // Track the interpolated render proxy, not the fixed-step simulation
+        // snapshot. Otherwise the text advances in 60 Hz steps while the cube
+        // eases continuously underneath it.
+        let mut world_position = competitor_transform.translation;
+        world_position.y += 2.9;
+        // Player cameras are roots, so their current local transform is also
+        // their world transform. Construct it directly because ordinary
+        // Transform propagation has not run yet in PostUpdate.
+        let camera_transform = GlobalTransform::from(*camera_transform);
+        let Ok(screen_position) = camera.world_to_viewport(&camera_transform, world_position)
+        else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        let Some(viewport) = camera.logical_viewport_rect() else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        // Camera projection is target-logical, while this camera-local UI root
+        // uses scaled logical pixels.
+        let ui_position = name_tag_ui_position(screen_position, viewport.min, ui_scale.0);
+        node.left = px(ui_position.x - NAME_TAG_WIDTH * 0.5);
+        node.top = px(ui_position.y - NAME_TAG_VERTICAL_OFFSET);
         if *visibility != Visibility::Inherited {
             *visibility = Visibility::Inherited;
         }
     }
+}
+
+fn name_tag_ui_position(screen_position: Vec2, viewport_position: Vec2, ui_scale: f32) -> Vec2 {
+    (screen_position - viewport_position) / ui_scale.max(0.001)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,7 +652,7 @@ pub(super) fn update_gameplay_hud(
 }
 
 pub(super) fn animate_kill_feed(
-    time: Res<Time>,
+    _time: Res<Time>,
     session: Res<MatchSession>,
     settings: Res<UserSettings>,
     eliminations: Option<Res<EliminationFeed>>,
@@ -548,13 +669,9 @@ pub(super) fn animate_kill_feed(
         let (translation, scale) = kill_feed_transform(age, reduced_motion);
         transform.translation = Val2::px(translation, 0.0);
         transform.scale = Vec2::splat(scale);
-        let progress = (age / 0.55).clamp(0.0, 1.0);
-        let shimmer = if reduced_motion || !age.is_finite() {
-            0.0
-        } else {
-            (time.elapsed_secs() * 8.0).sin().max(0.0) * (1.0 - progress)
-        };
-        background.0 = INK.with_alpha(0.90 + shimmer * 0.08);
+        // The rail and text carry the event; a dark block should not compete
+        // with the leaderboard or active trails.
+        background.0 = Color::NONE;
     }
 }
 
@@ -680,7 +797,7 @@ pub(super) fn collect_match_results(
         })
         .collect();
 
-    if persisted.0 == Some(session.seed) {
+    if persisted.0 == Some(session.field_seed) {
         return;
     }
     for (competitor, stats) in rows {
@@ -722,13 +839,26 @@ pub(super) fn collect_match_results(
             territory_map.arena_area,
         );
     }
-    persisted.0 = Some(session.seed);
+    persisted.0 = Some(session.field_seed);
     persistence.dirty = true;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::kill_feed_transform;
+    use super::{kill_feed_transform, name_tag_ui_position};
+    use bevy::prelude::Vec2;
+
+    #[test]
+    fn projected_name_tag_coordinates_enter_scaled_ui_space() {
+        let position = name_tag_ui_position(Vec2::new(450.0, 270.0), Vec2::ZERO, 1.5);
+        assert!(position.abs_diff_eq(Vec2::new(300.0, 180.0), 1.0e-5));
+    }
+
+    #[test]
+    fn projected_name_tag_coordinates_are_unchanged_at_reference_scale() {
+        let position = name_tag_ui_position(Vec2::new(450.0, 270.0), Vec2::new(100.0, 30.0), 1.0);
+        assert_eq!(position, Vec2::new(350.0, 240.0));
+    }
 
     #[test]
     fn kill_feed_enters_with_a_bounce_then_settles() {

@@ -37,6 +37,12 @@ pub struct TrailSegmentRef {
     pub segment: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnerFrontier {
+    pub position: Vec2,
+    pub outward: Vec2,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnershipChange {
     pub index: usize,
@@ -62,6 +68,9 @@ pub struct BoardGrid {
     pub owner_counts: [u32; MAX_COMPETITORS],
     pub owned_cells: [Vec<usize>; MAX_COMPETITORS],
     pub owner_cell_slots: Vec<u32>,
+    /// Cells on the boundary of each sampled owner. One bit per competitor.
+    /// Maintained with ownership changes so NPC home queries stay local.
+    pub owner_frontier_bits: Vec<u16>,
     pub spawn_candidates: Vec<usize>,
     pub dirty_chunks: Vec<bool>,
     pub contour: FieldContour,
@@ -90,6 +99,7 @@ impl Default for BoardGrid {
             owner_counts: [0; MAX_COMPETITORS],
             owned_cells: std::array::from_fn(|_| Vec::new()),
             owner_cell_slots: Vec::new(),
+            owner_frontier_bits: Vec::new(),
             spawn_candidates: Vec::new(),
             dirty_chunks: Vec::new(),
             contour: FieldContour::default(),
@@ -218,6 +228,7 @@ impl BoardGrid {
             owner_counts: [0; MAX_COMPETITORS],
             owned_cells: std::array::from_fn(|_| Vec::new()),
             owner_cell_slots: vec![u32::MAX; len],
+            owner_frontier_bits: vec![0; len],
             spawn_candidates,
             dirty_chunks: vec![true; len.div_ceil(1024)],
             contour,
@@ -236,7 +247,7 @@ impl BoardGrid {
     }
     pub fn index(&self, cell: Cell) -> Option<usize> {
         (cell.x >= 0 && cell.y >= 0 && cell.x < self.width as i32 && cell.y < self.height as i32)
-            .then_some(cell.y as usize * self.width as usize + cell.x as usize)
+            .then(|| cell.y as usize * self.width as usize + cell.x as usize)
     }
     pub fn cell(&self, index: usize) -> Cell {
         Cell::new(
@@ -303,6 +314,161 @@ impl BoardGrid {
     pub fn nearest_owned_cell_center(&self, position: Vec2, player: CompetitorId) -> Option<Vec2> {
         self.nearest_cell_center(position, |index| self.owner[index] == player.owner())
     }
+    pub fn nearest_owner_frontier(
+        &self,
+        position: Vec2,
+        player: CompetitorId,
+        maximum_distance: f32,
+    ) -> Option<Vec2> {
+        let bit = 1u16 << player.index();
+        self.nearest_cell_center_bounded(position, maximum_distance, |index| {
+            self.owner_frontier_bits[index] & bit != 0
+        })
+    }
+
+    pub fn collect_owner_frontiers(
+        &self,
+        position: Vec2,
+        player: CompetitorId,
+        maximum_distance: f32,
+        output: &mut Vec<OwnerFrontier>,
+    ) {
+        output.clear();
+        let Some((minimum, maximum)) = self.clamped_cell_bounds(
+            position - Vec2::splat(maximum_distance),
+            position + Vec2::splat(maximum_distance),
+        ) else {
+            return;
+        };
+        let bit = 1u16 << player.index();
+        let maximum_distance_squared = maximum_distance * maximum_distance;
+        for y in minimum.y..=maximum.y {
+            for x in minimum.x..=maximum.x {
+                let cell = Cell::new(x, y);
+                let index = self.index(cell).expect("clamped frontier cell");
+                if self.owner_frontier_bits[index] & bit == 0 {
+                    continue;
+                }
+                let center = self.cell_center(cell);
+                if center.distance_squared(position) > maximum_distance_squared {
+                    continue;
+                }
+                let mut outward = Vec2::ZERO;
+                for (neighbor, direction) in [
+                    (Cell::new(x - 1, y), -Vec2::X),
+                    (Cell::new(x + 1, y), Vec2::X),
+                    (Cell::new(x, y - 1), -Vec2::Y),
+                    (Cell::new(x, y + 1), Vec2::Y),
+                ] {
+                    if self
+                        .index(neighbor)
+                        .is_none_or(|other| self.owner[other] != player.owner())
+                    {
+                        outward += direction;
+                    }
+                }
+                output.push(OwnerFrontier {
+                    position: center,
+                    outward: outward.normalize_or((center - position).normalize_or(Vec2::Y)),
+                });
+            }
+        }
+    }
+
+    fn nearest_cell_center_bounded(
+        &self,
+        position: Vec2,
+        maximum_distance: f32,
+        predicate: impl Fn(usize) -> bool,
+    ) -> Option<Vec2> {
+        if self.is_empty() {
+            return None;
+        }
+        let relative = (position - self.world_origin) / self.cell_size;
+        let start = Cell::new(
+            (relative.x.floor() as i32).clamp(0, self.width as i32 - 1),
+            (relative.y.floor() as i32).clamp(0, self.height as i32 - 1),
+        );
+        let maximum_radius = (maximum_distance / self.cell_size).ceil() as i32;
+        let mut best: Option<(Vec2, f32)> = None;
+        for radius in 0..=maximum_radius {
+            let mut consider = |cell: Cell| {
+                let Some(index) = self.index(cell) else {
+                    return;
+                };
+                if !predicate(index) {
+                    return;
+                }
+                let center = self.cell_center(cell);
+                let distance = center.distance_squared(position);
+                if distance <= maximum_distance * maximum_distance
+                    && best.is_none_or(|(_, current)| distance < current)
+                {
+                    best = Some((center, distance));
+                }
+            };
+            for x in start.x - radius..=start.x + radius {
+                consider(Cell::new(x, start.y - radius));
+                if radius > 0 {
+                    consider(Cell::new(x, start.y + radius));
+                }
+            }
+            for y in start.y - radius + 1..start.y + radius {
+                consider(Cell::new(start.x - radius, y));
+                if radius > 0 {
+                    consider(Cell::new(start.x + radius, y));
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        best.map(|(point, _)| point)
+    }
+
+    pub fn rebuild_owner_frontiers(&mut self) {
+        self.owner_frontier_bits.fill(0);
+        for index in 0..self.len() {
+            self.refresh_frontier_index(index);
+        }
+    }
+
+    fn refresh_frontier_around(&mut self, index: usize) {
+        let cell = self.cell(index);
+        for candidate in [
+            cell,
+            Cell::new(cell.x - 1, cell.y),
+            Cell::new(cell.x + 1, cell.y),
+            Cell::new(cell.x, cell.y - 1),
+            Cell::new(cell.x, cell.y + 1),
+        ] {
+            if let Some(index) = self.index(candidate) {
+                self.refresh_frontier_index(index);
+            }
+        }
+    }
+
+    fn refresh_frontier_index(&mut self, index: usize) {
+        self.owner_frontier_bits[index] = 0;
+        let Some(owner) = self.owner[index].competitor() else {
+            return;
+        };
+        let cell = self.cell(index);
+        let frontier = [
+            Cell::new(cell.x - 1, cell.y),
+            Cell::new(cell.x + 1, cell.y),
+            Cell::new(cell.x, cell.y - 1),
+            Cell::new(cell.x, cell.y + 1),
+        ]
+        .into_iter()
+        .any(|neighbor| {
+            self.index(neighbor)
+                .is_none_or(|other| self.owner[other] != owner.owner())
+        });
+        if frontier {
+            self.owner_frontier_bits[index] = 1u16 << owner.index();
+        }
+    }
     fn nearest_cell_center(
         &self,
         position: Vec2,
@@ -363,6 +529,30 @@ impl BoardGrid {
             .try_normalize()
             .unwrap_or_else(|| -position.try_normalize().unwrap_or(Vec2::Y))
     }
+    pub fn collect_nearby_trail_segments(
+        &self,
+        position: Vec2,
+        radius: f32,
+        output: &mut Vec<TrailSegmentRef>,
+    ) {
+        output.clear();
+        let Some((minimum, maximum)) = self.clamped_cell_bounds(
+            position - Vec2::splat(radius),
+            position + Vec2::splat(radius),
+        ) else {
+            return;
+        };
+        for y in minimum.y..=maximum.y {
+            for x in minimum.x..=maximum.x {
+                let Some(index) = self.index(Cell::new(x, y)) else {
+                    continue;
+                };
+                output.extend(self.trail_segment_buckets[index].iter().copied());
+            }
+        }
+        output.sort_unstable_by_key(|reference| (reference.owner.0, reference.segment));
+        output.dedup();
+    }
     pub fn set_owner_index(&mut self, index: usize, owner: OwnerId) -> bool {
         if !self.field_mask[index] || self.owner[index] == owner {
             return false;
@@ -388,6 +578,7 @@ impl BoardGrid {
             old: old_owner,
             new: owner,
         });
+        self.refresh_frontier_around(index);
         true
     }
     pub fn set_owner(&mut self, cell: Cell, owner: OwnerId) -> bool {
@@ -414,6 +605,7 @@ impl BoardGrid {
         self.owner_counts[player.index()] = 0;
         if changed > 0 {
             self.ownership_revision = self.ownership_revision.wrapping_add(1);
+            self.rebuild_owner_frontiers();
         }
         changed
     }
@@ -635,6 +827,12 @@ mod tests {
         assert_eq!(b.world_to_cell(b.cell_center(c)), Some(c));
     }
     #[test]
+    fn negative_coordinates_are_rejected_without_eager_index_arithmetic() {
+        let board = BoardGrid::generate(4, 2, &GameConfig::default());
+        assert_eq!(board.index(Cell::new(-1, 0)), None);
+        assert_eq!(board.index(Cell::new(0, -1)), None);
+    }
+    #[test]
     fn fields_are_connected_and_deterministic() {
         for seed in 0..8 {
             let a = BoardGrid::generate(seed, 8, &GameConfig::default());
@@ -699,5 +897,57 @@ mod tests {
         assert!(
             b.signed_distance_at(p + n * b.cell_size) >= b.signed_distance_at(p - n * b.cell_size)
         );
+    }
+
+    #[test]
+    fn owner_frontier_updates_incrementally_and_home_search_is_bounded() {
+        let mut board = BoardGrid::generate(22, 2, &GameConfig::default());
+        board.claim_disk(Vec2::ZERO, 3.0, CompetitorId(0));
+        let frontier = board
+            .nearest_owner_frontier(Vec2::new(4.0, 0.0), CompetitorId(0), 6.0)
+            .expect("frontier is locally visible");
+        assert!((2.0..=3.6).contains(&frontier.length()));
+        assert!(
+            board
+                .nearest_owner_frontier(Vec2::new(20.0, 0.0), CompetitorId(0), 2.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn local_frontier_samples_point_out_of_owned_ground() {
+        let mut board = BoardGrid::generate(24, 2, &GameConfig::default());
+        board.claim_disk(Vec2::ZERO, 5.0, CompetitorId(0));
+        let mut frontiers = Vec::new();
+        board.collect_owner_frontiers(Vec2::ZERO, CompetitorId(0), 8.0, &mut frontiers);
+        assert!(frontiers.len() > 8);
+        for frontier in frontiers {
+            let outside = frontier.position + frontier.outward * board.cell_size * 2.0;
+            assert_ne!(
+                board
+                    .world_to_cell(outside)
+                    .map(|cell| board.owner_at(cell)),
+                Some(CompetitorId(0).owner())
+            );
+        }
+    }
+
+    #[test]
+    fn nearby_trail_query_deduplicates_bucket_references() {
+        let mut board = BoardGrid::generate(23, 2, &GameConfig::default());
+        let center = board.world_to_cell(Vec2::ZERO).unwrap();
+        let reference = TrailSegmentRef {
+            owner: CompetitorId(1),
+            segment: 3,
+        };
+        for cell in [center, Cell::new(center.x + 1, center.y)] {
+            let index = board.index(cell).unwrap();
+            board.trail_segment_buckets[index].push(reference);
+        }
+        let mut found = Vec::new();
+        board.collect_nearby_trail_segments(Vec2::ZERO, 2.0, &mut found);
+        assert_eq!(found, vec![reference]);
+        board.collect_nearby_trail_segments(Vec2::splat(20.0), 1.0, &mut found);
+        assert!(found.is_empty());
     }
 }

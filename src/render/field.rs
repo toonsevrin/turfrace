@@ -11,6 +11,8 @@ const FIELD_BOTTOM: f32 = -0.34;
 const FIELD_DEPTH_OFFSET: Vec2 = Vec2::new(0.22, 0.46);
 const FIELD_SHADOW_HEIGHT: f32 = -0.38;
 const OUTSIDE_CANVAS_HEIGHT: f32 = -0.46;
+const FIELD_EDGE_COLOR: Color = Color::srgb_u8(180, 184, 190);
+const FIELD_SIDE_COLOR: Color = Color::srgb_u8(191, 183, 169);
 
 /// Render snapshot of the generated star-shaped field contour.
 #[derive(Resource, Debug, Clone, Default)]
@@ -97,7 +99,7 @@ pub(super) fn sync_field_mesh(
             Name::new("Paper Field Edge"),
             FieldDepth,
             Mesh3d(meshes.add(depth_mesh)),
-            MeshMaterial3d(flat.add(FlatMaterial::new(Color::srgb_u8(184, 169, 149), 0.72))),
+            MeshMaterial3d(flat.add(FlatMaterial::new(FIELD_SIDE_COLOR, 0.72))),
         ));
     }
 
@@ -130,7 +132,7 @@ pub(super) fn sync_field_mesh(
             Name::new("Field Contour Line"),
             FieldBorder,
             Mesh3d(meshes.add(border_mesh)),
-            MeshMaterial3d(flat.add(FlatMaterial::new(Color::srgb_u8(19, 30, 47), 0.0))),
+            MeshMaterial3d(flat.add(FlatMaterial::new(FIELD_EDGE_COLOR, 0.0))),
         ));
     }
 }

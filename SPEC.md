@@ -1370,150 +1370,73 @@ Destructive operations require confirmation.
 
 # 17. NPC engine
 
-## 17.1 Architecture
+## 17.1 Local-information runtime
 
-NPCs use the same movement, trail, combat, death, capture, and respawn systems as humans.
+NPCs use the same authoritative movement, trail, combat, death, capture, visibility, and respawn
+rules as humans. The runtime pipeline is:
 
-The NPC engine produces only steering intents.
-
-```rust
-pub trait NpcBrain: Send + Sync + 'static {
-    fn tick(
-        &mut self,
-        context: &NpcContext,
-        delta_seconds: f32,
-    ) -> NpcIntent;
-
-    fn on_event(&mut self, event: &NpcEvent) {}
-}
-
-pub struct NpcIntent {
-    pub desired_direction: Vec2,
-    pub debug_state: NpcDebugState,
-}
+```text
+local sensing → match memory → capture planner → tactical brain → skill/safety filter → SteeringIntent
 ```
 
-`NpcContext` should expose read-only queries rather than mutable game state:
+Brains receive only a typed `NpcDecisionFrame`; they never receive `BoardGrid`, `TerritoryMap`,
+arbitrary ECS queries, complete polygons, or historical trail vectors. The frame contains the
+NPC's immediate movement state, public rank, at most three nearby rivals, at most two nearby trail
+points, and an optional locally planned capture. Rivals and trails outside `14 + 14 × skill` world
+units cannot change a decision.
 
-```rust
-pub struct NpcContext<'a> {
-    pub self_state: NpcSelfState,
-    pub nearby_competitors: &'a [PerceivedCompetitor],
-    pub nearby_trails: &'a [PerceivedTrail],
-    pub board: &'a BoardQuery,
-    pub ranking: &'a RankingSnapshot,
-    pub match_time: f32,
-}
-```
+The derived board cache maintains an owner-frontier bit mask as ownership changes. Home searches
+are bounded frontier-cell searches, and local trail sensing reuses incremental segment buckets.
+An ordinary thought performs no full-board, complete-polygon, or trail-history scan.
 
-The movement system must not distinguish NPC intent from human intent.
+Every controller has fixed-size match memory for action commitment, four capture waypoints,
+confidence, frustration, and per-opponent estimates. Personal
+spawn, death, capture, kill, and theft events are delivered directly from authoritative match
+resolution. Twenty percent of generated NPCs do not adapt; all memory resets between matches.
 
-## 17.2 NPC controller component
+## 17.2 Capture planning and brains
 
-```rust
-#[derive(Component)]
-struct NpcController {
-    brain: Box<dyn NpcBrain>,
-    think_timer: Timer,
-    last_intent: NpcIntent,
-    difficulty: NpcDifficulty,
-}
-```
+While safely inside owned ground, the planner samples only locally visible owner-frontier cells.
+It chooses a safe interior staging point, an exterior outbound apex, a laterally separated return
+apex, and a distinct owned re-entry point. Staging before the boundary accounts for finite turn
+rate and prevents accidental skim-out/skim-in loops. Desired depth and width scale with greed,
+rank pressure, confidence, frustration, and nearby learned aggression. Plans persist across
+thoughts; threat can shorten the return leg after the excursion is established but cannot cancel
+the outbound leg immediately.
 
-NPC logic runs at its think frequency. Between thoughts, the previous desired direction remains active.
+Two brains ship:
 
-## 17.3 Default NPC states
+* `UtilityTactician`: the default planner-following, threat-aware brain.
+* `LegacyWanderer`: a rare, deliberately less predictable compatibility character that still
+  uses explicit capture plans.
 
-Default brains may share a common planner with weighted states:
+Roster generation is deterministic from `npc_roster_seed`: a match has at most one legacy NPC,
+with a 3% chance that the slot is present, and all remaining slots are tactical. Continuous traits are
+skill, aggression, greed, exploration, composure, adaptability, commitment, and turning bias.
+Unique names are shuffled independently and ordinary UI hides brain and traits.
 
-* `Recovering`: remain safe during spawn protection.
-* `Patrolling`: move within owned territory and choose an exit.
-* `Expanding`: execute a capture route.
-* `Returning`: abort expansion and reach owned territory.
-* `Hunting`: intercept an opponent’s trail.
-* `Evading`: shorten the loop because enemies threaten the trail.
-* `EdgeAvoidance`: escape an unsafe boundary approach.
+## 17.3 Difficulty and imperfection
 
-## 17.4 Default NPC personalities
+Lobby-wide difficulty samples skill from overlapping triangular distributions:
 
-### Cautious
+| Difficulty | Minimum | Mode | Maximum |
+| ---------- | ------: | ---: | ------: |
+| Easy       |    0.05 | 0.25 |    0.60 |
+| Normal     |    0.25 | 0.55 |    0.85 |
+| Hard       |    0.45 | 0.75 |    0.95 |
 
-* Targets captures around 1–3% of field area.
-* Returns early.
-* Avoids leaving territory near multiple enemies.
-* Rarely hunts distant trails.
+Think rate is `4 + 8 × skill` Hz, perception is `14 + 14 × skill` units, and slowly drifting
+independent steering error interpolates from 14° to 1°. Lower skill reacts less often and commits
+longer; commitment starts only when the selected action changes, so repeated thoughts cannot lock
+the controller in its old action. Difficulty never changes speed, turn rate, collision, capture,
+or visibility rules.
 
-### Balanced
+## 17.4 Seeds and reproducibility
 
-* Targets captures around 2–6%.
-* Hunts exposed trails when interception is safe.
-* Uses moderate risk thresholds.
-* Default majority personality.
-
-### Raider
-
-* Targets captures around 1–4%.
-* Prioritizes cutting enemy trails.
-* Frequently makes short loops through enemy territory.
-* Accepts greater proximity to opponents.
-
-A fourth `Greedy` personality targeting 4–10% captures is included in the production roster.
-
-## 17.5 NPC decision logic
-
-While inside territory:
-
-1. Sample nearby territory boundary points.
-2. Score the space beyond each point.
-3. Prefer:
-
-   * Unclaimed territory.
-   * Enemy territory belonging to the current leader.
-   * Areas with few nearby enemy cubes.
-   * Routes away from the field edge.
-4. Select a capture-size target based on personality.
-5. Construct two or three steering waypoints.
-
-While drawing:
-
-* Estimate distance to nearest owned cell.
-* Estimate enemy interception time to the active trail.
-* Return early when risk exceeds the personality threshold.
-* Enter Hunting only when the route to an enemy trail is shorter than the safe return margin.
-* Avoid the NPC’s own existing trail using a repulsion field.
-* Replan when territory is stolen.
-
-Risk also responds to the live ranking. The leader shortens excursions to defend its connected
-island, while trailing NPCs accept longer routes and wider trail-interception opportunities.
-Deterministic patrol windows may reverse an NPC's preferred turning side so repeated matches do
-not collapse into a fixed clockwise/counterclockwise script.
-
-NPCs require no general obstacle pathfinding because the field contains no solid internal obstacles.
-
-## 17.6 NPC difficulty
-
-Difficulty controls reaction, perception, and aim error rather than speed.
-
-| Difficulty | Think rate | Perception radius | Steering error |
-| ---------- | ---------: | ----------------: | -------------: |
-| Easy       |       5 Hz |          16 units |      Up to 12° |
-| Normal     |       8 Hz |          22 units |       Up to 6° |
-| Hard       |      12 Hz |          28 units |       Up to 2° |
-
-All competitors use identical movement speed and turn rate.
-
-The initial lobby defaults to Normal.
-
-## 17.7 NPC spawning
-
-NPCs:
-
-* Spawn at match start like humans.
-* Receive starting territories.
-* Use the same 5, 10, 15, 20… respawn sequence.
-* Remain listed in rankings while dead.
-* Receive deterministic names and personalities from the match seed.
-* Never receive hidden movement or capture bonuses.
+`MatchSetup` records `field_seed`, `npc_roster_seed`, and `npc_difficulty`. A normal rematch advances
+both seeds. **Replay Field** advances only the roster seed, producing new names, traits, and
+reactions on identical terrain. Supplying both seeds reproduces the match exactly. Runtime play
+performs no training, telemetry, network requests, or persistent player-behavior collection.
 
 ---
 

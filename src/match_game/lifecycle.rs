@@ -8,7 +8,9 @@ use crate::{
     input::{ControlSource, HumanController, SteeringIntent},
     lobby::MatchSetup,
     movement::CompetitorMotion,
-    npc::{NpcController, NpcDifficulty, deterministic_npc_name, deterministic_personality},
+    npc::{
+        NpcController, NpcDifficulty, NpcEvent, NpcEventQueue, NpcRosterEntry, generate_npc_roster,
+    },
     territory_map::TerritoryMap,
 };
 
@@ -41,7 +43,9 @@ pub(super) fn begin_attract_match(world: &mut World) {
         seed
     };
     let setup = MatchSetup {
-        seed,
+        field_seed: seed,
+        npc_roster_seed: seed ^ 0x4e50_4352_4f53_5445,
+        npc_difficulty: NpcDifficulty::Normal,
         total_competitors: ATTRACT_NPC_COUNT,
         humans: Vec::new(),
         replay_same_field: false,
@@ -70,12 +74,15 @@ pub fn start_match(world: &mut World, setup: &MatchSetup) {
 }
 
 pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: MatchPurpose) {
+    if !world.contains_resource::<NpcEventQueue>() {
+        world.insert_resource(NpcEventQueue::default());
+    }
     despawn_competitors(world);
     let config = world.resource::<GameConfig>().clone();
     let count = usize::from(setup.total_competitors.clamp(2, 12));
-    let mut board = BoardGrid::generate(setup.seed, count, &config);
+    let mut board = BoardGrid::generate(setup.field_seed, count, &config);
     let mut territory = TerritoryMap::from_board(&board);
-    let spawns = choose_initial_spawns(&board, count, 8.0, setup.seed);
+    let spawns = choose_initial_spawns(&board, count, 8.0, setup.field_seed);
     for (index, &spawn) in spawns.iter().enumerate() {
         territory.seed_owner(
             spawn,
@@ -94,7 +101,8 @@ pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: Ma
     world.insert_resource(board);
     world.insert_resource(territory);
     world.insert_resource(MatchSession {
-        seed: setup.seed,
+        field_seed: setup.field_seed,
+        npc_roster_seed: setup.npc_roster_seed,
         purpose,
         phase,
         elapsed_seconds: 0.0,
@@ -104,7 +112,10 @@ pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: Ma
     });
     world.insert_resource(Rankings::default());
     world.resource_mut::<SimulationEvents>().0.clear();
+    world.resource_mut::<NpcEventQueue>().0.clear();
     world.insert_resource(EliminationFeed::default());
+    let npc_count = count.saturating_sub(setup.humans.len());
+    let npc_roster = generate_npc_roster(setup.npc_roster_seed, npc_count, setup.npc_difficulty);
     for (index, &position) in spawns.iter().enumerate() {
         spawn_competitor(
             world,
@@ -116,10 +127,20 @@ pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: Ma
                 .area(CompetitorId(index as u8)),
             index,
             position,
+            index
+                .checked_sub(setup.humans.len())
+                .and_then(|npc_index| npc_roster.get(npc_index)),
         );
+        if index >= setup.humans.len() {
+            world
+                .resource_mut::<NpcEventQueue>()
+                .0
+                .push((CompetitorId(index as u8), NpcEvent::Spawned));
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_competitor(
     world: &mut World,
     setup: &MatchSetup,
@@ -128,6 +149,7 @@ fn spawn_competitor(
     territory_area: f32,
     index: usize,
     position: Vec2,
+    npc_entry: Option<&NpcRosterEntry>,
 ) {
     let id = CompetitorId(index as u8);
     let heading = (-position).try_normalize().unwrap_or(Vec2::Y);
@@ -177,17 +199,17 @@ fn spawn_competitor(
             },
         ));
     } else {
-        let personality = deterministic_personality(setup.seed, id);
+        let npc_entry = npc_entry.expect("every NPC slot has a deterministic roster entry");
         world.spawn((
             base,
             Competitor {
                 id,
-                display_name: deterministic_npc_name(index).to_owned(),
+                display_name: npc_entry.name.clone(),
                 kind: CompetitorKind::Npc,
                 color_id: index as u8,
                 pattern_id: (index % 8) as u8,
             },
-            NpcController::standard(id, personality, NpcDifficulty::Normal),
+            NpcController::from_roster(id, npc_entry, index),
         ));
     }
 }

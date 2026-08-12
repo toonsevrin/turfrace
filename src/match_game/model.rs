@@ -105,7 +105,8 @@ pub struct LastOwnedCell(pub crate::board::Cell);
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct MatchSession {
-    pub seed: u64,
+    pub field_seed: u64,
+    pub npc_roster_seed: u64,
     pub purpose: MatchPurpose,
     pub phase: MatchPhase,
     pub elapsed_seconds: f32,
@@ -116,7 +117,8 @@ pub struct MatchSession {
 impl Default for MatchSession {
     fn default() -> Self {
         Self {
-            seed: 0,
+            field_seed: 0,
+            npc_roster_seed: 0,
             purpose: MatchPurpose::Playable,
             phase: MatchPhase::Idle,
             elapsed_seconds: 0.0,

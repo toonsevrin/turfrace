@@ -6,12 +6,9 @@ use crate::{
     combat::{CollisionBody, CollisionTuning, CollisionWorkspace},
     config::GameConfig,
     ids::{CompetitorId, MAX_COMPETITORS},
-    input::{ControlSource, SteeringIntent},
+    input::SteeringIntent,
     movement::{CompetitorMotion, advance_motion},
-    npc::{
-        BoardQuery, NpcContext, NpcController, NpcSelfState, PerceivedCompetitor, PerceivedTrail,
-        RankingSnapshot,
-    },
+    npc::{NpcController, NpcEvent, NpcEventQueue},
     territory_map::TerritoryMap,
     trail::{ActiveTrail, clear_trail_bits, update_trail_raster},
 };
@@ -22,26 +19,11 @@ use super::lifecycle::{
     begin_attract_match, begin_from_lobby, cleanup_match, finish_match_loading,
 };
 use super::model::*;
+use super::npc_systems::npc_think;
 use super::respawn::advance_respawns;
 #[cfg(test)]
 use super::respawn::{claim_respawn_seed, reset_respawn_anchor};
 
-type NpcSnapshot = (
-    &'static Competitor,
-    &'static CompetitorMotion,
-    &'static LifeState,
-    &'static TerritoryRecord,
-    Option<&'static ActiveTrail>,
-);
-type NpcControl = (
-    &'static Competitor,
-    &'static CompetitorMotion,
-    &'static LifeState,
-    &'static SpawnProtection,
-    Option<&'static ActiveTrail>,
-    &'static mut NpcController,
-    &'static mut SteeringIntent,
-);
 type TrailExtension = (
     Entity,
     &'static Competitor,
@@ -67,6 +49,7 @@ struct EliminationResources<'w> {
     events: ResMut<'w, SimulationEvents>,
     session: Option<Res<'w, MatchSession>>,
     feed: Option<ResMut<'w, EliminationFeed>>,
+    npc_events: Option<ResMut<'w, NpcEventQueue>>,
 }
 
 pub struct MatchPlugin;
@@ -118,6 +101,7 @@ impl Plugin for MatchPlugin {
             .init_resource::<Rankings>()
             .init_resource::<SimulationEvents>()
             .init_resource::<EliminationFeed>()
+            .init_resource::<NpcEventQueue>()
             .init_resource::<PendingDeaths>()
             .init_resource::<PendingCaptures>()
             .init_resource::<DisplacementCredits>()
@@ -156,6 +140,7 @@ impl Plugin for MatchPlugin {
                     check_victory.in_set(MatchSystemSet::CheckVictory),
                     advance_respawns.in_set(MatchSystemSet::AdvanceRespawns),
                     update_rankings.in_set(MatchSystemSet::UpdateRankings),
+                    deliver_npc_events.after(MatchSystemSet::UpdateRankings),
                 )
                     .run_if(match_is_running),
             )
@@ -168,135 +153,6 @@ impl Plugin for MatchPlugin {
 
 fn configure_fixed_timestep(config: Res<GameConfig>, mut fixed_time: ResMut<Time<Fixed>>) {
     fixed_time.set_timestep_hz(config.fixed_hz);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn npc_think(
-    time: Res<Time<Fixed>>,
-    board: Res<BoardGrid>,
-    territory: Res<TerritoryMap>,
-    session: Res<MatchSession>,
-    rankings: Res<Rankings>,
-    mut queries: ParamSet<(Query<NpcSnapshot>, Query<NpcControl>)>,
-    mut people: Local<Vec<PerceivedCompetitor>>,
-    mut trail_perceptions: Local<[Vec<PerceivedTrail>; MAX_COMPETITORS]>,
-    mut ranking: Local<RankingSnapshot>,
-    mut nearby_people: Local<Vec<PerceivedCompetitor>>,
-    mut nearby_trails: Local<Vec<PerceivedTrail>>,
-) {
-    let should_build_snapshot = queries
-        .p1()
-        .iter()
-        .any(|(_, _, life, _, _, controller, _)| {
-            life.is_alive() && controller.think_remaining <= time.delta_secs()
-        });
-    if !should_build_snapshot {
-        for (_, _, life, _, _, mut controller, _) in queries.p1().iter_mut() {
-            if life.is_alive() {
-                controller.think_remaining -= time.delta_secs();
-            }
-        }
-        return;
-    }
-    people.clear();
-    people.extend(
-        queries
-            .p0()
-            .iter()
-            .map(|(c, m, l, t, _)| PerceivedCompetitor {
-                id: c.id,
-                position: m.position,
-                alive: l.is_alive(),
-                territory_cells: t.current_cells,
-                territory_area: t.current_area,
-            }),
-    );
-    trail_perceptions
-        .iter_mut()
-        .for_each(|perceptions| perceptions.clear());
-    {
-        let snapshots = queries.p0();
-        for viewer in people.iter() {
-            for (owner, _, _, _, trail) in snapshots.iter() {
-                let Some(trail) = trail.filter(|_| owner.id != viewer.id) else {
-                    continue;
-                };
-                let nearest = trail
-                    .points
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(trail.head))
-                    .min_by(|a, b| {
-                        a.distance_squared(viewer.position)
-                            .total_cmp(&b.distance_squared(viewer.position))
-                    });
-                if let Some(nearest_point) = nearest {
-                    trail_perceptions[viewer.id.index()].push(PerceivedTrail {
-                        owner: owner.id,
-                        nearest_point,
-                        distance: nearest_point.distance(viewer.position),
-                    });
-                }
-            }
-        }
-    }
-    ranking.ordered.clear();
-    ranking
-        .ordered
-        .extend(rankings.entries.iter().map(|e| e.id));
-    for (competitor, motion, life, protection, trail, mut controller, mut steering) in
-        queries.p1().iter_mut()
-    {
-        if !life.is_alive() {
-            continue;
-        }
-        controller.think_remaining -= time.delta_secs();
-        if controller.think_remaining > 0.0 {
-            continue;
-        }
-        controller.think_remaining += 1.0 / controller.difficulty.think_hz();
-        let radius = controller.difficulty.perception();
-        nearby_people.clear();
-        nearby_people.extend(
-            people.iter().copied().filter(|p| {
-                p.id != competitor.id && p.position.distance(motion.position) <= radius
-            }),
-        );
-        nearby_trails.clear();
-        nearby_trails.extend(
-            trail_perceptions[competitor.id.index()]
-                .iter()
-                .copied()
-                .filter(|t| t.distance <= radius),
-        );
-        let query = BoardQuery::new(&board, &territory, competitor.id);
-        let context = NpcContext {
-            self_state: NpcSelfState {
-                id: competitor.id,
-                position: motion.position,
-                heading: motion.heading,
-                protected: protection.active(),
-                trail_length: trail.map_or(0.0, |t| t.length),
-                owns_current_cell: query.owns(motion.position),
-            },
-            nearby_competitors: &nearby_people,
-            nearby_trails: &nearby_trails,
-            board: &query,
-            ranking: &ranking,
-            match_time: session.elapsed_seconds,
-        };
-        let think_hz = controller.difficulty.think_hz();
-        let intent = controller.brain.tick(&context, 1.0 / think_hz);
-        controller.last_intent = intent;
-        let error = controller.difficulty.error_radians()
-            * (session.elapsed_seconds * 1.7 + competitor.id.0 as f32).sin();
-        let (sin, cos) = error.sin_cos();
-        let d = intent.desired_direction;
-        steering.desired_direction =
-            Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos).normalize_or_zero();
-        steering.magnitude = 1.0;
-        steering.source = ControlSource::Npc;
-    }
 }
 
 fn move_competitors(
@@ -493,6 +349,14 @@ fn resolve_deaths(
                     DeathCause::SelfTrail
                 },
             });
+            if let Some(npc_events) = eliminations.npc_events.as_deref_mut() {
+                npc_events.0.push((
+                    competitor.id,
+                    NpcEvent::Died {
+                        killer: intent.killer,
+                    },
+                ));
+            }
             let match_time = eliminations
                 .session
                 .as_ref()
@@ -516,7 +380,7 @@ fn resolve_deaths(
             && let Some((_, _, _, mut stats, _)) =
                 query.iter_mut().find(|(_, c, _, _, _)| c.id == killer)
         {
-            credit_kill(killer, &mut stats, &mut eliminations.events);
+            credit_kill(killer, intent.victim, &mut stats, &mut eliminations);
         }
     }
     pending.0 = intents;
@@ -559,6 +423,14 @@ fn resolve_territory_consequences(
                 killer: Some(killer),
                 cause: DeathCause::Displaced,
             });
+            if let Some(npc_events) = eliminations.npc_events.as_deref_mut() {
+                npc_events.0.push((
+                    victim,
+                    NpcEvent::Died {
+                        killer: Some(killer),
+                    },
+                ));
+            }
             let match_time = eliminations
                 .session
                 .as_ref()
@@ -578,7 +450,7 @@ fn resolve_territory_consequences(
                 .iter_mut()
                 .find(|(_, c, _, _, _, _, _, _, _)| c.id == killer)
         {
-            credit_kill(killer, &mut stats, &mut eliminations.events);
+            credit_kill(killer, victim, &mut stats, &mut eliminations);
         }
     }
     displaced.0 = credits;
@@ -612,9 +484,36 @@ fn resolve_territory_consequences(
     }
 }
 
-fn credit_kill(killer: CompetitorId, stats: &mut MatchStatistics, events: &mut SimulationEvents) {
+fn credit_kill(
+    killer: CompetitorId,
+    victim: CompetitorId,
+    stats: &mut MatchStatistics,
+    resources: &mut EliminationResources,
+) {
     let progress = stats.record_kill();
-    events.0.push(SimulationEvent::Kill { killer, progress });
+    resources
+        .events
+        .0
+        .push(SimulationEvent::Kill { killer, progress });
+    if let Some(npc_events) = resources.npc_events.as_deref_mut() {
+        npc_events
+            .0
+            .push((killer, NpcEvent::CreditedKill { victim }));
+    }
+}
+
+fn deliver_npc_events(
+    mut queue: ResMut<NpcEventQueue>,
+    mut controllers: Query<(&Competitor, &mut NpcController)>,
+) {
+    for (recipient, event) in queue.0.drain(..) {
+        if let Some((_, mut controller)) = controllers
+            .iter_mut()
+            .find(|(competitor, _)| competitor.id == recipient)
+        {
+            controller.on_event(event);
+        }
+    }
 }
 
 fn check_victory(

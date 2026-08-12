@@ -3,6 +3,36 @@
 This log records the deterministic review passes behind the current shell. Re-run the named
 scenario at 1280×720 and, where noted, 960×600 before changing its hierarchy.
 
+## Resolved: browser name tags drift from cubes
+
+**Observed symptom.** In the web build, player names could be rendered beside or below their
+cubes instead of directly above them. The problem was easy to miss at the reference canvas size,
+because a 1280×720 canvas uses the minimum UI scale of `1.0`. It appeared when the browser canvas
+was large enough for the responsive UI to use a scale above `1.0`; the cube remained correctly
+positioned in the split-screen camera while its name tag drifted by the scale factor. This made the
+name/cube association unreliable, especially on 1920×1080 displays and on browser zoom/fullscreen
+layouts.
+
+**Reproduction.** Start the web app, enter a match with two humans, and compare a 1280×720 canvas
+with a 1920×1080 canvas at the same match time. The deterministic native harness reproduces the
+same presentation path with `./scripts/visual-feedback match --seconds 3`; before the fix,
+`target/visual-feedback/name-tags-before-1920x1080.png` showed the labels displaced from their
+cubes, while the 1280×720 capture masked the issue. Narrow and ultrawide canvases were also
+checked because split-screen camera viewports have their own physical offsets.
+
+**Root cause.** `Camera::world_to_viewport` returns coordinates in the camera's logical viewport,
+including a split-screen viewport offset. `update_name_tags` converted that offset from physical
+pixels using the window scale factor, but then assigned the resulting coordinates directly to a UI
+node. The node belongs to a root with Bevy's global `UiScale`; its `left` and `top` values are laid
+out in scaled UI space. The projected point and the UI node therefore used different coordinate
+spaces whenever the responsive UI scale was greater than `1.0`.
+
+**Fix and regression coverage.** The projection now uses the target camera's scale factor for its
+viewport offset and converts the final camera-local point into global UI space by dividing by
+`UiScale`. The conversion is isolated in `name_tag_ui_position` with tests for both the reference
+scale and a `1.5×` browser-style scale. This keeps the label's center on the projected cube across
+render-resolution overrides, split-screen layouts, and responsive browser canvas sizes.
+
 ## Home
 
 1. Removed the prose slogan competing with the primary action.

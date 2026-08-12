@@ -423,8 +423,8 @@ pub(crate) fn spawn_lobby_content(
                 }
                 panel
                     .spawn((Node {
-                        width: percent(76),
-                        max_width: px(360),
+                        width: percent(94),
+                        max_width: px(620),
                         display: Display::Flex,
                         column_gap: px(10),
                         align_items: AlignItems::Center,
@@ -461,6 +461,47 @@ pub(crate) fn spawn_lobby_content(
                             UiAction::Lobby(LobbyCommand::ChangeNpcCount(1)),
                             21,
                         );
+                        row.spawn((
+                            Text::new("CPU DIFFICULTY"),
+                            TextFont {
+                                font: theme.body_font.clone(),
+                                font_size: FontSize::Px(10.0),
+                                ..default()
+                            },
+                            TextColor(MUTED),
+                            Node {
+                                margin: UiRect::left(px(8)),
+                                ..default()
+                            },
+                        ));
+                        spawn_mini_button(
+                            row,
+                            theme,
+                            "<",
+                            UiAction::Lobby(LobbyCommand::ChangeNpcDifficulty(-1)),
+                            22,
+                        );
+                        row.spawn((
+                            Text::new(lobby.npc_difficulty.label()),
+                            TextFont {
+                                font: theme.body_font.clone(),
+                                font_size: FontSize::Px(12.0),
+                                ..default()
+                            },
+                            TextColor(INK),
+                            Node {
+                                width: px(64),
+                                ..default()
+                            },
+                            TextLayout::justify(Justify::Center),
+                        ));
+                        spawn_mini_button(
+                            row,
+                            theme,
+                            ">",
+                            UiAction::Lobby(LobbyCommand::ChangeNpcDifficulty(1)),
+                            23,
+                        );
                     });
                 let start_label = if lobby.can_start() {
                     "START RACE"
@@ -472,9 +513,9 @@ pub(crate) fn spawn_lobby_content(
                     theme,
                     start_label,
                     UiAction::Lobby(LobbyCommand::Start),
-                    22,
+                    24,
                 );
-                spawn_button(panel, theme, "BACK", UiAction::Back(AppState::Home), 23);
+                spawn_button(panel, theme, "BACK", UiAction::Back(AppState::Home), 25);
             });
         });
 }
@@ -497,7 +538,12 @@ pub(crate) fn lobby_fingerprint(lobby: &Lobby, compact: bool) -> String {
         })
         .collect::<Vec<_>>()
         .join("|");
-    format!("{}:{}:{players}", lobby.npc_count(), compact)
+    format!(
+        "{}:{:?}:{}:{players}",
+        lobby.npc_count(),
+        lobby.npc_difficulty,
+        compact
+    )
 }
 
 const fn is_compact_lobby(width: f32) -> bool {

@@ -10,6 +10,7 @@ mod sync;
 mod territory;
 mod trail;
 
+pub(crate) use cube::CompetitorProxy;
 pub use cube::CompetitorVisual;
 pub use field::FieldVisual;
 pub use materials::FlatMaterial;
@@ -21,9 +22,9 @@ use std::collections::VecDeque;
 
 use crate::palette::PLAYER_COLORS;
 
-/// The open space beyond the paper arena. A light sky keeps an exposed edge
-/// feeling intentional without competing with the saturated player colors.
-pub const SKY_COLOR: Color = Color::srgb_u8(91, 183, 232);
+/// The open space beyond the paper arena. It is deliberately neutral so the
+/// split-screen gap and arena silhouette do not compete with player colors.
+pub const SKY_COLOR: Color = Color::srgb_u8(239, 241, 243);
 
 pub(crate) fn mix_with_white(color: Color, amount: f32) -> Color {
     let c = color.to_srgba();

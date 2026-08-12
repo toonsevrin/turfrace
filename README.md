@@ -65,6 +65,10 @@ The repository's normal handoff check formats, compiles, lints, and runs every t
 
 Use `./scripts/feedback --quick` while iterating. The test suite covers geometry, capture and combat ordering, respawn and victory boundaries, persistence/input/lobby behavior, viewport layouts, render mappings, and an accelerated deterministic one-hour NPC soak.
 
+NPCs use bounded local sensing and a deterministic tactical capture planner. Focused tests cover
+plan sizing, risk response, action commitment, and realized multi-NPC capture quality; the
+accelerated soak separately checks long-running authoritative invariants.
+
 ## Controlled visual playtests
 
 The visual harness boots the real game plugins at a fixed timestep and captures deterministic user-facing frames:

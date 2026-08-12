@@ -18,15 +18,20 @@ pub(super) fn reconcile_spectator_camera(
     state: Res<State<AppState>>,
     session: Res<MatchSession>,
     cameras: Query<Entity, With<SpectatorCamera>>,
+    player_cameras: Query<(), With<super::PlayerCamera>>,
     presentation: Res<PresentationSettings>,
     tuning: Res<super::CameraTuning>,
 ) {
-    let should_exist = *state.get() == AppState::Home
+    let should_exist = (*state.get() == AppState::Home
         && session.purpose == MatchPurpose::Attract
-        && session.phase != MatchPhase::Idle;
+        && session.phase != MatchPhase::Idle)
+        || (matches!(*state.get(), AppState::Countdown | AppState::Playing)
+            && session.purpose == MatchPurpose::Playable
+            && session.phase != MatchPhase::Idle
+            && player_cameras.is_empty());
     if should_exist && cameras.is_empty() {
         commands.spawn((
-            Name::new("Home Attract Spectator Camera"),
+            Name::new("Full Field Spectator Camera"),
             SpectatorCamera,
             Camera3d::default(),
             presentation.msaa(),

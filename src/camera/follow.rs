@@ -43,13 +43,15 @@ impl Default for CameraTuning {
         Self {
             // Slightly tighter than the raw design-spec reference framing. The
             // old values made cubes read as UI dots in narrow two-player views.
+            // Keep cubes readable while the edge-aware zoom supplies context
+            // when the player approaches the contour.
             height: 25.4,
             trailing_offset: 10.35,
             look_ahead: 2.5,
             vertical_fov_radians: 48.0_f32.to_radians(),
             follow_half_life: 0.12,
             zoom_half_life: 0.35,
-            maximum_zoom_out: 0.25,
+            maximum_zoom_out: 0.28,
             kill_fov_per_kill_radians: 1.35_f32.to_radians(),
             maximum_kill_fov_bonus_radians: 9.0_f32.to_radians(),
             kill_streak_fov_per_kill_radians: 0.55_f32.to_radians(),

@@ -1,6 +1,7 @@
 mod capture_systems;
 mod lifecycle;
 mod model;
+mod npc_systems;
 mod respawn;
 mod systems;
 

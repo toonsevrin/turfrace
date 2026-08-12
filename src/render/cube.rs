@@ -50,8 +50,8 @@ impl Default for CompetitorVisual {
 }
 
 #[derive(Component)]
-pub(super) struct CompetitorProxy {
-    source: Entity,
+pub(crate) struct CompetitorProxy {
+    pub(crate) source: Entity,
     rendered_heading: Vec2,
     lean_radians: f32,
 }

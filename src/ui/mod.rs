@@ -10,7 +10,10 @@ use interaction::*;
 use screens::*;
 use theme::*;
 
-use bevy::{ecs::hierarchy::ChildSpawnerCommands, input::keyboard::KeyboardInput, prelude::*};
+use bevy::{
+    camera::CameraUpdateSystems, ecs::hierarchy::ChildSpawnerCommands,
+    input::keyboard::KeyboardInput, prelude::*, ui::UiSystems,
+};
 
 use crate::{
     app_state::{AppState, SettingsReturn},
@@ -54,7 +57,7 @@ struct UiCamera;
 struct ScreenRoot;
 
 #[derive(Component)]
-struct DecorativeTrail {
+struct DecorativeRibbon {
     phase: f32,
     speed: f32,
     amplitude: f32,
@@ -295,13 +298,17 @@ impl Plugin for UiPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    reconcile_human_huds,
-                    update_gameplay_hud,
-                    animate_kill_feed,
-                    update_name_tags,
-                ),
+                (reconcile_human_huds, update_gameplay_hud, animate_kill_feed),
+            )
+            .add_systems(
+                PostUpdate,
+                update_name_tags
+                    .after(CameraUpdateSystems)
+                    .before(UiSystems::Prepare),
             );
+        #[cfg(debug_assertions)]
+        app.init_resource::<NpcOverlayState>()
+            .add_systems(Update, update_npc_debug_overlay);
     }
 }
 

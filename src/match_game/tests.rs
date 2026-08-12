@@ -26,6 +26,44 @@ fn simulation_only_runs_in_the_shell_state_that_owns_the_match() {
 }
 
 #[test]
+fn personal_npc_events_reach_controller_memory_without_presentation_drain() {
+    let mut app = App::new();
+    let id = CompetitorId(0);
+    let entry = crate::npc::generate_npc_roster(77, 1, crate::npc::NpcDifficulty::Normal).remove(0);
+    app.insert_resource(crate::npc::NpcEventQueue(vec![(
+        id,
+        crate::npc::NpcEvent::TerritoryStolen {
+            by: CompetitorId(1),
+            area: 30.0,
+        },
+    )]))
+    .add_systems(Update, deliver_npc_events);
+    app.world_mut().spawn((
+        Competitor {
+            id,
+            display_name: "CPU".into(),
+            kind: CompetitorKind::Npc,
+            color_id: 0,
+            pattern_id: 0,
+        },
+        crate::npc::NpcController::from_roster(id, &entry, 0),
+    ));
+    app.update();
+    let controller = app
+        .world_mut()
+        .query::<&crate::npc::NpcController>()
+        .single(app.world())
+        .unwrap();
+    assert!(controller.memory.frustration > 0.0);
+    assert!(
+        app.world()
+            .resource::<crate::npc::NpcEventQueue>()
+            .0
+            .is_empty()
+    );
+}
+
+#[test]
 fn victory_uses_exact_area_threshold_and_allows_remaining_territory() {
     let mut app = App::new();
     let board = BoardGrid::generate(1, 2, &GameConfig::default());
@@ -220,7 +258,9 @@ fn start_match_fills_empty_slots_with_npcs_and_disjoint_seeds() {
     world.insert_resource(BoardGrid::default());
     world.insert_resource(SimulationEvents::default());
     let setup = MatchSetup {
-        seed: 91,
+        field_seed: 91,
+        npc_roster_seed: 92,
+        npc_difficulty: crate::npc::NpcDifficulty::Normal,
         total_competitors: 8,
         humans: Vec::new(),
         replay_same_field: false,
@@ -251,7 +291,9 @@ fn attract_matches_start_six_npcs_without_a_countdown() {
     world.insert_resource(BoardGrid::default());
     world.insert_resource(SimulationEvents::default());
     let setup = MatchSetup {
-        seed: 0xA77A_C7A5_5EED,
+        field_seed: 0xA77A_C7A5_5EED,
+        npc_roster_seed: 0xA77A_C7A5_5EEC,
+        npc_difficulty: crate::npc::NpcDifficulty::Normal,
         total_competitors: 6,
         humans: Vec::new(),
         replay_same_field: false,
@@ -633,7 +675,9 @@ fn respawn_resets_the_next_trail_anchor_to_the_new_seed() {
 fn cleanup_despawns_match_entities_but_preserves_setup() {
     let mut app = App::new();
     let setup = MatchSetup {
-        seed: 11,
+        field_seed: 11,
+        npc_roster_seed: 12,
+        npc_difficulty: crate::npc::NpcDifficulty::Normal,
         total_competitors: 4,
         humans: Vec::new(),
         replay_same_field: true,
@@ -662,6 +706,127 @@ fn cleanup_despawns_match_entities_but_preserves_setup() {
 }
 
 #[test]
+fn npc_capture_plans_expand_meaningfully_without_constant_self_cuts() {
+    let config = GameConfig {
+        fixed_hz: 60.0,
+        cell_size: 1.0,
+        starting_territory_radius: 5.0,
+        spawn_protection_seconds: 0.2,
+        spawn_protection_minimum_seconds: 0.1,
+        respawn_base_seconds: 0.5,
+        ..default()
+    };
+    let mut app = App::new();
+    app.insert_resource(config.clone())
+        .insert_resource(BoardGrid::default())
+        .insert_resource(MatchSession::default())
+        .insert_resource(Rankings::default())
+        .insert_resource(SimulationEvents::default())
+        .insert_resource(PendingDeaths::default())
+        .insert_resource(PendingCaptures::default())
+        .insert_resource(DisplacementCredits::default())
+        .insert_resource(NextState::<AppState>::default())
+        .insert_resource(Time::<Fixed>::from_hz(60.0))
+        .add_systems(
+            Update,
+            (
+                npc_think,
+                move_competitors,
+                extend_trails,
+                detect_trail_collisions,
+                resolve_deaths,
+                detect_closures,
+                resolve_captures,
+                resolve_territory_consequences,
+                advance_respawns,
+                update_rankings,
+                deliver_npc_events,
+            )
+                .chain(),
+        );
+    start_match(
+        app.world_mut(),
+        &MatchSetup {
+            field_seed: 8_101,
+            npc_roster_seed: 8_102,
+            npc_difficulty: crate::npc::NpcDifficulty::Normal,
+            total_competitors: 4,
+            humans: Vec::new(),
+            replay_same_field: false,
+        },
+    );
+    app.world_mut().resource_mut::<MatchSession>().phase = MatchPhase::Running;
+    let mut max_planned_area = 0.0_f32;
+    let mut max_trail_length = 0.0_f32;
+    let mut max_waypoint_index = 0_u8;
+    for tick in 0_usize..1_800 {
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .advance_by(Duration::from_nanos(16_666_667));
+        app.update();
+        if tick.is_multiple_of(15) {
+            let world = app.world_mut();
+            let mut query = world.query::<(&crate::npc::NpcController, Option<&ActiveTrail>)>();
+            for (controller, trail) in query.iter(world) {
+                max_planned_area = max_planned_area.max(controller.memory.planned_capture_area);
+                max_waypoint_index = max_waypoint_index.max(controller.memory.waypoint_index);
+                max_trail_length = max_trail_length.max(trail.map_or(0.0, |trail| trail.length));
+            }
+        }
+    }
+
+    let mut query = app.world_mut().query::<&MatchStatistics>();
+    let statistics: Vec<_> = query.iter(app.world()).copied().collect();
+    let captures: u32 = statistics
+        .iter()
+        .map(|stats| stats.captures_completed)
+        .sum();
+    let largest_capture = statistics
+        .iter()
+        .map(|stats| stats.largest_capture_area)
+        .fold(0.0_f32, f32::max);
+    let self_cuts = app
+        .world()
+        .resource::<SimulationEvents>()
+        .0
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SimulationEvent::Death {
+                    cause: DeathCause::SelfTrail,
+                    ..
+                }
+            )
+        })
+        .count();
+    let loop_fills = app
+        .world()
+        .resource::<SimulationEvents>()
+        .0
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SimulationEvent::Capture {
+                    loop_fill: true,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(captures >= 4, "captures={captures}, self_cuts={self_cuts}");
+    assert!(
+        largest_capture >= 25.0,
+        "captures={captures}, largest_capture={largest_capture}, loop_fills={loop_fills}, self_cuts={self_cuts}, max_planned_area={max_planned_area}, max_trail_length={max_trail_length}, max_waypoint_index={max_waypoint_index}"
+    );
+    assert!(
+        self_cuts <= captures as usize * 2 + 4,
+        "captures={captures}, self_cuts={self_cuts}"
+    );
+}
+
+#[test]
 fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
     let config = GameConfig {
         fixed_hz: 10.0,
@@ -672,7 +837,9 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
         respawn_base_seconds: 0.5,
         ..default()
     };
-    // The accelerated test clock is 10 Hz; production remains 60 Hz.
+    // The accelerated invariant clock is 10 Hz; production and the autonomous
+    // capture-quality test remain at 60 Hz. Large 10 Hz movement sweeps are
+    // intentionally useful here for collision stress, not behavior scoring.
     let mut app = App::new();
     app.insert_resource(config.clone())
         .insert_resource(BoardGrid::default())
@@ -703,7 +870,9 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
     start_match(
         app.world_mut(),
         &MatchSetup {
-            seed: 5_711,
+            field_seed: 5_711,
+            npc_roster_seed: 5_712,
+            npc_difficulty: crate::npc::NpcDifficulty::Normal,
             total_competitors: 4,
             humans: Vec::new(),
             replay_same_field: false,
@@ -773,7 +942,7 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
         )
     };
     let mut expected_bits = vec![0_u16; board_len];
-    let (captures, deaths, kills) = {
+    let (deaths, kills) = {
         let mut query = app.world_mut().query::<(
             &Competitor,
             &LifeState,
@@ -781,11 +950,9 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
             Option<&ActiveTrail>,
         )>();
         let world = app.world();
-        let mut captures = 0;
         let mut deaths = 0;
         let mut kills = 0;
         for (competitor, life, statistics, trail) in query.iter(world) {
-            captures += statistics.captures_completed;
             deaths += statistics.deaths;
             kills += statistics.kills;
             if !life.is_alive() {
@@ -798,13 +965,9 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
                 }
             }
         }
-        (captures, deaths, kills)
+        (deaths, kills)
     };
     assert_eq!(active_trail_bits, expected_bits);
-    assert!(
-        captures > 0,
-        "NPCs should complete captures during the soak"
-    );
     assert!(deaths > 0, "the forced swept cut should record a death");
     assert!(
         kills > 0,

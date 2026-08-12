@@ -416,6 +416,7 @@ impl TerritoryMap {
         }
         board.ownership_revision = board.ownership_revision.wrapping_add(1);
         board.dirty_chunks.fill(true);
+        board.rebuild_owner_frontiers();
     }
 
     fn loop_candidate(&self, territory: &MultiPolygon, trail: &[Vec2]) -> Option<MultiPolygon> {

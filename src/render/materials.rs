@@ -220,10 +220,10 @@ pub(super) fn setup_render_assets(
         accent_materials,
         trail_materials,
         paper_material: papers.add(PaperMaterial {
-            // Warm paper keeps the arena from reading as a blank white debug
-            // canvas and gives the player colors a stable high-contrast field.
-            color: LinearRgba::new(0.91, 0.875, 0.79, 1.0),
-            parameters: Vec4::new(0.035, 0.0, 0.0, 0.0),
+            // Near-white paper gives the field a deliberate surface while the
+            // neutral outside canvas and edge profile provide the depth cue.
+            color: LinearRgba::new(0.965, 0.958, 0.932, 1.0),
+            parameters: Vec4::new(0.16, 0.0, 0.0, 0.0),
         }),
     });
 }

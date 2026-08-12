@@ -10,6 +10,8 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let grid = 1.0 - smoothstep(0.465, 0.492, distance_to_line);
     let variation = 0.5 + 0.5 * sin(mesh.world_position.x * 0.173 + mesh.world_position.z * 0.117);
     let broad = 0.5 + 0.5 * sin(mesh.world_position.x * 0.041 - mesh.world_position.z * 0.037);
-    let shade = material.parameters.x * (grid * 0.08 + variation * 0.025 + broad * 0.018);
+    // A quiet registration grid and broad paper grain make the arena legible
+    // at gameplay scale without turning the surface into a texture.
+    let shade = material.parameters.x * (grid * 0.20 + variation * 0.035 + broad * 0.022);
     return vec4(material.color.rgb * (1.0 - shade), material.color.a);
 }

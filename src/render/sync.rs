@@ -170,7 +170,9 @@ pub(super) fn sync_competitor_snapshots(
         });
         let awareness = if human_slot.is_some() {
             let edge = territory_map.as_ref().map_or(0.0, |map| {
-                (1.0 - map.arena_signed_distance(motion.position) / 3.5).clamp(0.0, 1.0)
+                // Begin revealing arena context before the player reaches the
+                // lip; the edge should be a navigational cue, not a surprise.
+                (1.0 - map.arena_signed_distance(motion.position) / 18.0).clamp(0.0, 1.0)
             });
             edge.max(trail.map_or(0.0, |trail| (trail.length / 28.0).clamp(0.0, 1.0)))
         } else {

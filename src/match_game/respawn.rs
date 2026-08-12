@@ -5,6 +5,7 @@ use crate::{
     config::GameConfig,
     ids::{CompetitorId, MAX_COMPETITORS},
     movement::CompetitorMotion,
+    npc::{NpcEvent, NpcEventQueue},
     territory_map::TerritoryMap,
     trail::ActiveTrail,
 };
@@ -42,6 +43,7 @@ pub(super) fn advance_respawns(
     mut territory_map: ResMut<TerritoryMap>,
     session: Res<MatchSession>,
     mut events: ResMut<SimulationEvents>,
+    mut npc_events: ResMut<NpcEventQueue>,
     mut displacement_credits: ResMut<DisplacementCredits>,
     mut queries: ParamSet<(Query<RespawnSnapshot>, Query<RespawnControl>)>,
     mut living_scratch: Local<Vec<(CompetitorId, Vec2)>>,
@@ -87,7 +89,7 @@ pub(super) fn advance_respawns(
         let position = choose_respawn(
             &board,
             competitor.id,
-            session.seed ^ stats.deaths as u64,
+            session.field_seed ^ stats.deaths as u64,
             &living_scratch,
             &reserved_scratch,
             &config,
@@ -119,6 +121,7 @@ pub(super) fn advance_respawns(
         events.0.push(SimulationEvent::Respawn {
             player: competitor.id,
         });
+        npc_events.0.push((competitor.id, NpcEvent::Spawned));
     }
 }
 

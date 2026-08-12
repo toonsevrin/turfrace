@@ -64,9 +64,13 @@ software rasterization and is not representative of physical GPU throughput.
   for every cell.
 - NPC perception no longer clones every active trail polyline. It builds compact nearest-point
   perceptions only when an NPC think batch is due.
-- NPCs avoid nearby competitors, opportunistically hunt exposed trails by personality, and use
-  stable outward patrol steering. Deterministic appetite, personality-specific hunting, and
-  bounded patrol weave add variation without compromising the authoritative soak invariants.
+- NPC brains consume a compact typed local frame rather than global board queries. Capture planning
+  samples the incrementally maintained owner-frontier mask within perception range, and trail
+  lookup uses only nearby segment buckets.
+- Tactical decisions and four-waypoint capture plans use fixed-size controller memory. Think timers
+  are staggered and sensing/planning scratch buffers retain allocations after warm-up.
+- Match-wide difficulty changes skill distributions and reaction quality only. It does not alter
+  authoritative speed, turning, capture, collision, protection, or visibility rules.
 
 ### Extended playtest pass
 

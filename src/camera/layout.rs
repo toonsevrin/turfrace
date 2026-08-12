@@ -2,7 +2,9 @@ use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
 
 use super::PlayerCamera;
 
-const VIEWPORT_GAP: u32 = 8;
+/// Keep the viewports visually separate without making the divider a gameplay
+/// element. The accent rails identify ownership; the gap itself stays neutral.
+const VIEWPORT_GAP: u32 = 3;
 
 /// A pixel-space camera rectangle. Coordinates use Bevy's top-left viewport origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

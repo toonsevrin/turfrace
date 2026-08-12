@@ -10,7 +10,7 @@ use crate::{
     audio::{AudioCue, PlayAudioCue},
     input::{DeviceDisconnected, HumanController, InputDeviceId, MenuAction, MenuInput},
     match_game::{Competitor, CompetitorKind},
-    npc::{NpcController, NpcDifficulty, deterministic_personality},
+    npc::{NpcController, NpcDifficulty, generate_npc_roster},
     profiles::{LocalProfile, PersistenceStatus, ProfileStore},
 };
 
@@ -35,6 +35,7 @@ pub struct Lobby {
     pub players: Vec<LobbyPlayer>,
     /// Robots selected independently of the joined human count.
     pub npc_count: u8,
+    pub npc_difficulty: NpcDifficulty,
     pub shared_focus_owner: Option<InputDeviceId>,
 }
 
@@ -185,7 +186,9 @@ pub struct HumanSetup {
 
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct MatchSetup {
-    pub seed: u64,
+    pub field_seed: u64,
+    pub npc_roster_seed: u64,
+    pub npc_difficulty: NpcDifficulty,
     pub total_competitors: u8,
     pub humans: Vec<HumanSetup>,
     pub replay_same_field: bool,
@@ -198,6 +201,20 @@ impl MatchSetup {
         let before = self.humans.len();
         self.humans.retain(|human| human.device != device);
         before != self.humans.len()
+    }
+
+    pub fn advance_rematch(&mut self, replay_same_field: bool) {
+        self.replay_same_field = replay_same_field;
+        self.npc_roster_seed = self
+            .npc_roster_seed
+            .wrapping_mul(1442695040888963407)
+            .wrapping_add(0x9e37_79b9_7f4a_7c15);
+        if !replay_same_field {
+            self.field_seed = self
+                .field_seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1);
+        }
     }
 }
 
@@ -223,7 +240,9 @@ impl Default for MatchDisconnectNotice {
 impl Default for MatchSetup {
     fn default() -> Self {
         Self {
-            seed: 1,
+            field_seed: 1,
+            npc_roster_seed: 0x4e50_4352_4f53_5445,
+            npc_difficulty: NpcDifficulty::Normal,
             total_competitors: MIN_COMPETITORS,
             humans: Vec::new(),
             replay_same_field: false,
@@ -237,6 +256,7 @@ pub enum LobbyCommand {
     Leave(InputDeviceId),
     ToggleReady(InputDeviceId),
     ChangeNpcCount(i8),
+    ChangeNpcDifficulty(i8),
     CycleColor(InputDeviceId, i8),
     CycleProfile(InputDeviceId, i8),
     CyclePattern(InputDeviceId, i8),
@@ -250,13 +270,15 @@ pub struct LobbyCommandMessage(pub LobbyCommand);
 pub struct LastLobbySettings {
     pub schema_version: u32,
     pub npc_count: u8,
+    pub npc_difficulty: NpcDifficulty,
 }
 
 impl Default for LastLobbySettings {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             npc_count: 0,
+            npc_difficulty: NpcDifficulty::Normal,
         }
     }
 }
@@ -274,6 +296,8 @@ impl<'de> Deserialize<'de> for LastLobbySettings {
             npc_count: Option<u8>,
             #[serde(default)]
             total_competitors: Option<u8>,
+            #[serde(default)]
+            npc_difficulty: Option<NpcDifficulty>,
         }
 
         let stored = StoredSettings::deserialize(deserializer)?;
@@ -287,8 +311,9 @@ impl<'de> Deserialize<'de> for LastLobbySettings {
         });
         let _ = stored.schema_version;
         Ok(Self {
-            schema_version: 2,
+            schema_version: 3,
             npc_count: npc_count.min(MAX_COMPETITORS - 1),
+            npc_difficulty: stored.npc_difficulty.unwrap_or_default(),
         })
     }
 }
@@ -420,14 +445,16 @@ fn replace_disconnected_with_npc(
         }
         competitor.kind = CompetitorKind::Npc;
         let id = competitor.id;
+        let entry = generate_npc_roster(
+            setup.npc_roster_seed ^ u64::from(id.0),
+            1,
+            setup.npc_difficulty,
+        )
+        .remove(0);
         commands
             .entity(entity)
             .remove::<HumanController>()
-            .insert(NpcController::standard(
-                id,
-                deterministic_personality(setup.seed, id),
-                NpcDifficulty::Normal,
-            ));
+            .insert(NpcController::from_roster(id, &entry, id.index()));
     }
     setup.replace_human_with_npc(device);
     notice.device = None;
@@ -438,6 +465,7 @@ fn replace_disconnected_with_npc(
 
 fn restore_lobby_settings(last: Res<LastLobbySettings>, mut lobby: ResMut<Lobby>) {
     lobby.set_npc_count(i16::from(last.npc_count));
+    lobby.npc_difficulty = last.npc_difficulty;
 }
 
 fn translate_menu_input(
@@ -523,6 +551,11 @@ fn apply_lobby_commands(
                 last.npc_count = lobby.npc_count();
                 persistence.dirty = true;
             }
+            LobbyCommand::ChangeNpcDifficulty(delta) => {
+                lobby.npc_difficulty = lobby.npc_difficulty.cycle(delta);
+                last.npc_difficulty = lobby.npc_difficulty;
+                persistence.dirty = true;
+            }
             LobbyCommand::CycleColor(device, direction) => {
                 if let Some(slot) = lobby.slot_for_device(device) {
                     lobby.cycle_color(slot, direction);
@@ -551,11 +584,16 @@ fn apply_lobby_commands(
 }
 
 fn prepare_match_setup(lobby: &Lobby, setup: &mut MatchSetup) {
-    let previous_seed = setup.seed;
+    let previous_field_seed = setup.field_seed;
+    let previous_roster_seed = setup.npc_roster_seed;
     *setup = MatchSetup {
-        seed: previous_seed
+        field_seed: previous_field_seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1),
+        npc_roster_seed: previous_roster_seed
+            .wrapping_mul(1442695040888963407)
+            .wrapping_add(0x9e37_79b9_7f4a_7c15),
+        npc_difficulty: lobby.npc_difficulty,
         total_competitors: lobby.total_competitors(),
         humans: lobby
             .players
@@ -625,21 +663,47 @@ mod tests {
     fn version_one_lobby_preferences_migrate_to_robot_count() {
         let migrated: LastLobbySettings =
             serde_json::from_str(r#"{"schema_version":1,"total_competitors":8}"#).unwrap();
-        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.schema_version, 3);
         assert_eq!(migrated.npc_count, 6);
+        assert_eq!(migrated.npc_difficulty, NpcDifficulty::Normal);
     }
 
     #[test]
-    fn version_two_lobby_preferences_round_trip() {
+    fn version_three_lobby_preferences_round_trip() {
         let settings = LastLobbySettings {
-            schema_version: 2,
+            schema_version: 3,
             npc_count: 4,
+            npc_difficulty: NpcDifficulty::Hard,
         };
         let encoded = serde_json::to_string(&settings).unwrap();
         assert_eq!(
             serde_json::from_str::<LastLobbySettings>(&encoded).unwrap(),
             settings
         );
+    }
+
+    #[test]
+    fn version_two_preferences_migrate_to_normal_difficulty() {
+        let migrated: LastLobbySettings =
+            serde_json::from_str(r#"{"schema_version":2,"npc_count":4}"#).unwrap();
+        assert_eq!(migrated.schema_version, 3);
+        assert_eq!(migrated.npc_count, 4);
+        assert_eq!(migrated.npc_difficulty, NpcDifficulty::Normal);
+    }
+
+    #[test]
+    fn replay_field_only_preserves_the_field_seed() {
+        let mut setup = MatchSetup::default();
+        let field = setup.field_seed;
+        let roster = setup.npc_roster_seed;
+        setup.advance_rematch(true);
+        assert_eq!(setup.field_seed, field);
+        assert_ne!(setup.npc_roster_seed, roster);
+
+        let roster = setup.npc_roster_seed;
+        setup.advance_rematch(false);
+        assert_ne!(setup.field_seed, field);
+        assert_ne!(setup.npc_roster_seed, roster);
     }
 
     #[test]

@@ -30,7 +30,11 @@ enum Scenario {
     Lobby,
     LobbyEmpty,
     LobbyRobots,
+    LobbyEasy,
+    LobbyNormal,
+    LobbyHard,
     Match,
+    NpcMatch,
     Capture,
     Countdown,
     Respawn,
@@ -49,7 +53,11 @@ impl Scenario {
             "lobby" => Some(Self::Lobby),
             "lobby-empty" => Some(Self::LobbyEmpty),
             "lobby-robots" => Some(Self::LobbyRobots),
+            "lobby-easy" => Some(Self::LobbyEasy),
+            "lobby-normal" => Some(Self::LobbyNormal),
+            "lobby-hard" => Some(Self::LobbyHard),
             "match" => Some(Self::Match),
+            "npc-match" => Some(Self::NpcMatch),
             "capture" => Some(Self::Capture),
             "countdown" => Some(Self::Countdown),
             "respawn" => Some(Self::Respawn),
@@ -64,10 +72,16 @@ impl Scenario {
 
     const fn default_capture_frame(self) -> u32 {
         match self {
-            Self::Leaderboard | Self::Settings | Self::LobbyEmpty | Self::LobbyRobots => 30,
+            Self::Leaderboard
+            | Self::Settings
+            | Self::LobbyEmpty
+            | Self::LobbyRobots
+            | Self::LobbyEasy
+            | Self::LobbyNormal
+            | Self::LobbyHard => 30,
             Self::Home => 180,
             Self::Lobby | Self::Results | Self::GameOver => 45,
-            Self::Match | Self::Capture => 360,
+            Self::Match | Self::NpcMatch | Self::Capture => 360,
             Self::Countdown => 1,
             Self::Respawn | Self::Pause | Self::Disconnect => 240,
         }
@@ -168,7 +182,7 @@ fn arguments() -> (Scenario, PathBuf, u32, u32, u32) {
             }
             "--help" | "-h" => {
                 println!(
-                    "usage: visual_playtest [--scenario home|leaderboard|lobby|lobby-empty|match|capture|countdown|respawn|pause|disconnect|game-over|results|settings] \
+                    "usage: visual_playtest [--scenario home|leaderboard|lobby|lobby-empty|lobby-robots|lobby-easy|lobby-normal|lobby-hard|match|npc-match|capture|countdown|respawn|pause|disconnect|game-over|results|settings] \
                      [--output PATH.png] [--frames N | --seconds N] \
                      [--width PX] [--height PX]"
                 );
@@ -290,6 +304,16 @@ fn configure_scenario(world: &mut World) {
             world.resource_mut::<LastLobbySettings>().npc_count = 10;
             world.resource_mut::<Lobby>().npc_count = 10;
         }
+        Scenario::LobbyEasy => {
+            configure_difficulty_lobby(world, turfrace::npc::NpcDifficulty::Easy)
+        }
+        Scenario::LobbyNormal => {
+            configure_difficulty_lobby(world, turfrace::npc::NpcDifficulty::Normal)
+        }
+        Scenario::LobbyHard => {
+            configure_difficulty_lobby(world, turfrace::npc::NpcDifficulty::Hard)
+        }
+        Scenario::NpcMatch => configure_npc_match(world),
         Scenario::Match
         | Scenario::Capture
         | Scenario::Countdown
@@ -300,6 +324,15 @@ fn configure_scenario(world: &mut World) {
         Scenario::Results => configure_results(world),
         Scenario::Settings => configure_profiles_screen(world, AppState::Settings),
     }
+}
+
+fn configure_difficulty_lobby(world: &mut World, difficulty: turfrace::npc::NpcDifficulty) {
+    configure_lobby(world);
+    world.resource_mut::<Lobby>().npc_count = 6;
+    world.resource_mut::<Lobby>().npc_difficulty = difficulty;
+    let mut last = world.resource_mut::<LastLobbySettings>();
+    last.npc_count = 6;
+    last.npc_difficulty = difficulty;
 }
 
 fn configure_profiles_screen(world: &mut World, state: AppState) {
@@ -345,7 +378,9 @@ fn configure_lobby(world: &mut World) {
 
 fn configure_match(world: &mut World) {
     let setup = MatchSetup {
-        seed: 0x5eed_cafe,
+        field_seed: 0x5eed_cafe,
+        npc_roster_seed: 0x5eed_beef,
+        npc_difficulty: turfrace::npc::NpcDifficulty::Normal,
         total_competitors: 8,
         humans: vec![
             HumanSetup {
@@ -374,6 +409,21 @@ fn configure_match(world: &mut World) {
     world
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Countdown);
+}
+
+fn configure_npc_match(world: &mut World) {
+    let setup = MatchSetup {
+        field_seed: 0x5eed_cafe,
+        npc_roster_seed: 0x5eed_beef,
+        npc_difficulty: turfrace::npc::NpcDifficulty::Normal,
+        total_competitors: 8,
+        humans: Vec::new(),
+        replay_same_field: false,
+    };
+    *world.resource_mut::<MatchSetup>() = setup;
+    world
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::MatchLoading);
 }
 
 fn configure_results(world: &mut World) {
@@ -547,7 +597,10 @@ fn scenario_is_visible(world: &mut World) -> bool {
         Scenario::Lobby => state == AppState::Lobby,
         Scenario::LobbyEmpty => state == AppState::Lobby,
         Scenario::LobbyRobots => state == AppState::Lobby,
-        Scenario::Match => state == AppState::Playing,
+        Scenario::LobbyEasy | Scenario::LobbyNormal | Scenario::LobbyHard => {
+            state == AppState::Lobby
+        }
+        Scenario::Match | Scenario::NpcMatch => state == AppState::Playing,
         Scenario::Capture => state == AppState::Playing,
         Scenario::Countdown => {
             state == AppState::Countdown

@@ -100,32 +100,37 @@ pub(super) fn panel_node(width: Val) -> Node {
 }
 
 pub(super) fn spawn_background(parent: &mut ChildSpawnerCommands) {
-    // Soft moving turf marks give every screen the same visual vocabulary as
-    // play without placing the menu on a rectangular panel.
-    for (index, (left, top, size, color)) in [
+    // Menu decoration is made from the same language as the arena: cropped
+    // paper contours and quiet ribbons. Large floating circles read as generic
+    // placeholders and have no relationship to the game.
+    for (index, (left, top, width, rotation, color)) in [
         (
-            percent(8),
-            percent(13),
-            150.0,
-            Color::srgba(0.12, 0.38, 0.92, 0.08),
-        ),
-        (
-            percent(82),
+            percent(7),
             percent(18),
-            96.0,
-            Color::srgba(1.0, 0.28, 0.12, 0.10),
+            210.0,
+            -0.14,
+            Color::srgba(0.12, 0.38, 0.92, 0.16),
         ),
         (
-            percent(12),
+            percent(77),
+            percent(24),
+            150.0,
+            0.18,
+            Color::srgba(1.0, 0.28, 0.12, 0.15),
+        ),
+        (
+            percent(10),
+            percent(75),
+            125.0,
+            0.09,
+            Color::srgba(0.10, 0.68, 0.34, 0.14),
+        ),
+        (
             percent(72),
-            78.0,
-            Color::srgba(0.10, 0.68, 0.34, 0.09),
-        ),
-        (
-            percent(76),
-            percent(70),
-            180.0,
-            Color::srgba(0.64, 0.18, 0.90, 0.07),
+            percent(74),
+            235.0,
+            -0.10,
+            Color::srgba(0.64, 0.18, 0.90, 0.12),
         ),
     ]
     .into_iter()
@@ -136,17 +141,16 @@ pub(super) fn spawn_background(parent: &mut ChildSpawnerCommands) {
                 position_type: PositionType::Absolute,
                 left,
                 top,
-                width: px(size),
-                height: px(size),
-                border_radius: BorderRadius::all(percent(50)),
+                width: px(width),
+                height: px(4),
                 ..default()
             },
             BackgroundColor(color),
-            UiTransform::default(),
-            DecorativeTrail {
+            UiTransform::from_rotation(Rot2::radians(rotation)),
+            DecorativeRibbon {
                 phase: index as f32 * 1.7,
                 speed: 0.18 + index as f32 * 0.025,
-                amplitude: 14.0 + index as f32 * 2.0,
+                amplitude: 10.0 + index as f32 * 2.0,
             },
         ));
     }
@@ -158,57 +162,26 @@ pub(super) fn spawn_title(
     text: &str,
     size: f32,
 ) {
-    parent
-        .spawn((Node {
+    parent.spawn((
+        Text::new(text),
+        TextFont {
+            font: theme.display_font.clone(),
+            font_size: FontSize::Px(size),
+            ..default()
+        },
+        TextColor(CREAM),
+        TextShadow {
+            offset: Vec2::new(3.0, 3.0),
+            color: INK.with_alpha(0.96),
+        },
+        TextLayout::justify(Justify::Center),
+        Node {
             width: percent(100),
             min_height: px(size * 1.1),
             margin: UiRect::bottom(px(4)),
             ..default()
-        },))
-        .with_children(|title| {
-            // A black keyline keeps the pale face legible on paper; the
-            // down-right layers give it a small printed, dimensional edge.
-            for offset in [
-                Vec2::new(-2.0, 0.0),
-                Vec2::new(2.0, 0.0),
-                Vec2::new(0.0, -2.0),
-                Vec2::new(0.0, 2.0),
-                Vec2::new(2.0, 2.0),
-                Vec2::new(4.0, 4.0),
-            ] {
-                title.spawn((
-                    Text::new(text),
-                    TextFont {
-                        font: theme.display_font.clone(),
-                        font_size: FontSize::Px(size),
-                        ..default()
-                    },
-                    TextColor(INK),
-                    TextLayout::justify(Justify::Center),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        width: percent(100),
-                        left: px(offset.x),
-                        top: px(offset.y),
-                        ..default()
-                    },
-                ));
-            }
-            title.spawn((
-                Text::new(text),
-                TextFont {
-                    font: theme.display_font.clone(),
-                    font_size: FontSize::Px(size),
-                    ..default()
-                },
-                TextColor(CREAM),
-                TextLayout::justify(Justify::Center),
-                Node {
-                    width: percent(100),
-                    ..default()
-                },
-            ));
-        });
+        },
+    ));
 }
 
 pub(super) fn spawn_subtitle(
@@ -409,55 +382,24 @@ fn spawn_perspective_button_label(
     label: &str,
     font_size: f32,
 ) {
-    parent
-        .spawn((Node {
+    parent.spawn((
+        Text::new(label),
+        TextFont {
+            font: theme.display_font.clone(),
+            font_size: FontSize::Px(font_size),
+            ..default()
+        },
+        TextColor(CREAM),
+        TextShadow {
+            offset: Vec2::new(3.0, 3.0),
+            color: INK.with_alpha(0.96),
+        },
+        IntegratedButtonLabel { idle: CREAM },
+        TextLayout::justify(Justify::Left),
+        Node {
             width: percent(100),
             height: px(font_size * 1.25),
-            position_type: PositionType::Relative,
             ..default()
-        },))
-        .with_children(|stack| {
-            for offset in [
-                Vec2::new(-2.0, 0.0),
-                Vec2::new(2.0, 0.0),
-                Vec2::new(0.0, -2.0),
-                Vec2::new(0.0, 2.0),
-                Vec2::new(2.0, 2.0),
-                Vec2::new(3.0, 3.0),
-            ] {
-                stack.spawn((
-                    Text::new(label),
-                    TextFont {
-                        font: theme.display_font.clone(),
-                        font_size: FontSize::Px(font_size),
-                        ..default()
-                    },
-                    TextColor(INK),
-                    TextLayout::justify(Justify::Left),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        width: percent(100),
-                        left: px(offset.x),
-                        top: px(offset.y),
-                        ..default()
-                    },
-                ));
-            }
-            stack.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.display_font.clone(),
-                    font_size: FontSize::Px(font_size),
-                    ..default()
-                },
-                TextColor(CREAM),
-                IntegratedButtonLabel { idle: CREAM },
-                TextLayout::justify(Justify::Left),
-                Node {
-                    position_type: PositionType::Absolute,
-                    width: percent(100),
-                    ..default()
-                },
-            ));
-        });
+        },
+    ));
 }

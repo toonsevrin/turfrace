@@ -35,7 +35,7 @@ pub(super) struct UiActionResources<'w> {
 pub(super) fn animate_background(
     time: Res<Time>,
     settings: Res<UserSettings>,
-    mut trails: Query<(&DecorativeTrail, &mut UiTransform)>,
+    mut trails: Query<(&DecorativeRibbon, &mut UiTransform)>,
     mut ready_prompts: Query<(&ReadyPrompt, &mut BackgroundColor)>,
 ) {
     if settings.reduced_motion {
@@ -417,10 +417,7 @@ pub(super) fn dispatch_ui_actions(
                 }
             }
             UiAction::Rematch { same_field } => {
-                setup.replay_same_field = *same_field;
-                if !same_field {
-                    setup.seed = setup.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                }
+                setup.advance_rematch(*same_field);
                 next.set(AppState::MatchLoading);
             }
         }

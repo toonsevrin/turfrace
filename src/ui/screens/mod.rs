@@ -21,7 +21,7 @@ fn spawn_overlay_caption(
             font_size: FontSize::Px(14.0),
             ..default()
         },
-        TextColor(CREAM.with_alpha(0.88)),
+        TextColor(INK.with_alpha(0.72)),
         TextLayout::justify(Justify::Center),
     ));
 }
@@ -141,7 +141,8 @@ pub(super) fn spawn_settings(
         .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
         .with_children(|root| {
             spawn_background(root);
-            let mut settings_panel = panel_node(percent(78));
+            let mut settings_panel = panel_node(percent(88));
+            settings_panel.max_width = px(1040);
             settings_panel.max_height = percent(96);
             settings_panel.padding = UiRect::axes(px(28), px(6));
             settings_panel.row_gap = px(6);
@@ -162,7 +163,8 @@ pub(super) fn spawn_settings(
                             MinTrackSizingFunction::Auto,
                             MaxTrackSizingFunction::Fraction(1.0),
                         ),
-                        column_gap: px(30),
+                        column_gap: px(42),
+                        row_gap: px(12),
                         align_items: AlignItems::Start,
                         ..default()
                     },))
@@ -175,8 +177,11 @@ pub(super) fn spawn_settings(
                                 border: UiRect::top(px(2)),
                                 ..default()
                             },
-                            BackgroundColor(INK.with_alpha(0.025)),
-                            BorderColor::all(palette_color(0).with_alpha(0.45)),
+                            BackgroundColor(PAPER.with_alpha(0.32)),
+                            BorderColor {
+                                top: palette_color(0).with_alpha(0.55),
+                                ..BorderColor::default()
+                            },
                         ))
                         .with_children(|left| {
                             settings_section(left, &theme, "AUDIO");
@@ -253,8 +258,11 @@ pub(super) fn spawn_settings(
                                 border: UiRect::top(px(2)),
                                 ..default()
                             },
-                            BackgroundColor(INK.with_alpha(0.025)),
-                            BorderColor::all(palette_color(2).with_alpha(0.45)),
+                            BackgroundColor(PAPER.with_alpha(0.32)),
+                            BorderColor {
+                                top: palette_color(2).with_alpha(0.55),
+                                ..BorderColor::default()
+                            },
                         ))
                         .with_children(|right| {
                             settings_section(right, &theme, "CONTROL");
@@ -408,18 +416,23 @@ pub(super) fn spawn_pause(
         .spawn((
             ScreenRoot,
             screen_node(),
-            BackgroundColor(Color::srgba(0.04, 0.055, 0.08, 0.72)),
+            // Preserve the live field through the pause state. The card below
+            // supplies hierarchy without turning the arena into gray mud.
+            BackgroundColor(Color::srgba(0.04, 0.055, 0.08, 0.32)),
         ))
         .with_children(|root| {
             let mut pause_panel = panel_node(percent(90));
-            pause_panel.max_width = px(530);
+            pause_panel.max_width = px(480);
+            pause_panel.padding = UiRect::axes(px(30), px(20));
+            pause_panel.row_gap = px(8);
             root.spawn((
                 pause_panel,
-                BackgroundColor(Color::NONE),
-                BorderColor::all(INK),
+                BackgroundColor(PAPER.with_alpha(0.92)),
+                BorderColor::all(INK.with_alpha(0.28)),
             ))
             .with_children(|panel| {
-                spawn_title(panel, &theme, "PAUSED", 58.0);
+                spawn_overlay_caption(panel, &theme, "MATCH PAUSED");
+                spawn_title(panel, &theme, "PAUSED", 44.0);
                 if disconnect.device.is_some() {
                     spawn_overlay_caption(
                         panel,
@@ -507,7 +520,8 @@ pub(super) fn spawn_results(
         .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
         .with_children(|root| {
             spawn_background(root);
-            let mut results_panel = panel_node(percent(86));
+            let mut results_panel = panel_node(percent(92));
+            results_panel.max_width = px(1040);
             results_panel.max_height = percent(94);
             // Keep the table airy enough to scan while retaining all eight
             // competitors and four actions on the 600px stress viewport.
@@ -548,11 +562,11 @@ pub(super) fn spawn_results(
                         ..default()
                     },))
                     .with_children(|header| {
-                        header.spawn(result_column("#", px(48), false, &theme));
+                        header.spawn(result_column("#", px(42), false, &theme));
                         header.spawn(result_column("PLAYER", px(1), true, &theme));
                         header.spawn(result_column("TURF", px(58), false, &theme));
                         header.spawn(result_column("K/D", px(48), false, &theme));
-                        header.spawn(result_column("BEST LOOP", px(72), false, &theme));
+                        header.spawn(result_column("BEST CAP", px(72), false, &theme));
                         header.spawn(result_column("CELLS", px(58), false, &theme));
                         header.spawn(result_column("TRAIL", px(58), false, &theme));
                     });
@@ -580,7 +594,7 @@ pub(super) fn spawn_results(
                         .with_children(|line| {
                             line.spawn((
                                 Node {
-                                    width: px(8),
+                                    width: px(5),
                                     height: px(20),
                                     margin: UiRect::right(px(3)),
                                     border_radius: BorderRadius::all(px(0)),
@@ -597,7 +611,7 @@ pub(super) fn spawn_results(
                                 },
                                 TextColor(palette_color(row.color_id)),
                                 Node {
-                                    width: px(48),
+                                    width: px(42),
                                     ..default()
                                 },
                             ));
@@ -616,7 +630,7 @@ pub(super) fn spawn_results(
                             ));
                             for (value, width) in [
                                 (format!("{:.0}%", row.peak_percent), 58),
-                                (format!("{}/{}", row.kills, row.deaths), 58),
+                                (format!("{}/{}", row.kills, row.deaths), 48),
                                 (format!("{:.0}%", row.largest_capture_percent), 72),
                                 (
                                     format!(
