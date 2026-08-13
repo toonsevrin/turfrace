@@ -26,7 +26,7 @@ gzip -9 -c "$wasm" >"$wasm.gz"
 printf 'WASM raw    %12d bytes\n' "$raw_bytes"
 printf 'WASM gzip   %12d bytes\n' "$(stat -c '%s' "$wasm.gz")"
 if command -v brotli >/dev/null 2>&1; then
-    brotli --force --quality 11 "$wasm"
+    brotli --force --quality=11 "$wasm"
     printf 'WASM brotli %12d bytes\n' "$(stat -c '%s' "$wasm.br")"
 else
     printf 'WASM brotli unavailable (install brotli for deployment compression)\n'
