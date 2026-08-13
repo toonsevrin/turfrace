@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Bevy system dependencies
-        run: sudo apt-get update && sudo apt-get install -y g++ pkg-config libx11-dev libasound2-dev libudev-dev libxkbcommon-x11-0
+        run: sudo apt-get update && sudo apt-get install -y g++ pkg-config libx11-dev libwayland-dev libasound2-dev libudev-dev libxkbcommon-x11-0
       - name: Install Rust components
         run: rustup component add rustfmt clippy
       - name: Run repository checks
