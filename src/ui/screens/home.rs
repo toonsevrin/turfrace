@@ -15,7 +15,7 @@ pub(in crate::ui) fn spawn_home(mut commands: Commands, theme: Res<UiTheme>) {
                 BorderColor::all(Color::NONE),
             ))
             .with_children(|panel| {
-                spawn_title(panel, &theme, "TURFRACE", 50.0);
+                spawn_title(panel, &theme, "TURFRACE", 64.0);
                 spawn_button(panel, &theme, "PLAY", UiAction::State(AppState::Lobby), 0);
                 spawn_button(
                     panel,

@@ -353,7 +353,7 @@ fn configure_lobby(world: &mut World) {
     world.resource_mut::<Lobby>().players = vec![
         LobbyPlayer {
             device: InputDeviceId::Mouse,
-            profile_id: None,
+            profile: turfrace::lobby::LobbyProfileSelection::Temporary,
             display_name: "MOUSE ACE".into(),
             color_id: 0,
             pattern_id: 2,
@@ -362,7 +362,7 @@ fn configure_lobby(world: &mut World) {
         },
         LobbyPlayer {
             device: InputDeviceId::KeyboardPrimary,
-            profile_id: None,
+            profile: turfrace::lobby::LobbyProfileSelection::Temporary,
             display_name: "KEY KID".into(),
             color_id: 4,
             pattern_id: 7,

@@ -94,16 +94,7 @@ pub(super) fn update_npc_debug_overlay(
     ));
 }
 
-type CompetitorHudQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Competitor,
-        &'static LifeState,
-        &'static SpawnProtection,
-        Option<&'static ActiveTrail>,
-    ),
->;
+type CompetitorHudQuery<'w, 's> = Query<'w, 's, (&'static Competitor, &'static LifeState)>;
 
 #[derive(SystemParam)]
 pub(super) struct HudData<'w, 's> {
@@ -144,6 +135,10 @@ pub(super) struct ResultsResources<'w> {
     persisted: ResMut<'w, PersistedMatchSeed>,
     persistence: ResMut<'w, PersistenceStatus>,
 }
+pub(super) fn gameplay_hud_is_missing(existing: Query<(), With<GameplayHudRoot>>) -> bool {
+    existing.is_empty()
+}
+
 pub(super) fn spawn_gameplay_hud(
     mut commands: Commands,
     theme: Res<UiTheme>,
@@ -586,19 +581,10 @@ pub(super) fn update_gameplay_hud(
         } else if kill_feed.is_some() {
             update_text(&mut text, &elimination_text);
         } else if let Some(marker) = respawn {
-            let Ok((_, life, protection, _)) = competitors.get(marker.0) else {
+            let Ok((_, life)) = competitors.get(marker.0) else {
                 continue;
             };
-            respawn_text.clear();
-            if !life.is_alive() {
-                let _ = write!(
-                    respawn_text,
-                    "RESPAWN\n{:.1}",
-                    life.respawn_remaining.max(0.0)
-                );
-            } else if protection.active() {
-                let _ = write!(respawn_text, "SHIELD\n{:.1}", protection.remaining);
-            }
+            write_respawn_status(&mut respawn_text, *life);
             update_text(&mut text, &respawn_text);
             if let Some(mut text_color) = text_color {
                 set_text_color_if_changed(
@@ -683,6 +669,13 @@ fn kill_feed_transform(age: f32, reduced_motion: bool) -> (f32, f32) {
     let eased = 1.0 - (1.0 - progress).powi(3);
     let bounce = (progress * std::f32::consts::PI).sin() * (1.0 - progress) * 0.09;
     (30.0 * (1.0 - eased), 0.94 + eased * 0.06 + bounce)
+}
+
+fn write_respawn_status(target: &mut String, life: LifeState) {
+    target.clear();
+    if !life.is_alive() {
+        let _ = write!(target, "RESPAWN\n{:.1}", life.respawn_remaining.max(0.0));
+    }
 }
 
 pub(super) fn write_ranking_label(target: &mut String, rank: u8, name: &str, percent: f32) {
@@ -845,8 +838,29 @@ pub(super) fn collect_match_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{kill_feed_transform, name_tag_ui_position};
+    use super::{kill_feed_transform, name_tag_ui_position, write_respawn_status};
+    use crate::match_game::{LifeState, LifeStatus};
     use bevy::prelude::Vec2;
+
+    #[test]
+    fn living_players_have_no_spawn_protection_countdown_text() {
+        let mut text = "stale shield text".to_owned();
+        write_respawn_status(&mut text, LifeState::alive());
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn dead_players_keep_the_respawn_countdown() {
+        let mut text = String::new();
+        write_respawn_status(
+            &mut text,
+            LifeState {
+                status: LifeStatus::Respawning,
+                respawn_remaining: 2.34,
+            },
+        );
+        assert_eq!(text, "RESPAWN\n2.3");
+    }
 
     #[test]
     fn projected_name_tag_coordinates_enter_scaled_ui_space() {

@@ -1,4 +1,4 @@
-//! Shared visual language: Bungee typography, tight outlined controls, and motion.
+//! Shared visual language: bright arcade typography, square controls, and motion.
 
 use super::*;
 use bevy::{core_pipeline::Core2d, render::camera::CameraRenderGraph, window::PrimaryWindow};
@@ -38,9 +38,11 @@ pub(super) fn setup_ui(
     presentation: Res<crate::render::PresentationSettings>,
 ) {
     let display_font = FontSource::Handle(assets.load("fonts/Bungee-Regular.ttf"));
-    // Keep the expressive display face for titles. The built-in mono face is
-    // intentionally used for body copy: it is available in native and WASM
-    // builds and keeps stats, controls, and player names aligned.
+    // Return to Turfrace's original Bungee face: its squared counters and
+    // chamfered corners provide the desired block-game influence while its
+    // varied arcade geometry keeps it from resembling a Minecraft clone.
+    // The built-in mono face remains
+    // for compact values and player names where alignment matters.
     let body_font = FontSource::default();
     commands.insert_resource(UiTheme {
         display_font,
@@ -162,6 +164,87 @@ pub(super) fn spawn_title(
     text: &str,
     size: f32,
 ) {
+    // TextShadow can suggest depth, but it cannot outline the upper edges of
+    // glyphs. Build headings as a tiny stack of crisp text faces instead: a
+    // diagonal charcoal extrusion, a complete ink keyline, a warm bevel, and
+    // the paper-white face. This remains ordinary WebGL2-safe UI text and
+    // scales cleanly with Bevy's responsive UiScale.
+    let depth = heading_depth(size);
+    parent
+        .spawn((Node {
+            width: percent(100),
+            height: px(size * 1.34),
+            min_height: px(size * 1.34),
+            margin: UiRect::bottom(px(4)),
+            position_type: PositionType::Relative,
+            ..default()
+        },))
+        .with_children(|heading| {
+            for step in (1..=depth).rev() {
+                let progress = step as f32 / depth as f32;
+                spawn_title_layer(
+                    heading,
+                    theme,
+                    text,
+                    size,
+                    Vec2::new(((step + 2) / 3) as f32, step as f32),
+                    Color::srgb(
+                        0.025 + progress * 0.018,
+                        0.032 + progress * 0.022,
+                        0.045 + progress * 0.028,
+                    ),
+                );
+            }
+            let outline = heading_outline(size);
+            for direction in [
+                Vec2::new(-1.0, -1.0),
+                Vec2::new(0.0, -1.0),
+                Vec2::new(1.0, -1.0),
+                Vec2::new(-1.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(-1.0, 1.0),
+                Vec2::new(0.0, 1.0),
+                Vec2::new(1.0, 1.0),
+            ] {
+                spawn_title_layer(heading, theme, text, size, direction * outline, INK);
+            }
+            // A warm highlight below the keyline leaves the top edge crisp
+            // while making the face feel inset into the dark arcade marquee.
+            spawn_title_layer(
+                heading,
+                theme,
+                text,
+                size,
+                Vec2::new(0.0, 1.0),
+                Color::srgb_u8(216, 209, 192),
+            );
+            spawn_title_layer(
+                heading,
+                theme,
+                text,
+                size,
+                Vec2::ZERO,
+                Color::srgb_u8(250, 247, 237),
+            );
+        });
+}
+
+pub(super) fn heading_depth(size: f32) -> i32 {
+    (size * 0.16).round().clamp(5.0, 11.0) as i32
+}
+
+pub(super) fn heading_outline(size: f32) -> f32 {
+    (size * 0.025).round().clamp(1.0, 2.0)
+}
+
+fn spawn_title_layer(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    text: &str,
+    size: f32,
+    offset: Vec2,
+    color: Color,
+) {
     parent.spawn((
         Text::new(text),
         TextFont {
@@ -169,18 +252,16 @@ pub(super) fn spawn_title(
             font_size: FontSize::Px(size),
             ..default()
         },
-        TextColor(CREAM),
-        TextShadow {
-            offset: Vec2::new(3.0, 3.0),
-            color: INK.with_alpha(0.96),
-        },
+        TextColor(color),
         TextLayout::justify(Justify::Center),
         Node {
+            position_type: PositionType::Absolute,
+            left: px(offset.x),
+            top: px(offset.y),
             width: percent(100),
-            min_height: px(size * 1.1),
-            margin: UiRect::bottom(px(4)),
             ..default()
         },
+        Pickable::IGNORE,
     ));
 }
 
@@ -345,9 +426,9 @@ fn spawn_button_sized(
                 min_width: px(58),
                 min_height: px(metrics.min_height),
                 padding: UiRect::axes(px(metrics.horizontal_padding), px(7)),
-                // Reserve a stable three-pixel color key so focus never
-                // changes the control's measure or introduces a panel.
-                border: UiRect::left(px(3)),
+                // Focus is expressed by color and motion, never a detached
+                // rule beside the option.
+                border: UiRect::all(px(0)),
                 align_self: metrics.align_self,
                 justify_content,
                 align_items: AlignItems::Center,
@@ -365,22 +446,108 @@ fn spawn_button_sized(
                 button.spawn((
                     Text::new(label),
                     TextFont {
-                        font: theme.body_font.clone(),
+                        font: theme.display_font.clone(),
                         font_size: FontSize::Px(metrics.font_size),
                         ..default()
                     },
                     TextColor(INK),
-                    IntegratedButtonLabel { idle: INK },
+                    IntegratedButtonLabel {
+                        idle: INK,
+                        focused: CORAL,
+                    },
                 ));
             }
         });
 }
 
-fn spawn_perspective_button_label(
+pub(super) fn spawn_perspective_button_label(
     parent: &mut ChildSpawnerCommands,
     theme: &UiTheme,
     label: &str,
     font_size: f32,
+) {
+    // Primary menu actions use the title's keyline/bevel vocabulary at a
+    // shallower depth. Unlike the former white face plus shadow, the complete
+    // outline remains readable over both paper and moving territory.
+    parent
+        .spawn((Node {
+            position_type: PositionType::Relative,
+            width: percent(100),
+            height: px(font_size * 1.38),
+            ..default()
+        },))
+        .with_children(|stack| {
+            let depth = button_label_depth(font_size);
+            for step in (1..=depth).rev() {
+                spawn_button_label_layer(
+                    stack,
+                    theme,
+                    label,
+                    font_size,
+                    Vec2::new(((step + 1) / 2) as f32, step as f32),
+                    INK,
+                    INK,
+                );
+            }
+            let outline = button_label_outline(font_size);
+            for direction in [
+                Vec2::new(-1.0, -1.0),
+                Vec2::new(0.0, -1.0),
+                Vec2::new(1.0, -1.0),
+                Vec2::new(-1.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(-1.0, 1.0),
+                Vec2::new(0.0, 1.0),
+                Vec2::new(1.0, 1.0),
+            ] {
+                spawn_button_label_layer(
+                    stack,
+                    theme,
+                    label,
+                    font_size,
+                    direction * outline,
+                    INK,
+                    INK,
+                );
+            }
+            spawn_button_label_layer(
+                stack,
+                theme,
+                label,
+                font_size,
+                Vec2::new(0.0, 1.0),
+                Color::srgb_u8(194, 187, 171),
+                CORAL,
+            );
+            spawn_button_label_layer(
+                stack,
+                theme,
+                label,
+                font_size,
+                Vec2::ZERO,
+                Color::srgb_u8(250, 247, 237),
+                CORAL,
+            );
+        });
+}
+
+pub(super) fn button_label_depth(font_size: f32) -> i32 {
+    (font_size * 0.16).round().clamp(3.0, 5.0) as i32
+}
+
+pub(super) fn button_label_outline(font_size: f32) -> f32 {
+    (font_size * 0.055).round().clamp(1.0, 2.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_button_label_layer(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    label: &str,
+    font_size: f32,
+    offset: Vec2,
+    idle: Color,
+    focused: Color,
 ) {
     parent.spawn((
         Text::new(label),
@@ -389,17 +556,16 @@ fn spawn_perspective_button_label(
             font_size: FontSize::Px(font_size),
             ..default()
         },
-        TextColor(CREAM),
-        TextShadow {
-            offset: Vec2::new(3.0, 3.0),
-            color: INK.with_alpha(0.96),
-        },
-        IntegratedButtonLabel { idle: CREAM },
+        TextColor(idle),
+        IntegratedButtonLabel { idle, focused },
         TextLayout::justify(Justify::Left),
         Node {
+            position_type: PositionType::Absolute,
+            left: px(offset.x),
+            top: px(offset.y),
             width: percent(100),
-            height: px(font_size * 1.25),
             ..default()
         },
+        Pickable::IGNORE,
     ));
 }

@@ -24,14 +24,13 @@ use crate::{
     lobby::{Lobby, LobbyCommand, LobbyCommandMessage, MatchDisconnectNotice, MatchSetup},
     match_game::{
         Competitor, CompetitorKind, DeathCause, EliminationFeed, LifeState, MatchSession,
-        MatchStatistics as SimulationMatchStatistics, Rankings, SpawnProtection,
+        MatchStatistics as SimulationMatchStatistics, Rankings,
     },
     palette::palette_color,
     profiles::{
         GraphicsQualitySetting, MatchStatistics as ProfileMatchStatistics, PersistenceStatus,
         ProfileStore, UserSettings, apply_match_statistics, sanitize_profile_name,
     },
-    trail::ActiveTrail,
 };
 
 // The shell is an ink-and-paper control surface. Competitor colours are used
@@ -42,7 +41,6 @@ const PAPER: Color = Color::srgb_u8(244, 240, 230);
 const LIME: Color = Color::srgb(0.25, 0.55, 0.06);
 const CORAL: Color = Color::srgb(1.0, 0.39, 0.30);
 const MUTED: Color = Color::srgb(0.24, 0.31, 0.40);
-const CREAM: Color = Color::srgb(0.96, 0.93, 0.85);
 
 #[derive(Resource, Clone)]
 struct UiTheme {
@@ -67,7 +65,31 @@ struct DecorativeRibbon {
 struct ReadyPrompt {
     color: Color,
     phase: f32,
+    ready: bool,
 }
+
+#[derive(Component)]
+struct LobbyCardVisual {
+    color: Color,
+    phase: f32,
+    ready: bool,
+}
+
+#[derive(Component)]
+struct LobbyJoinBeacon {
+    phase: f32,
+}
+
+#[derive(Component)]
+struct LobbySelectorButton {
+    accent: Color,
+}
+
+#[derive(Component)]
+struct LobbyCountdownOverlay;
+
+#[derive(Component)]
+struct LobbyCountdownText;
 
 #[derive(Component, Clone, Debug)]
 enum UiAction {
@@ -120,6 +142,7 @@ struct IntegratedMenuButton;
 #[derive(Component)]
 struct IntegratedButtonLabel {
     idle: Color,
+    focused: Color,
 }
 
 #[derive(Resource, Default)]
@@ -277,6 +300,10 @@ impl Plugin for UiPlugin {
                 (cleanup_gameplay_hud, spawn_results).chain(),
             )
             .add_systems(OnExit(AppState::Results), cleanup_screen)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                spawn_gameplay_hud.run_if(gameplay_hud_is_missing),
+            )
             .add_systems(OnEnter(AppState::Countdown), spawn_gameplay_hud)
             .add_systems(OnEnter(AppState::Lobby), cleanup_gameplay_hud)
             .add_systems(
@@ -291,6 +318,7 @@ impl Plugin for UiPlugin {
                     pause_input,
                     scroll_lobby.run_if(in_state(AppState::Lobby)),
                     update_lobby_screen.run_if(in_state(AppState::Lobby)),
+                    update_lobby_countdown.run_if(in_state(AppState::Lobby)),
                     refresh_settings_labels.run_if(in_state(AppState::Settings)),
                     edit_profile_name,
                     tick_confirmation,
@@ -331,6 +359,24 @@ mod tests {
         assert_eq!(ui_scale_for_viewport(0.0, 720.0), 1.0);
         assert_eq!(ui_scale_for_viewport(960.0, 600.0), 1.0);
         assert_eq!(ui_scale_for_viewport(800.0, 450.0), 1.0);
+    }
+
+    #[test]
+    fn heading_effect_scales_depth_and_outline_without_runaway_layers() {
+        assert_eq!(heading_depth(28.0), 5);
+        assert_eq!(heading_depth(50.0), 8);
+        assert_eq!(heading_depth(100.0), 11);
+        assert_eq!(heading_outline(20.0), 1.0);
+        assert_eq!(heading_outline(100.0), 2.0);
+    }
+
+    #[test]
+    fn primary_button_effect_stays_crisp_at_menu_sizes() {
+        assert_eq!(button_label_depth(14.0), 3);
+        assert_eq!(button_label_depth(20.0), 3);
+        assert_eq!(button_label_depth(40.0), 5);
+        assert_eq!(button_label_outline(14.0), 1.0);
+        assert_eq!(button_label_outline(40.0), 2.0);
     }
 
     #[test]

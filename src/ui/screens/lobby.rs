@@ -1,41 +1,135 @@
 //! Device registration cards and match-composition controls.
 
 use super::super::*;
-use crate::lobby::{MAX_HUMANS, MIN_COMPETITORS};
+use crate::lobby::MAX_HUMANS;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::window::PrimaryWindow;
 
-fn card_customization_actions(device: InputDeviceId) -> [LobbyCommand; 6] {
+fn card_customization_actions(device: InputDeviceId) -> [LobbyCommand; 4] {
     [
         LobbyCommand::CycleProfile(device, -1),
         LobbyCommand::CycleProfile(device, 1),
         LobbyCommand::CycleColor(device, -1),
         LobbyCommand::CycleColor(device, 1),
-        LobbyCommand::CyclePattern(device, -1),
-        LobbyCommand::CyclePattern(device, 1),
     ]
 }
 
+fn spawn_selector_arrow(
+    parent: &mut ChildSpawnerCommands,
+    theme: &UiTheme,
+    direction: &str,
+    command: LobbyCommand,
+    order: u16,
+    _accent: Color,
+) {
+    // Interactive controls use one deliberate coral focus language. Card
+    // colors identify players without creating pale, glitch-like button fills.
+    let accent = CORAL;
+    parent
+        .spawn((
+            Button,
+            IntegratedMenuButton,
+            LobbySelectorButton { accent },
+            UiAction::Lobby(command),
+            FocusOrder(order),
+            Node {
+                width: px(38),
+                height: px(38),
+                border: UiRect::all(px(1)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(INK.with_alpha(0.22)),
+            UiTransform::default(),
+        ))
+        .with_children(|button| {
+            button.spawn((
+                Text::new(direction),
+                TextFont {
+                    font: theme.display_font.clone(),
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(INK),
+                IntegratedButtonLabel {
+                    idle: INK,
+                    focused: Color::WHITE,
+                },
+            ));
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_icon_stepper(
     parent: &mut ChildSpawnerCommands,
     theme: &UiTheme,
-    center: impl Bundle,
+    label: &str,
+    center: impl FnOnce(&mut ChildSpawnerCommands),
     previous: LobbyCommand,
     next: LobbyCommand,
     order: u16,
+    accent: Color,
 ) {
     parent
         .spawn((Node {
-            display: Display::Flex,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            column_gap: px(5),
+            width: percent(100),
+            min_height: px(if label.is_empty() { 68 } else { 62 }),
+            flex_direction: FlexDirection::Column,
+            justify_content: if label.is_empty() {
+                JustifyContent::Center
+            } else {
+                JustifyContent::FlexStart
+            },
+            row_gap: px(5),
             ..default()
         },))
-        .with_children(|row| {
-            spawn_mini_button(row, theme, "<", UiAction::Lobby(previous), order);
-            row.spawn(center);
-            spawn_mini_button(row, theme, ">", UiAction::Lobby(next), order + 1);
+        .with_children(|group| {
+            if !label.is_empty() {
+                group.spawn((
+                    Text::new(label),
+                    TextFont {
+                        font: theme.body_font.clone(),
+                        font_size: FontSize::Px(10.0),
+                        ..default()
+                    },
+                    TextColor(MUTED),
+                    TextLayout::justify(Justify::Center),
+                    Node {
+                        width: percent(100),
+                        ..default()
+                    },
+                ));
+            }
+            group
+                .spawn((Node {
+                    width: percent(100),
+                    display: Display::Flex,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    column_gap: px(8),
+                    ..default()
+                },))
+                .with_children(|row| {
+                    spawn_selector_arrow(row, theme, "◀", previous, order, accent);
+                    row.spawn((
+                        Node {
+                            width: px(230),
+                            height: px(46),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            row_gap: px(1),
+                            border: UiRect::bottom(px(2)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::NONE),
+                        BorderColor::all(INK.with_alpha(0.12)),
+                    ))
+                    .with_children(center);
+                    spawn_selector_arrow(row, theme, "▶", next, order + 1, accent);
+                });
         });
 }
 
@@ -127,6 +221,119 @@ fn spawn_device_icon(parent: &mut ChildSpawnerCommands, device: InputDeviceId, c
         });
 }
 
+fn spawn_lobby_back_button(parent: &mut ChildSpawnerCommands, theme: &UiTheme) {
+    parent
+        .spawn((
+            Button,
+            IntegratedMenuButton,
+            UiAction::Back(AppState::Home),
+            FocusOrder(25),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(28),
+                top: px(24),
+                width: px(138),
+                min_height: px(48),
+                padding: UiRect::axes(px(4), px(6)),
+                border: UiRect::all(px(0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::FlexStart,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(Color::NONE),
+            UiTransform::default(),
+            GlobalZIndex(4),
+        ))
+        .with_children(|button| {
+            spawn_perspective_button_label(button, theme, "BACK", 20.0);
+        });
+}
+
+fn join_beacon_action() -> UiAction {
+    UiAction::Lobby(LobbyCommand::Join(InputDeviceId::Mouse))
+}
+
+fn spawn_join_beacon(parent: &mut ChildSpawnerCommands, theme: &UiTheme) {
+    parent
+        .spawn((
+            Button,
+            join_beacon_action(),
+            FocusOrder(19),
+            Node {
+                width: percent(100),
+                max_width: px(590),
+                min_height: px(146),
+                padding: UiRect::axes(px(30), px(22)),
+                border: UiRect::all(px(0)),
+                align_self: AlignSelf::Center,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                row_gap: px(12),
+                ..default()
+            },
+            BackgroundColor(PAPER.with_alpha(0.90)),
+            BorderColor::all(Color::NONE),
+            UiTransform::default(),
+            LobbyJoinBeacon { phase: 0.0 },
+            Interaction::default(),
+        ))
+        .with_children(|beacon| {
+            beacon
+                .spawn((Node {
+                    display: Display::Flex,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    column_gap: px(18),
+                    ..default()
+                },))
+                .with_children(|icons| {
+                    spawn_device_icon(icons, InputDeviceId::KeyboardPrimary, MUTED);
+                    icons.spawn((
+                        Text::new("•"),
+                        TextFont {
+                            font: theme.display_font.clone(),
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(CORAL),
+                    ));
+                    spawn_device_icon(icons, InputDeviceId::Gamepad(0), MUTED);
+                    icons.spawn((
+                        Text::new("•"),
+                        TextFont {
+                            font: theme.display_font.clone(),
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(CORAL),
+                    ));
+                    spawn_device_icon(icons, InputDeviceId::Mouse, MUTED);
+                });
+            beacon.spawn((
+                Text::new("CLAIM A RACER"),
+                TextFont {
+                    font: theme.display_font.clone(),
+                    font_size: FontSize::Px(23.0),
+                    ..default()
+                },
+                TextColor(INK),
+                TextLayout::justify(Justify::Center),
+            ));
+            beacon.spawn((
+                Text::new("BUTTON  /  KEY  /  CLICK"),
+                TextFont {
+                    font: theme.body_font.clone(),
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+                TextLayout::justify(Justify::Center),
+            ));
+        });
+}
+
 fn spawn_robot_icon(parent: &mut ChildSpawnerCommands, color: Color) {
     parent
         .spawn((Node {
@@ -198,11 +405,18 @@ pub(crate) fn spawn_lobby_content(
     compact: bool,
 ) {
     commands
-        .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
+        .spawn((
+            ScreenRoot,
+            screen_node(),
+            BackgroundColor(Color::srgba(0.025, 0.035, 0.055, 0.30)),
+        ))
         .with_children(|root| {
-            spawn_background(root);
+            spawn_lobby_back_button(root, theme);
             let mut lobby_panel = panel_node(percent(90));
-            lobby_panel.max_height = percent(94);
+            lobby_panel.max_width = px(1040);
+            lobby_panel.max_height = percent(96);
+            lobby_panel.padding = UiRect::axes(px(22), px(10));
+            lobby_panel.row_gap = px(9);
             lobby_panel.overflow = Overflow::scroll_y();
             root.spawn((
                 lobby_panel,
@@ -212,7 +426,10 @@ pub(crate) fn spawn_lobby_content(
                 ScrollPosition::default(),
             ))
             .with_children(|panel| {
-                spawn_title(panel, theme, "RACERS", 42.0);
+                spawn_title(panel, theme, "PICK YOUR RACER", 38.0);
+                if lobby.players.is_empty() {
+                    spawn_join_beacon(panel, theme);
+                }
                 panel
                     .spawn((Node {
                         width: percent(100),
@@ -230,166 +447,203 @@ pub(crate) fn spawn_lobby_content(
                                 MaxTrackSizingFunction::Fraction(1.0),
                             )
                         },
-                        column_gap: px(12),
-                        row_gap: px(12),
+                        column_gap: px(18),
+                        row_gap: px(18),
                         ..default()
                     },))
                     .with_children(|grid| {
-                        if lobby.players.is_empty() {
-                            grid.spawn((
-                                Text::new("PRESS ANY INPUT TO JOIN"),
-                                TextFont {
-                                    font: theme.body_font.clone(),
-                                    font_size: FontSize::Px(22.0),
-                                    ..default()
-                                },
-                                TextColor(INK),
-                            ));
-                        }
                         for (slot, player) in lobby.players.iter().enumerate() {
-                            let [
-                                previous_profile,
-                                next_profile,
-                                previous_color,
-                                next_color,
-                                previous_pattern,
-                                next_pattern,
-                            ] = card_customization_actions(player.device);
+                            let [previous_profile, next_profile, previous_color, next_color] =
+                                card_customization_actions(player.device);
                             let color = palette_color(player.color_id);
                             grid.spawn((
                                 Node {
-                                    min_height: px(0),
-                                    padding: UiRect::all(px(14)),
-                                    border: UiRect::all(px(2)),
+                                    min_height: px(268),
+                                    padding: UiRect::new(px(18), px(18), px(34), px(18)),
+                                    border: UiRect::all(px(0)),
+                                    position_type: PositionType::Relative,
                                     flex_direction: FlexDirection::Column,
-                                    row_gap: px(10),
+                                    row_gap: px(18),
                                     ..default()
                                 },
-                                BackgroundColor(color.with_alpha(if player.ready {
-                                    0.10
-                                } else {
-                                    0.045
-                                })),
-                                BorderColor::all(if player.connected {
-                                    color.with_alpha(if player.ready { 0.95 } else { 0.38 })
-                                } else {
-                                    CORAL.with_alpha(0.72)
-                                }),
+                                BackgroundColor(PAPER.with_alpha(0.96)),
+                                BorderColor::all(Color::NONE),
+                                UiTransform::default(),
+                                LobbyCardVisual {
+                                    color,
+                                    phase: slot as f32 * 1.7,
+                                    ready: player.ready,
+                                },
                             ))
                             .with_children(|card| {
+                                card.spawn((
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: px(0),
+                                        top: px(-1),
+                                        width: percent(100),
+                                        height: px(8),
+                                        ..default()
+                                    },
+                                    BackgroundColor(color),
+                                ));
+                                card.spawn((
+                                    Text::new(format!("P{}", slot + 1)),
+                                    TextFont {
+                                        font: theme.display_font.clone(),
+                                        font_size: FontSize::Px(10.0),
+                                        ..default()
+                                    },
+                                    TextColor(color),
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        right: px(14),
+                                        top: px(13),
+                                        ..default()
+                                    },
+                                ));
                                 card.spawn((Node {
                                     width: percent(100),
+                                    flex_grow: 1.0,
                                     flex_direction: FlexDirection::Column,
                                     align_items: AlignItems::Center,
-                                    row_gap: px(5),
+                                    justify_content: JustifyContent::Center,
+                                    row_gap: px(18),
                                     ..default()
                                 },))
                                     .with_children(|controls| {
                                         spawn_icon_stepper(
                                             controls,
                                             theme,
-                                            (
-                                                Text::new(player.display_name.clone()),
-                                                TextFont {
-                                                    font: theme.body_font.clone(),
-                                                    font_size: FontSize::Px(20.0),
-                                                    ..default()
-                                                },
-                                                TextColor(INK),
-                                                TextLayout::justify(Justify::Center),
-                                                Node {
-                                                    width: px(190),
-                                                    ..default()
-                                                },
-                                            ),
+                                            "",
+                                            |center| {
+                                                let bundle = (
+                                                    Text::new(if player.profile.is_create_new() {
+                                                        "+  NEW PROFILE".to_owned()
+                                                    } else {
+                                                        player.display_name.clone()
+                                                    }),
+                                                    TextFont {
+                                                        font: theme.display_font.clone(),
+                                                        font_size: FontSize::Px(19.0),
+                                                        ..default()
+                                                    },
+                                                    TextColor(if player.profile.is_create_new() {
+                                                        color
+                                                    } else {
+                                                        INK
+                                                    }),
+                                                    TextLayout::justify(Justify::Center),
+                                                    Node {
+                                                        width: px(210),
+                                                        ..default()
+                                                    },
+                                                    UiTransform::default(),
+                                                );
+                                                if player.profile.is_create_new() {
+                                                    center.spawn((
+                                                        bundle,
+                                                        Button,
+                                                        UiAction::CreateProfile(slot),
+                                                        FocusOrder(46 + slot as u16 * 10),
+                                                    ));
+                                                } else {
+                                                    center.spawn(bundle);
+                                                }
+                                            },
                                             previous_profile,
                                             next_profile,
                                             40 + slot as u16 * 10,
+                                            color,
                                         );
                                         spawn_icon_stepper(
                                             controls,
                                             theme,
-                                            (
-                                                Node {
-                                                    width: px(32),
-                                                    height: px(32),
-                                                    border: UiRect::all(px(2)),
-                                                    ..default()
-                                                },
-                                                BackgroundColor(color),
-                                                BorderColor::all(INK),
-                                            ),
+                                            "",
+                                            |center| {
+                                                center.spawn((
+                                                    Node {
+                                                        width: px(36),
+                                                        height: px(36),
+                                                        border: UiRect::all(px(2)),
+                                                        ..default()
+                                                    },
+                                                    BackgroundColor(color),
+                                                    BorderColor::all(INK),
+                                                ));
+                                            },
                                             previous_color,
                                             next_color,
                                             42 + slot as u16 * 10,
-                                        );
-                                        spawn_icon_stepper(
-                                            controls,
-                                            theme,
-                                            (
-                                                Text::new(format!(
-                                                    "PATTERN {}",
-                                                    player.pattern_id + 1
-                                                )),
-                                                TextFont {
-                                                    font: theme.body_font.clone(),
-                                                    font_size: FontSize::Px(12.0),
-                                                    ..default()
-                                                },
-                                                TextColor(MUTED),
-                                                TextLayout::justify(Justify::Center),
-                                                Node {
-                                                    width: px(88),
-                                                    ..default()
-                                                },
-                                            ),
-                                            previous_pattern,
-                                            next_pattern,
-                                            44 + slot as u16 * 10,
-                                        );
-                                        spawn_mini_button(
-                                            controls,
-                                            theme,
-                                            "+ NEW",
-                                            UiAction::CreateProfile(slot),
-                                            46 + slot as u16 * 10,
+                                            color,
                                         );
                                     });
                                 if player.connected {
-                                    let mut ready_row = card.spawn((
-                                        Node {
-                                            width: percent(100),
-                                            min_height: px(52),
-                                            display: Display::Flex,
-                                            align_items: AlignItems::Center,
-                                            justify_content: JustifyContent::Center,
-                                            column_gap: px(12),
-                                            border_radius: BorderRadius::all(px(4)),
-                                            ..default()
-                                        },
-                                        BackgroundColor(if player.ready {
-                                            Color::NONE
-                                        } else {
-                                            color.with_alpha(0.08)
-                                        }),
-                                    ));
-                                    if !player.ready {
-                                        ready_row.insert(ReadyPrompt {
+                                    card.spawn((
+                                        Button,
+                                        UiAction::Lobby(LobbyCommand::ToggleReady(player.device)),
+                                        FocusOrder(48 + slot as u16 * 10),
+                                        ReadyPrompt {
                                             color,
                                             phase: slot as f32 * 1.7,
-                                        });
-                                    }
-                                    ready_row.with_children(|ready| {
+                                            ready: player.ready,
+                                        },
+                                        Node {
+                                            width: percent(100),
+                                            min_height: px(68),
+                                            display: Display::Flex,
+                                            align_items: AlignItems::Center,
+                                            justify_content: JustifyContent::SpaceBetween,
+                                            padding: UiRect::axes(px(20), px(10)),
+                                            column_gap: px(12),
+                                            border: UiRect::all(px(2)),
+                                            ..default()
+                                        },
+                                        BackgroundColor(color.with_alpha(0.10)),
+                                        BorderColor::all(color.with_alpha(0.72)),
+                                        UiTransform::default(),
+                                    ))
+                                    .with_children(|ready| {
                                         spawn_device_icon(ready, player.device, color);
-                                        spawn_button(
-                                            ready,
-                                            theme,
-                                            if player.ready { "UNREADY" } else { "READY" },
-                                            UiAction::Lobby(LobbyCommand::ToggleReady(
-                                                player.device,
-                                            )),
-                                            48 + slot as u16 * 10,
-                                        );
+                                        ready
+                                            .spawn((Node {
+                                                flex_direction: FlexDirection::Column,
+                                                align_items: AlignItems::FlexEnd,
+                                                row_gap: px(2),
+                                                ..default()
+                                            },))
+                                            .with_children(|copy| {
+                                                copy.spawn((
+                                                    Text::new(if player.ready {
+                                                        "LOCKED IN"
+                                                    } else {
+                                                        "READY UP"
+                                                    }),
+                                                    TextFont {
+                                                        font: theme.display_font.clone(),
+                                                        font_size: FontSize::Px(23.0),
+                                                        ..default()
+                                                    },
+                                                    TextColor(if player.ready {
+                                                        color
+                                                    } else {
+                                                        INK
+                                                    }),
+                                                ));
+                                                copy.spawn((
+                                                    Text::new(if player.ready {
+                                                        "PRESS TO EDIT"
+                                                    } else {
+                                                        "CONFIRM"
+                                                    }),
+                                                    TextFont {
+                                                        font: theme.body_font.clone(),
+                                                        font_size: FontSize::Px(9.0),
+                                                        ..default()
+                                                    },
+                                                    TextColor(MUTED),
+                                                ));
+                                            });
                                     });
                                 } else {
                                     card.spawn((
@@ -410,122 +664,221 @@ pub(crate) fn spawn_lobby_content(
                             });
                         }
                     });
-                if lobby.players.len() < MAX_HUMANS
+                if !lobby.players.is_empty()
+                    && lobby.players.len() < MAX_HUMANS
                     && lobby.slot_for_device(InputDeviceId::Mouse).is_none()
                 {
                     spawn_button(
                         panel,
                         theme,
-                        "JOIN WITH MOUSE",
+                        "CLAIM WITH MOUSE",
                         UiAction::Lobby(LobbyCommand::Join(InputDeviceId::Mouse)),
                         19,
                     );
                 }
                 panel
-                    .spawn((Node {
-                        width: percent(94),
-                        max_width: px(620),
-                        display: Display::Flex,
-                        column_gap: px(10),
-                        align_items: AlignItems::Center,
-                        align_self: AlignSelf::Center,
-                        ..default()
-                    },))
-                    .with_children(|row| {
-                        spawn_mini_button(
-                            row,
-                            theme,
-                            "-",
-                            UiAction::Lobby(LobbyCommand::ChangeNpcCount(-1)),
-                            20,
-                        );
-                        row.spawn((
-                            Text::new(format!("{}", lobby.npc_count())),
-                            TextFont {
-                                font: theme.body_font.clone(),
-                                font_size: FontSize::Px(22.0),
-                                ..default()
-                            },
-                            TextColor(INK),
-                            Node {
-                                width: px(34),
-                                ..default()
-                            },
-                            TextLayout::justify(Justify::Center),
-                        ));
-                        spawn_robot_icon(row, MUTED);
-                        spawn_mini_button(
-                            row,
-                            theme,
-                            "+",
-                            UiAction::Lobby(LobbyCommand::ChangeNpcCount(1)),
-                            21,
-                        );
-                        row.spawn((
-                            Text::new("CPU DIFFICULTY"),
-                            TextFont {
-                                font: theme.body_font.clone(),
-                                font_size: FontSize::Px(10.0),
-                                ..default()
-                            },
-                            TextColor(MUTED),
-                            Node {
-                                margin: UiRect::left(px(8)),
-                                ..default()
-                            },
-                        ));
-                        spawn_mini_button(
-                            row,
-                            theme,
-                            "<",
-                            UiAction::Lobby(LobbyCommand::ChangeNpcDifficulty(-1)),
-                            22,
-                        );
-                        row.spawn((
-                            Text::new(lobby.npc_difficulty.label()),
-                            TextFont {
-                                font: theme.body_font.clone(),
-                                font_size: FontSize::Px(12.0),
-                                ..default()
-                            },
-                            TextColor(INK),
-                            Node {
-                                width: px(64),
-                                ..default()
-                            },
-                            TextLayout::justify(Justify::Center),
-                        ));
-                        spawn_mini_button(
-                            row,
-                            theme,
-                            ">",
-                            UiAction::Lobby(LobbyCommand::ChangeNpcDifficulty(1)),
-                            23,
-                        );
+                    .spawn((
+                        Node {
+                            width: percent(94),
+                            max_width: px(700),
+                            min_height: px(64),
+                            display: Display::Flex,
+                            align_items: AlignItems::Stretch,
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_self: AlignSelf::Center,
+                            position_type: PositionType::Relative,
+                            border: UiRect::all(px(0)),
+                            ..default()
+                        },
+                        BackgroundColor(PAPER.with_alpha(0.82)),
+                        BorderColor::all(Color::NONE),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((Node {
+                            width: percent(50),
+                            padding: UiRect::axes(px(16), px(10)),
+                            column_gap: px(10),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::FlexStart,
+                            ..default()
+                        },))
+                            .with_children(|bots| {
+                                spawn_robot_icon(bots, MUTED);
+                                bots.spawn((
+                                    Text::new("RIVAL BOTS"),
+                                    TextFont {
+                                        font: theme.display_font.clone(),
+                                        font_size: FontSize::Px(13.0),
+                                        ..default()
+                                    },
+                                    TextColor(INK),
+                                ));
+                                spawn_selector_arrow(
+                                    bots,
+                                    theme,
+                                    "−",
+                                    LobbyCommand::ChangeNpcCount(-1),
+                                    20,
+                                    MUTED,
+                                );
+                                bots.spawn((
+                                    Text::new(format!("{:02}", lobby.npc_count())),
+                                    TextFont {
+                                        font: theme.display_font.clone(),
+                                        font_size: FontSize::Px(24.0),
+                                        ..default()
+                                    },
+                                    TextColor(CORAL),
+                                    Node {
+                                        width: px(42),
+                                        ..default()
+                                    },
+                                    TextLayout::justify(Justify::Center),
+                                ));
+                                spawn_selector_arrow(
+                                    bots,
+                                    theme,
+                                    "+",
+                                    LobbyCommand::ChangeNpcCount(1),
+                                    21,
+                                    MUTED,
+                                );
+                            });
+                        bar.spawn((Node {
+                            width: percent(50),
+                            padding: UiRect::axes(px(16), px(10)),
+                            column_gap: px(10),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::FlexEnd,
+                            ..default()
+                        },))
+                            .with_children(|difficulty| {
+                                difficulty.spawn((
+                                    Text::new("DIFFICULTY"),
+                                    TextFont {
+                                        font: theme.display_font.clone(),
+                                        font_size: FontSize::Px(12.0),
+                                        ..default()
+                                    },
+                                    TextColor(INK),
+                                ));
+                                spawn_selector_arrow(
+                                    difficulty,
+                                    theme,
+                                    "◀",
+                                    LobbyCommand::ChangeNpcDifficulty(-1),
+                                    22,
+                                    MUTED,
+                                );
+                                difficulty.spawn((
+                                    Text::new(lobby.npc_difficulty.label()),
+                                    TextFont {
+                                        font: theme.display_font.clone(),
+                                        font_size: FontSize::Px(12.0),
+                                        ..default()
+                                    },
+                                    TextColor(INK),
+                                    Node {
+                                        width: px(78),
+                                        ..default()
+                                    },
+                                    TextLayout::justify(Justify::Center),
+                                ));
+                                spawn_selector_arrow(
+                                    difficulty,
+                                    theme,
+                                    "▶",
+                                    LobbyCommand::ChangeNpcDifficulty(1),
+                                    23,
+                                    MUTED,
+                                );
+                            });
                     });
-                spawn_button(
-                    panel,
-                    theme,
-                    lobby_start_label(lobby),
-                    UiAction::Lobby(LobbyCommand::Start),
-                    24,
-                );
-                spawn_button(panel, theme, "BACK", UiAction::Back(AppState::Home), 25);
             });
+            if let Some(remaining) = lobby.launch_state.remaining() {
+                spawn_lobby_countdown(root, theme, remaining);
+            }
         });
 }
 
-fn lobby_start_label(lobby: &Lobby) -> &'static str {
-    if lobby.can_start() {
-        "START RACE"
-    } else if lobby.players.is_empty() {
-        "JOIN A PLAYER"
-    } else if lobby.total_competitors() < MIN_COMPETITORS {
-        "ADD AN OPPONENT"
-    } else if lobby.players.iter().any(|player| !player.connected) {
-        "WAITING FOR PLAYERS"
-    } else {
-        "READY UP"
+fn spawn_lobby_countdown(parent: &mut ChildSpawnerCommands, theme: &UiTheme, remaining: f32) {
+    parent
+        .spawn((
+            LobbyCountdownOverlay,
+            Node {
+                position_type: PositionType::Absolute,
+                left: percent(50),
+                top: percent(50),
+                width: px(146),
+                height: px(146),
+                margin: UiRect::new(px(-73), px(0), px(-73), px(0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(4)),
+                ..default()
+            },
+            BackgroundColor(CORAL),
+            BorderColor::all(INK),
+            UiTransform::from_rotation(Rot2::radians(std::f32::consts::FRAC_PI_4)),
+            BoxShadow::new(
+                Color::srgba(0.02, 0.03, 0.05, 0.42),
+                px(9),
+                px(11),
+                px(0),
+                px(0),
+            ),
+            GlobalZIndex(20),
+        ))
+        .with_children(|overlay| {
+            overlay
+                .spawn((
+                    Node {
+                        width: px(112),
+                        height: px(112),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb_u8(255, 111, 88)),
+                    BorderColor::all(Color::WHITE.with_alpha(0.72)),
+                ))
+                .with_children(|face| {
+                    face.spawn((
+                        Text::new(format!("{}", countdown_display(remaining))),
+                        LobbyCountdownText,
+                        TextFont {
+                            font: theme.display_font.clone(),
+                            font_size: FontSize::Px(74.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb_u8(250, 247, 237)),
+                        TextShadow {
+                            offset: Vec2::new(5.0, 7.0),
+                            color: INK,
+                        },
+                        UiTransform::from_rotation(Rot2::radians(-std::f32::consts::FRAC_PI_4)),
+                    ));
+                });
+        });
+}
+
+fn countdown_display(remaining: f32) -> u8 {
+    remaining.ceil().max(1.0) as u8
+}
+
+pub(crate) fn update_lobby_countdown(
+    lobby: Res<Lobby>,
+    mut labels: Query<&mut Text, With<LobbyCountdownText>>,
+) {
+    let Some(remaining) = lobby.launch_state.remaining() else {
+        return;
+    };
+    let value = countdown_display(remaining).to_string();
+    for mut label in &mut labels {
+        if label.as_str() != value {
+            **label = value.clone();
+        }
     }
 }
 
@@ -535,22 +888,24 @@ pub(crate) fn lobby_fingerprint(lobby: &Lobby, compact: bool) -> String {
         .iter()
         .map(|player| {
             format!(
-                "{:?}:{}:{}:{}:{}:{}:{}",
+                "{:?}:{}:{}:{}:{}:{}:{}:{}",
                 player.device,
                 player.display_name,
                 player.color_id,
                 player.pattern_id,
+                player.profile.is_create_new(),
                 player.ready,
                 player.connected,
-                player.profile_id.as_deref().unwrap_or("")
+                player.profile.saved_id().unwrap_or("")
             )
         })
         .collect::<Vec<_>>()
         .join("|");
     format!(
-        "{}:{:?}:{}:{players}",
+        "{}:{:?}:{:?}:{}:{players}",
         lobby.npc_count(),
         lobby.npc_difficulty,
+        lobby.launch_state.remaining().is_some(),
         compact
     )
 }
@@ -608,6 +963,7 @@ pub(crate) fn update_lobby_screen(
     theme: Res<UiTheme>,
     lobby: Res<Lobby>,
     mut fingerprint: ResMut<LobbyFingerprint>,
+    mut focus: ResMut<UiFocus>,
     roots: Query<Entity, With<ScreenRoot>>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
@@ -621,66 +977,11 @@ pub(crate) fn update_lobby_screen(
     for root in &roots {
         commands.entity(root).despawn();
     }
+    focus.entity = None;
     fingerprint.0 = next;
     spawn_lobby_content(&mut commands, &theme, &lobby, compact);
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn controller_focus_exposes_every_card_customization_command() {
-        let device = InputDeviceId::Gamepad(7);
-        let actions = card_customization_actions(device);
-        assert!(matches!(actions[0], LobbyCommand::CycleProfile(d, -1) if d == device));
-        assert!(matches!(actions[1], LobbyCommand::CycleProfile(d, 1) if d == device));
-        assert!(matches!(actions[2], LobbyCommand::CycleColor(d, -1) if d == device));
-        assert!(matches!(actions[3], LobbyCommand::CycleColor(d, 1) if d == device));
-        assert!(matches!(actions[4], LobbyCommand::CyclePattern(d, -1) if d == device));
-        assert!(matches!(actions[5], LobbyCommand::CyclePattern(d, 1) if d == device));
-    }
-
-    #[test]
-    fn lobby_keeps_controls_visible_at_browser_stress_widths() {
-        assert!(is_compact_lobby(800.0));
-        assert!(!is_compact_lobby(960.0));
-        assert!(!is_compact_lobby(1280.0));
-    }
-
-    #[test]
-    fn lobby_scroll_is_clamped_to_content_bounds() {
-        assert_eq!(clamp_lobby_scroll(0.0, -100.0, 900.0, 600.0, 1.0), 0.0);
-        assert_eq!(clamp_lobby_scroll(100.0, 500.0, 900.0, 600.0, 1.0), 300.0);
-        assert_eq!(clamp_lobby_scroll(0.0, 100.0, 500.0, 600.0, 1.0), 0.0);
-    }
-
-    #[test]
-    fn fresh_two_player_lobby_starts_without_robots() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        lobby.join(InputDeviceId::Mouse, &profiles);
-        lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
-        assert_eq!(lobby.npc_count(), 0);
-        assert_eq!(lobby.max_npc_count(), 10);
-    }
-
-    #[test]
-    fn start_label_only_describes_the_blocking_lobby_requirement() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        assert_eq!(lobby_start_label(&lobby), "JOIN A PLAYER");
-
-        lobby.join(InputDeviceId::Mouse, &profiles);
-        assert_eq!(lobby_start_label(&lobby), "ADD AN OPPONENT");
-
-        lobby.set_npc_count(1);
-        assert_eq!(lobby_start_label(&lobby), "READY UP");
-
-        lobby.players[0].ready = true;
-        assert_eq!(lobby_start_label(&lobby), "START RACE");
-
-        lobby.players[0].connected = false;
-        assert_eq!(lobby_start_label(&lobby), "WAITING FOR PLAYERS");
-    }
-}
+#[path = "lobby_tests.rs"]
+mod tests;

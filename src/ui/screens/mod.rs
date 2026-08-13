@@ -99,34 +99,21 @@ pub(super) fn toggle_line(
 }
 
 fn settings_section(parent: &mut ChildSpawnerCommands, theme: &UiTheme, label: &str) {
-    parent
-        .spawn((Node {
+    parent.spawn((
+        Text::new(label),
+        TextFont {
+            font: theme.display_font.clone(),
+            font_size: FontSize::Px(12.0),
+            ..default()
+        },
+        TextColor(CORAL),
+        Node {
             width: percent(100),
             min_height: px(22),
-            margin: UiRect::top(px(5)),
-            column_gap: px(7),
-            align_items: AlignItems::Center,
+            margin: UiRect::top(px(7)),
             ..default()
-        },))
-        .with_children(|row| {
-            row.spawn((
-                Node {
-                    width: px(3),
-                    height: px(14),
-                    ..default()
-                },
-                BackgroundColor(CORAL.with_alpha(0.72)),
-            ));
-            row.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.body_font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(MUTED),
-            ));
-        });
+        },
+    ));
 }
 
 pub(super) fn spawn_settings(
@@ -138,19 +125,22 @@ pub(super) fn spawn_settings(
     confirmation: Res<Confirmation>,
 ) {
     commands
-        .spawn((ScreenRoot, screen_node(), BackgroundColor(PAPER)))
+        .spawn((
+            ScreenRoot,
+            screen_node(),
+            BackgroundColor(Color::srgba(0.025, 0.035, 0.055, 0.36)),
+        ))
         .with_children(|root| {
-            spawn_background(root);
             let mut settings_panel = panel_node(percent(88));
             settings_panel.max_width = px(1040);
             settings_panel.max_height = percent(96);
-            settings_panel.padding = UiRect::axes(px(28), px(6));
+            settings_panel.padding = UiRect::axes(px(34), px(12));
             settings_panel.row_gap = px(6);
             settings_panel.overflow = Overflow::scroll_y();
             root.spawn((
                 settings_panel,
-                BackgroundColor(Color::NONE),
-                BorderColor::all(INK),
+                BackgroundColor(PAPER.with_alpha(0.94)),
+                BorderColor::all(Color::NONE),
             ))
             .with_children(|panel| {
                 spawn_title(panel, &theme, "SETTINGS", 38.0);
@@ -177,11 +167,8 @@ pub(super) fn spawn_settings(
                                 border: UiRect::top(px(2)),
                                 ..default()
                             },
-                            BackgroundColor(PAPER.with_alpha(0.32)),
-                            BorderColor {
-                                top: palette_color(0).with_alpha(0.55),
-                                ..BorderColor::default()
-                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::NONE),
                         ))
                         .with_children(|left| {
                             settings_section(left, &theme, "AUDIO");
@@ -258,11 +245,8 @@ pub(super) fn spawn_settings(
                                 border: UiRect::top(px(2)),
                                 ..default()
                             },
-                            BackgroundColor(PAPER.with_alpha(0.32)),
-                            BorderColor {
-                                top: palette_color(2).with_alpha(0.55),
-                                ..BorderColor::default()
-                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::NONE),
                         ))
                         .with_children(|right| {
                             settings_section(right, &theme, "CONTROL");
@@ -318,8 +302,8 @@ pub(super) fn spawn_settings(
                                             row.spawn((
                                                 Text::new(profile.display_name.clone()),
                                                 TextFont {
-                                                    font: theme.body_font.clone(),
-                                                    font_size: FontSize::Px(14.0),
+                                                    font: theme.display_font.clone(),
+                                                    font_size: FontSize::Px(12.0),
                                                     ..default()
                                                 },
                                                 TextColor(INK),

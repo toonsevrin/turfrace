@@ -29,7 +29,20 @@ pub fn advance_motion(
     dt: f32,
 ) {
     motion.previous_position = motion.position;
-    if let Some(desired) = desired.and_then(Vec2::try_normalize) {
+    let speed = speed.max(0.0);
+    let step = speed * dt;
+    let margin = config.collision_radius;
+    let arena = territory.arena_boundary();
+    let on_boundary = arena.signed_distance(motion.position) <= margin + CONTACT_DISTANCE;
+    let mut leave_boundary = false;
+    if let Some(mut desired) = desired.and_then(Vec2::try_normalize) {
+        if on_boundary {
+            let inward = arena.inward_normal(motion.position);
+            leave_boundary = desired.dot(inward) > CONTACT_RELEASE_DOT;
+            if !leave_boundary {
+                desired = boundary_tangent(desired, inward, motion.heading);
+            }
+        }
         let cross = motion.heading.perp_dot(desired);
         let dot = motion.heading.dot(desired).clamp(-1.0, 1.0);
         let delta = cross.atan2(dot).clamp(
@@ -43,35 +56,78 @@ pub fn advance_motion(
         )
         .normalize_or_zero();
     }
-    let attempted = motion.position + motion.heading * speed.max(0.0) * dt;
-    if territory.arena_signed_distance(attempted) >= config.collision_radius {
+
+    if on_boundary && !leave_boundary {
+        follow_arena_margin(motion, territory, margin, step, config.inward_edge_steer);
+        return;
+    }
+
+    let attempted = motion.position + motion.heading * step;
+    if arena.signed_distance(attempted) >= margin {
         motion.position = attempted;
         return;
     }
-    let safe = if territory.arena_signed_distance(motion.position) >= config.collision_radius {
-        motion.position
+
+    let (safe, remaining_step) = if arena.signed_distance(motion.position) >= margin {
+        let fraction = arena
+            .margin_exit_time(motion.position, attempted, margin)
+            .unwrap_or(0.0);
+        (
+            motion.position.lerp(attempted, fraction),
+            step * (1.0 - fraction),
+        )
+    } else if let Some(position) = arena.project_inside(motion.position, margin) {
+        (position, step)
     } else {
-        territory.nearest_arena_interior(attempted, config.collision_radius)
+        return;
     };
-    let inward = territory.arena_inward_normal(safe);
-    let outward_component = motion.heading.dot(-inward).max(0.0);
-    let tangent = (motion.heading + inward * outward_component).try_normalize();
-    let fallback_a = Vec2::new(-inward.y, inward.x);
-    let fallback_b = -fallback_a;
-    let tangent = tangent.unwrap_or_else(|| {
-        if fallback_a.dot(motion.heading) >= fallback_b.dot(motion.heading) {
-            fallback_a
+    motion.position = safe;
+    follow_arena_margin(
+        motion,
+        territory,
+        margin,
+        remaining_step,
+        config.inward_edge_steer,
+    );
+}
+
+/// Geometric contact tolerance and an input dead band prevent signed-distance
+/// noise from toggling boundary following without adding lifecycle state.
+const CONTACT_DISTANCE: f32 = 0.01;
+const CONTACT_RELEASE_DOT: f32 = 0.05;
+
+fn follow_arena_margin(
+    motion: &mut CompetitorMotion,
+    territory: &TerritoryMap,
+    margin: f32,
+    step: f32,
+    inward_steer: f32,
+) {
+    let arena = territory.arena_boundary();
+    let inward = arena.inward_normal(motion.position);
+    let tangent = boundary_tangent(motion.heading, inward, motion.heading);
+    let candidate = motion.position + tangent * step;
+    let Some(position) = arena.project_to_margin(candidate, margin) else {
+        return;
+    };
+    let inward = arena.inward_normal(position);
+    let tangent = boundary_tangent(position - motion.position, inward, tangent);
+    motion.position = position;
+    motion.heading = (tangent + inward * inward_steer.max(0.0))
+        .try_normalize()
+        .unwrap_or(tangent);
+}
+
+fn boundary_tangent(direction: Vec2, inward: Vec2, previous_heading: Vec2) -> Vec2 {
+    let tangent = direction - inward * direction.dot(inward).min(0.0);
+    tangent.try_normalize().unwrap_or_else(|| {
+        let tangent = Vec2::new(-inward.y, inward.x);
+        if tangent.dot(previous_heading) >= 0.0 {
+            tangent
         } else {
-            fallback_b
+            -tangent
         }
-    });
-    motion.heading = (tangent + inward * config.inward_edge_steer).normalize_or_zero();
-    let slid = safe + motion.heading * speed.max(0.0) * dt;
-    motion.position = if territory.arena_signed_distance(slid) >= config.collision_radius {
-        slid
-    } else {
-        safe
-    };
+    })
 }
 
 #[cfg(test)]
@@ -103,6 +159,190 @@ mod tests {
         advance_motion(&mut m, None, &map, &cfg, cfg.player_speed, 1.0);
         assert!(map.arena_signed_distance(m.position) >= cfg.collision_radius - 0.51);
         assert!(m.heading.dot(Vec2::X) < 0.99);
+    }
+
+    #[test]
+    fn held_outward_input_follows_edge_without_alternating_or_stopping() {
+        let cfg = GameConfig::default();
+        let board = BoardGrid::generate(11, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let boundary = board.contour.points[0];
+        let inward = map.arena_inward_normal(boundary);
+        let tangent = Vec2::new(-inward.y, inward.x);
+        let start = map
+            .arena_boundary()
+            .project_inside(boundary, cfg.collision_radius + 0.01)
+            .unwrap();
+        let mut motion = CompetitorMotion::new(start, -inward);
+        let desired = (tangent - inward * 2.0).normalize();
+        let step = cfg.player_speed * cfg.fixed_delta_seconds();
+
+        advance_motion(
+            &mut motion,
+            None,
+            &map,
+            &cfg,
+            cfg.player_speed,
+            cfg.fixed_delta_seconds(),
+        );
+        assert!(
+            map.arena_signed_distance(motion.position) <= cfg.collision_radius + CONTACT_DISTANCE
+        );
+        for _ in 0..30 {
+            advance_motion(
+                &mut motion,
+                Some(desired),
+                &map,
+                &cfg,
+                cfg.player_speed,
+                cfg.fixed_delta_seconds(),
+            );
+            assert!(
+                motion.position.distance(motion.previous_position) > step * 0.8,
+                "edge following should not alternate with stopped frames"
+            );
+            assert!(map.arena_signed_distance(motion.position) >= cfg.collision_radius - 0.001);
+        }
+    }
+
+    #[test]
+    fn side_input_does_not_alternate_heading_while_following_edge() {
+        let cfg = GameConfig::default();
+        let board = BoardGrid::generate(17, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let boundary = board.contour.points[0];
+        let inward = map.arena_inward_normal(boundary);
+        let tangent = Vec2::new(-inward.y, inward.x);
+        let start = map
+            .arena_boundary()
+            .project_inside(boundary, cfg.collision_radius + 0.01)
+            .unwrap();
+        let mut motion = CompetitorMotion::new(start, -inward);
+
+        // Establish real boundary contact before applying sideways input.
+        advance_motion(
+            &mut motion,
+            None,
+            &map,
+            &cfg,
+            cfg.player_speed,
+            cfg.fixed_delta_seconds(),
+        );
+        assert!(
+            map.arena_signed_distance(motion.position) <= cfg.collision_radius + CONTACT_DISTANCE
+        );
+
+        let desired = (tangent - inward * 0.35).normalize();
+        let mut previous_turn_sign = 0.0_f32;
+        for frame in 0..60 {
+            let previous_heading = motion.heading;
+            advance_motion(
+                &mut motion,
+                Some(desired),
+                &map,
+                &cfg,
+                cfg.player_speed,
+                cfg.fixed_delta_seconds(),
+            );
+            let turn = previous_heading.perp_dot(motion.heading);
+            assert!(
+                turn * previous_turn_sign >= -0.0001,
+                "edge steering should not alternate turn direction"
+            );
+            if frame > 5 {
+                assert!(
+                    motion.heading.dot(previous_heading) > 0.995,
+                    "held side input should settle instead of oscillating"
+                );
+            }
+            assert!(
+                (map.arena_signed_distance(motion.position) - cfg.collision_radius).abs() <= 0.01,
+                "boundary following should remain on the margin"
+            );
+            if turn.abs() > 0.0001 {
+                previous_turn_sign = turn;
+            }
+        }
+    }
+
+    #[test]
+    fn steering_is_not_constrained_before_motion_reaches_edge() {
+        let cfg = GameConfig {
+            max_turn_rate_radians: f32::INFINITY,
+            ..default()
+        };
+        let board = BoardGrid::generate(13, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let boundary = board.contour.points[0];
+        let inward = map.arena_inward_normal(boundary);
+        let tangent = Vec2::new(-inward.y, inward.x);
+        let start = map
+            .arena_boundary()
+            .project_inside(boundary, cfg.collision_radius + 0.2)
+            .unwrap();
+        let mut motion = CompetitorMotion::new(start, inward);
+        let outward = -inward;
+
+        advance_motion(
+            &mut motion,
+            Some(outward),
+            &map,
+            &cfg,
+            cfg.player_speed,
+            0.01,
+        );
+
+        assert!(
+            motion.heading.dot(outward) > 0.99,
+            "safe outward steering should not be replaced with a tangent"
+        );
+        assert!(motion.heading.dot(tangent).abs() < 0.01);
+        assert!(map.arena_signed_distance(motion.position) >= cfg.collision_radius);
+    }
+
+    #[test]
+    fn boundary_slide_preserves_inward_steering_correction() {
+        let cfg = GameConfig::default();
+        let board = BoardGrid::generate(18, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let boundary = board.contour.points[0];
+        let inward = map.arena_inward_normal(boundary);
+        let start = map
+            .arena_boundary()
+            .project_inside(boundary, cfg.collision_radius)
+            .unwrap();
+        let mut motion = CompetitorMotion::new(start, -inward);
+
+        advance_motion(
+            &mut motion,
+            None,
+            &map,
+            &cfg,
+            cfg.player_speed,
+            cfg.fixed_delta_seconds(),
+        );
+
+        assert!(motion.heading.dot(map.arena_inward_normal(motion.position)) > 0.0);
+    }
+
+    #[test]
+    fn crossing_step_slides_only_the_unconsumed_distance() {
+        let cfg = GameConfig::default();
+        let board = BoardGrid::generate(20, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let boundary = board.contour.points[0];
+        let inward = map.arena_inward_normal(boundary);
+        let start = map
+            .arena_boundary()
+            .project_inside(boundary, cfg.collision_radius + 2.0)
+            .unwrap();
+        let mut motion = CompetitorMotion::new(start, -inward);
+        let step = 4.0;
+
+        advance_motion(&mut motion, None, &map, &cfg, step, 1.0);
+
+        assert!(motion.position.distance(start) <= step + 0.01);
+        assert!(map.arena_signed_distance(motion.position) >= cfg.collision_radius - 0.01);
     }
 
     #[test]

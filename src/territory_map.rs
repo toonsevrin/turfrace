@@ -13,9 +13,11 @@ use crate::{
     trail::ActiveTrail,
 };
 
+mod arena_boundary;
 mod connectivity;
 mod spatial_index;
 
+pub use arena_boundary::ArenaBoundary;
 use connectivity::retain_spawn_components;
 use spatial_index::TerritorySpatialIndex;
 
@@ -150,43 +152,16 @@ impl TerritoryMap {
         Some(owned)
     }
 
+    pub fn arena_boundary(&self) -> ArenaBoundary<'_> {
+        ArenaBoundary::new(&self.arena)
+    }
+
     pub fn arena_signed_distance(&self, point: Vec2) -> f32 {
-        if self.arena.is_empty() {
-            -f32::INFINITY
-        } else {
-            let distance = self.arena.boundary_distance(point);
-            if self.arena.contains_world(point) {
-                distance
-            } else {
-                -distance
-            }
-        }
+        self.arena_boundary().signed_distance(point)
     }
 
     pub fn arena_inward_normal(&self, point: Vec2) -> Vec2 {
-        let epsilon = 0.25;
-        let dx = self.arena_signed_distance(point + Vec2::X * epsilon)
-            - self.arena_signed_distance(point - Vec2::X * epsilon);
-        let dy = self.arena_signed_distance(point + Vec2::Y * epsilon)
-            - self.arena_signed_distance(point - Vec2::Y * epsilon);
-        Vec2::new(dx, dy)
-            .try_normalize()
-            .unwrap_or_else(|| -point.try_normalize().unwrap_or(Vec2::Y))
-    }
-
-    pub fn nearest_arena_interior(&self, point: Vec2, margin: f32) -> Vec2 {
-        if self.arena_signed_distance(point) >= margin {
-            return point;
-        }
-        let normal = self.arena_inward_normal(point);
-        let mut candidate = point;
-        for _ in 0..12 {
-            candidate += normal * margin.max(0.25);
-            if self.arena_signed_distance(candidate) >= margin {
-                return candidate;
-            }
-        }
-        Vec2::ZERO
+        self.arena_boundary().inward_normal(point)
     }
 
     /// Establishes a fresh spawn seed for an owner with no existing territory.
@@ -711,6 +686,47 @@ mod tests {
             Vec2::new(20.0, 20.0),
             Vec2::new(-20.0, 20.0),
         ])
+    }
+
+    #[test]
+    fn arena_projection_satisfies_margin_and_rejects_invalid_input() {
+        let map = TerritoryMap::new(arena());
+        let projected = map
+            .arena_boundary()
+            .project_inside(Vec2::new(21.0, 19.8), 0.5)
+            .unwrap();
+
+        assert!(map.arena_signed_distance(projected) >= 0.5);
+        let margin_point = map
+            .arena_boundary()
+            .project_to_margin(Vec2::new(18.0, 19.0), 0.5)
+            .unwrap();
+        assert!((map.arena_signed_distance(margin_point) - 0.5).abs() <= 0.01);
+        assert_eq!(
+            map.arena_boundary().project_inside(Vec2::ZERO, 0.5),
+            Some(Vec2::ZERO)
+        );
+        assert_eq!(map.arena_boundary().project_inside(Vec2::NAN, 0.5), None);
+        assert_eq!(map.arena_boundary().project_inside(Vec2::ZERO, -0.5), None);
+    }
+
+    #[test]
+    fn arena_margin_exit_time_finds_the_last_valid_segment_point() {
+        let map = TerritoryMap::new(arena());
+        let from = Vec2::ZERO;
+        let to = Vec2::new(25.0, 0.0);
+        let margin = 0.5;
+        let time = map
+            .arena_boundary()
+            .margin_exit_time(from, to, margin)
+            .unwrap();
+        let crossing = from.lerp(to, time);
+
+        assert!((map.arena_signed_distance(crossing) - margin).abs() <= 0.01);
+        assert_eq!(
+            map.arena_boundary().margin_exit_time(to, from, margin),
+            None
+        );
     }
 
     #[test]

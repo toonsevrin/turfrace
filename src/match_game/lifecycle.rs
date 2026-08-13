@@ -6,7 +6,7 @@ use crate::{
     config::GameConfig,
     ids::CompetitorId,
     input::{ControlSource, HumanController, SteeringIntent},
-    lobby::MatchSetup,
+    lobby::{MatchLaunchMode, MatchSetup},
     movement::CompetitorMotion,
     npc::{
         NpcController, NpcDifficulty, NpcEvent, NpcEventQueue, NpcRosterEntry, generate_npc_roster,
@@ -18,8 +18,20 @@ use super::model::*;
 
 pub(super) fn begin_from_lobby(world: &mut World) {
     let setup = world.resource::<MatchSetup>().clone();
+    let mode = std::mem::take(&mut *world.resource_mut::<MatchLaunchMode>());
     start_match(world, &setup);
-    world.resource_mut::<MatchLoadingFrames>().0 = 0;
+    if mode == MatchLaunchMode::LobbyCountdownCompleted {
+        let mut session = world.resource_mut::<MatchSession>();
+        session.phase = MatchPhase::Running;
+        session.countdown_remaining = 0.0;
+    }
+    *world.resource_mut::<MatchLoadingFrames>() = MatchLoadingFrames {
+        elapsed: 0,
+        destination: match mode {
+            MatchLaunchMode::StandardCountdown => AppState::Countdown,
+            MatchLaunchMode::LobbyCountdownCompleted => AppState::Playing,
+        },
+    };
 }
 
 const ATTRACT_NPC_COUNT: u8 = 6;
@@ -53,8 +65,20 @@ pub(super) fn begin_attract_match(world: &mut World) {
     start_match_for(world, &setup, MatchPurpose::Attract);
 }
 
-#[derive(Resource, Default)]
-pub(super) struct MatchLoadingFrames(pub u8);
+#[derive(Resource)]
+pub(super) struct MatchLoadingFrames {
+    elapsed: u8,
+    pub(super) destination: AppState,
+}
+
+impl Default for MatchLoadingFrames {
+    fn default() -> Self {
+        Self {
+            elapsed: 0,
+            destination: AppState::Countdown,
+        }
+    }
+}
 
 const MATCH_LOADING_MIN_FRAMES: u8 = 6;
 
@@ -62,9 +86,9 @@ pub(super) fn finish_match_loading(
     mut frames: ResMut<MatchLoadingFrames>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    frames.0 = frames.0.saturating_add(1);
-    if frames.0 >= MATCH_LOADING_MIN_FRAMES {
-        next.set(AppState::Countdown);
+    frames.elapsed = frames.elapsed.saturating_add(1);
+    if frames.elapsed >= MATCH_LOADING_MIN_FRAMES {
+        next.set(frames.destination);
     }
 }
 
@@ -225,6 +249,7 @@ fn despawn_competitors(world: &mut World) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn cleanup_match(
     mut commands: Commands,
     competitors: Query<Entity, With<Competitor>>,

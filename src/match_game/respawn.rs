@@ -249,9 +249,7 @@ pub(super) fn reset_respawn_anchor(
     last_owned: &mut LastOwnedCell,
     position: Vec2,
 ) {
-    motion.position = position;
-    motion.previous_position = position;
-    motion.heading = (-position).try_normalize().unwrap_or(Vec2::Y);
+    *motion = CompetitorMotion::new(position, -position);
     last_owned.0 = board
         .world_to_cell(position)
         .expect("respawn candidates are playable board cells");

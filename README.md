@@ -49,9 +49,11 @@ The helper enforces a release Trunk build, rejects debug-sized WASM, and records
 
 ## Controls
 
-- Gamepad: either stick steers, A/Cross confirms or readies, B/Circle goes back, D-pad/left stick navigates, shoulders cycle lobby colors, and Start pauses.
-- Mouse: click `JOIN WITH MOUSE`, use the player card's ready control, and steer toward the cursor inside that player's viewport.
+- Gamepad: either stick steers, A/Cross readies or unreadies in the lobby, B/Circle leaves, D-pad/left stick navigates, shoulders cycle lobby colors, and Start readies in the lobby or pauses in play.
+- Mouse: click `JOIN WITH MOUSE`, then click the pulsing ready prompt; click it again during the shared countdown to cancel.
 - Keyboard: Enter/Space joins or toggles ready; WASD/arrow keys join when unassigned, then steer and navigate, and Escape pauses or goes back.
+
+The race countdown begins automatically as soon as every joined racer is ready. There is no separate Start press; any racer can unready before launch to cancel the countdown.
 
 If a controller disconnects during play, the match pauses. An unassigned controller can reclaim the player, or the paused player can be replaced with an NPC.
 
@@ -110,3 +112,45 @@ vector-surface renderer without starting a match:
 - `PresentationPlugin`: split-screen cameras, revision-built elevated territory surfaces, lean flat-shaded cube/trail/effect rendering, and procedural shared audio.
 
 Gameplay is 2D and deterministic even though presentation is 3D. Input and NPCs both produce the same steering intent, and presentation consumes simulation events without owning rules. Territory ownership is converted into bounded smooth owner meshes only when its revision changes; the grid is never rendered directly and no territory work runs on ordinary frames.
+
+## CI and GitHub Pages deployment
+
+[`.github/workflows/ci-pages.yml`](.github/workflows/ci-pages.yml) runs formatting, compilation,
+Clippy, and tests for every pull request and push. After a successful `main` build, it creates the
+release WASM site with the correct GitHub Pages base path and deploys `dist/`. A manual run is also
+available from **Actions → CI and Pages → Run workflow**.
+
+One-time repository setup:
+
+1. In **Settings → Pages → Build and deployment**, set **Source** to **GitHub Actions**.
+2. Ensure Actions are enabled under **Settings → Actions → General**. The workflow uses only the
+   automatically provided `GITHUB_TOKEN`; no repository secrets or deploy keys are required.
+3. Optionally protect the automatically created `github-pages` environment under
+   **Settings → Environments** so only `main` can deploy.
+
+Without a custom domain, the site is published at
+`https://<owner>.github.io/<repository>/` (for this repository,
+`https://toonsevrin.github.io/turfrace/`). GitHub may require Pages to be enabled on a public
+repository depending on the account plan.
+
+### Custom domain with Cloudflare DNS
+
+Configure the custom domain in **GitHub Settings → Pages** *before* publishing its DNS records;
+GitHub also recommends verifying the domain under the owner account's **Settings → Pages** to
+prevent takeover. Then add one of these records in Cloudflare DNS:
+
+- **Subdomain** (recommended), such as `play.example.com`: add a `CNAME` named `play` targeting
+  `<owner>.github.io` (not `/turfrace` and not the custom domain).
+- **Apex domain**, such as `example.com`: add four `A` records named `@`, targeting
+  `185.199.108.153`, `185.199.109.153`, `185.199.110.153`, and `185.199.111.153`. Cloudflare's
+  apex CNAME flattening can alternatively point `@` to `<owner>.github.io`.
+
+Start with the records set to **DNS only** (gray cloud), remove any conflicting `A`, `AAAA`, or
+`CNAME` records, and do not use wildcard DNS records. Configure both apex and `www` if both should
+work; GitHub redirects one to the domain selected in Pages settings. DNS and certificate issuance
+can take up to 24 hours. Once GitHub shows the domain check as successful, enable **Enforce HTTPS**.
+Cloudflare proxying can be enabled afterward if desired; retain GitHub's origin HTTPS and use
+Cloudflare SSL/TLS mode **Full (strict)**.
+
+See GitHub's [custom-domain instructions](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)
+and Cloudflare's [CNAME flattening documentation](https://developers.cloudflare.com/dns/cname-flattening/).

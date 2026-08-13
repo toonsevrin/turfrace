@@ -16,7 +16,7 @@ use crate::{
 use super::capture_systems::{detect_closures, resolve_captures};
 use super::lifecycle::{
     AttractSeedSequence, MatchLoadingFrames, advance_countdown, advance_result_hold,
-    begin_attract_match, begin_from_lobby, cleanup_match, finish_match_loading,
+    begin_attract_match, begin_from_lobby, finish_match_loading,
 };
 use super::model::*;
 use super::npc_systems::npc_think;
@@ -66,14 +66,14 @@ fn match_is_running(state: Res<State<AppState>>, session: Res<MatchSession>) -> 
 
 fn simulation_is_active(state: &AppState, session: &MatchSession) -> bool {
     session.phase == MatchPhase::Running
-        && matches!(
-            (state, session.purpose),
-            (AppState::Playing, MatchPurpose::Playable) | (AppState::Home, MatchPurpose::Attract)
-        )
+        && match session.purpose {
+            MatchPurpose::Playable => *state == AppState::Playing,
+            MatchPurpose::Attract => state.shows_attract_match(),
+        }
 }
 
-fn match_is_attract(session: Res<MatchSession>) -> bool {
-    session.purpose == MatchPurpose::Attract
+fn attract_match_is_missing(session: Res<MatchSession>) -> bool {
+    session.purpose != MatchPurpose::Attract || session.phase == MatchPhase::Idle
 }
 
 impl Plugin for MatchPlugin {
@@ -111,16 +111,18 @@ impl Plugin for MatchPlugin {
             .configure_sets(FixedUpdate, sets)
             .add_systems(Startup, configure_fixed_timestep)
             .add_systems(OnEnter(AppState::MatchLoading), begin_from_lobby)
-            .add_systems(OnEnter(AppState::Home), begin_attract_match)
             .add_systems(
-                OnExit(AppState::Home),
-                cleanup_match.run_if(match_is_attract),
+                OnEnter(AppState::Home),
+                begin_attract_match.run_if(attract_match_is_missing),
+            )
+            .add_systems(
+                OnEnter(AppState::Lobby),
+                begin_attract_match.run_if(attract_match_is_missing),
             )
             .add_systems(
                 Update,
                 finish_match_loading.run_if(in_state(AppState::MatchLoading)),
             )
-            .add_systems(OnEnter(AppState::Lobby), cleanup_match)
             .add_systems(
                 FixedUpdate,
                 advance_countdown.run_if(match_is_counting_down),

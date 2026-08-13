@@ -17,6 +17,33 @@ pub(super) struct ControllerNavOutput<'w> {
     audio: MessageWriter<'w, PlayAudioCue>,
 }
 
+type DecorativeAnimations<'w, 's> =
+    Query<'w, 's, (&'static DecorativeRibbon, &'static mut UiTransform)>;
+type ReadyAnimations<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ReadyPrompt,
+        &'static mut BorderColor,
+        &'static mut BackgroundColor,
+        &'static mut UiTransform,
+    ),
+>;
+type LobbyCardAnimations<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LobbyCardVisual,
+        &'static mut BorderColor,
+        &'static mut BackgroundColor,
+        &'static mut UiTransform,
+    ),
+>;
+type JoinBeaconAnimations<'w, 's> =
+    Query<'w, 's, (&'static LobbyJoinBeacon, &'static mut UiTransform)>;
+type CountdownAnimations<'w, 's> =
+    Query<'w, 's, &'static mut UiTransform, With<LobbyCountdownOverlay>>;
+
 #[derive(SystemParam)]
 pub(super) struct UiActionResources<'w> {
     state: Res<'w, State<AppState>>,
@@ -35,24 +62,81 @@ pub(super) struct UiActionResources<'w> {
 pub(super) fn animate_background(
     time: Res<Time>,
     settings: Res<UserSettings>,
-    mut trails: Query<(&DecorativeRibbon, &mut UiTransform)>,
-    mut ready_prompts: Query<(&ReadyPrompt, &mut BackgroundColor)>,
+    mut animated: ParamSet<(
+        DecorativeAnimations,
+        ReadyAnimations,
+        LobbyCardAnimations,
+        JoinBeaconAnimations,
+        CountdownAnimations,
+    )>,
 ) {
-    if settings.reduced_motion {
-        return;
-    }
-    for (trail, mut transform) in &mut trails {
+    for (trail, mut transform) in &mut animated.p0() {
+        if settings.reduced_motion {
+            transform.translation = Val2::ZERO;
+            continue;
+        }
         let t = time.elapsed_secs() * trail.speed + trail.phase;
         transform.translation = Val2::px(
             t.sin() * trail.amplitude,
             (t * 0.73).cos() * trail.amplitude * 0.5,
         );
     }
-    for (prompt, mut background) in &mut ready_prompts {
-        let t = time.elapsed_secs() * 3.0 + prompt.phase;
-        background.0 = prompt
-            .color
-            .with_alpha(0.045 + (t.sin() * 0.5 + 0.5) * 0.075);
+    for (prompt, mut border, mut background, mut transform) in &mut animated.p1() {
+        let pulse = if settings.reduced_motion || prompt.ready {
+            0.0
+        } else {
+            (time.elapsed_secs() * 3.4 + prompt.phase).sin() * 0.5 + 0.5
+        };
+        border.set_all(prompt.color.with_alpha(if prompt.ready {
+            0.92
+        } else {
+            0.62 + pulse * 0.36
+        }));
+        background.0 = prompt.color.with_alpha(if prompt.ready {
+            0.15
+        } else {
+            0.08 + pulse * 0.08
+        });
+        transform.scale = Vec2::splat(1.0 + pulse * 0.028);
+    }
+    for (card, mut border, mut background, mut transform) in &mut animated.p2() {
+        let pulse = if settings.reduced_motion || card.ready {
+            0.0
+        } else {
+            (time.elapsed_secs() * 1.9 + card.phase).sin() * 0.5 + 0.5
+        };
+        border.set_all(card.color.with_alpha(if card.ready {
+            0.88
+        } else {
+            0.46 + pulse * 0.16
+        }));
+        background.0 = if card.ready {
+            Color::srgb_u8(251, 249, 242).with_alpha(0.97)
+        } else {
+            Color::srgb_u8(247, 245, 239).with_alpha(0.94 + pulse * 0.025)
+        };
+        transform.translation = if settings.reduced_motion {
+            Val2::ZERO
+        } else {
+            Val2::px(0.0, -(pulse * 1.5))
+        };
+    }
+    for (beacon, mut transform) in &mut animated.p3() {
+        let pulse = if settings.reduced_motion {
+            0.0
+        } else {
+            (time.elapsed_secs() * 2.6 + beacon.phase).sin() * 0.5 + 0.5
+        };
+        transform.scale = Vec2::splat(1.0 + pulse * 0.045);
+        transform.translation = Val2::px(0.0, -pulse * 3.0);
+    }
+    for mut transform in &mut animated.p4() {
+        let pulse = if settings.reduced_motion {
+            0.0
+        } else {
+            (time.elapsed_secs() * 5.0).sin() * 0.5 + 0.5
+        };
+        transform.scale = Vec2::splat(1.0 + pulse * 0.08);
     }
 }
 
@@ -187,6 +271,7 @@ pub(super) struct FocusVisualState {
     remaining: f32,
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn update_button_focus(
     time: Res<Time>,
     focus: Res<UiFocus>,
@@ -197,6 +282,7 @@ pub(super) fn update_button_focus(
             &mut BackgroundColor,
             &mut BorderColor,
             &mut UiTransform,
+            Option<&LobbySelectorButton>,
         ),
         With<IntegratedMenuButton>,
     >,
@@ -220,19 +306,34 @@ pub(super) fn update_button_focus(
     } else {
         1.0 - 2.0_f32.powf(-time.delta_secs().min(0.1) / 0.075)
     };
-    for (entity, interaction, mut background, mut border, mut transform) in &mut buttons {
+    for (entity, interaction, mut background, mut border, mut transform, selector) in &mut buttons {
         let selected = focus.entity == Some(entity) || *interaction == Interaction::Hovered;
-        background.0 = Color::NONE;
-        border.set_all(if selected { CORAL } else { Color::NONE });
+        if let Some(selector) = selector {
+            background.0 = if selected {
+                selector.accent.with_alpha(0.92)
+            } else {
+                Color::NONE
+            };
+            border.set_all(if selected {
+                selector.accent
+            } else {
+                INK.with_alpha(0.22)
+            });
+        } else {
+            // Menu text stands on its own. Focus uses color and motion without
+            // placing a colored, white, or neutral slab behind the label.
+            background.0 = Color::NONE;
+            border.set_all(Color::NONE);
+        }
         if let Ok(button_children) = children.get(entity) {
             for child in button_children.iter() {
                 if let Ok((label, mut color)) = labels.get_mut(child) {
-                    color.0 = if selected { CORAL } else { label.idle };
+                    color.0 = if selected { label.focused } else { label.idle };
                 }
                 if let Ok(grandchildren) = children.get(child) {
                     for grandchild in grandchildren.iter() {
                         if let Ok((label, mut color)) = labels.get_mut(grandchild) {
-                            color.0 = if selected { CORAL } else { label.idle };
+                            color.0 = if selected { label.focused } else { label.idle };
                         }
                     }
                 }
@@ -275,7 +376,12 @@ pub(super) fn dispatch_ui_actions(
     for message in activated.read() {
         match &message.0 {
             UiAction::State(target) => next.set(*target),
-            UiAction::Back(target) => next.set(*target),
+            UiAction::Back(target) => {
+                if *state.get() == AppState::Lobby && *target == AppState::Home {
+                    lobby.clear_humans();
+                }
+                next.set(*target);
+            }
             UiAction::Settings => {
                 settings_return.0 = *state.get();
                 next.set(AppState::Settings);
@@ -438,7 +544,7 @@ fn commit_name_edit(
             let fallback = format!("Player {}", slot + 1);
             let name = sanitize_profile_name(requested_name, &fallback);
             let profile = profiles.create(&name).clone();
-            player.profile_id = Some(profile.id);
+            player.profile = crate::lobby::LobbyProfileSelection::Saved(profile.id);
             player.display_name = profile.display_name;
             true
         }
@@ -452,7 +558,7 @@ fn commit_name_edit(
             };
             profile.display_name = sanitize_profile_name(requested_name, &profile.display_name);
             for player in &mut lobby.players {
-                if player.profile_id.as_deref() == Some(&profile_id) {
+                if player.profile.saved_id() == Some(&profile_id) {
                     player.display_name.clone_from(&profile.display_name);
                 }
             }
@@ -462,10 +568,16 @@ fn commit_name_edit(
 }
 
 fn detach_profile_from_lobby(lobby: &mut Lobby, profile_id: &str) {
+    let mut detached = false;
     for player in &mut lobby.players {
-        if player.profile_id.as_deref() == Some(profile_id) {
-            player.profile_id = None;
+        if player.profile.saved_id() == Some(profile_id) {
+            player.profile = crate::lobby::LobbyProfileSelection::Temporary;
+            player.ready = false;
+            detached = true;
         }
+    }
+    if detached {
+        lobby.launch_state = crate::lobby::LobbyLaunchState::Waiting;
     }
 }
 
@@ -667,14 +779,17 @@ mod tests {
         let mut lobby = Lobby::default();
         lobby.join(InputDeviceId::Mouse, &profiles);
         assert_eq!(
-            lobby.players[0].profile_id.as_deref(),
+            lobby.players[0].profile.saved_id(),
             Some(profile_id.as_str())
         );
 
         assert!(profiles.remove(&profile_id));
         detach_profile_from_lobby(&mut lobby, &profile_id);
         assert_eq!(lobby.players.len(), 1);
-        assert!(lobby.players[0].profile_id.is_none());
+        assert!(matches!(
+            lobby.players[0].profile,
+            crate::lobby::LobbyProfileSelection::Temporary
+        ));
         assert_eq!(lobby.players[0].display_name, "Ada");
     }
 

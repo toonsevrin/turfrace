@@ -23,6 +23,16 @@ pub enum AppState {
     Settings,
 }
 
+impl AppState {
+    /// Shell states that keep the attract match running behind their UI.
+    pub const fn shows_attract_match(self) -> bool {
+        matches!(
+            self,
+            Self::Home | Self::Lobby | Self::LocalLeaderboard | Self::Settings
+        )
+    }
+}
+
 /// Where Settings should return when dismissed.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsReturn(pub AppState);

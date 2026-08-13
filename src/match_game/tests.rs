@@ -1,7 +1,9 @@
 use super::*;
 use crate::{
-    lobby::MatchSetup,
-    match_game::lifecycle::{start_match, start_match_for},
+    lobby::{MatchLaunchMode, MatchSetup},
+    match_game::lifecycle::{
+        MatchLoadingFrames, begin_from_lobby, cleanup_match, start_match, start_match_for,
+    },
 };
 use std::time::Duration;
 
@@ -19,7 +21,14 @@ fn simulation_only_runs_in_the_shell_state_that_owns_the_match() {
     };
 
     assert!(simulation_is_active(&AppState::Playing, &playable));
-    assert!(simulation_is_active(&AppState::Home, &attract));
+    for state in [
+        AppState::Home,
+        AppState::Lobby,
+        AppState::LocalLeaderboard,
+        AppState::Settings,
+    ] {
+        assert!(simulation_is_active(&state, &attract));
+    }
     assert!(!simulation_is_active(&AppState::Paused, &playable));
     assert!(!simulation_is_active(&AppState::Home, &playable));
     assert!(!simulation_is_active(&AppState::Playing, &attract));
@@ -282,6 +291,40 @@ fn start_match_fills_empty_slots_with_npcs_and_disjoint_seeds() {
     let board = world.resource::<BoardGrid>();
     assert!(board.verify_counts());
     assert!(board.owner_counts[..8].iter().all(|count| *count > 0));
+}
+
+#[test]
+fn completed_lobby_countdown_is_consumed_by_only_the_initial_launch() {
+    let mut world = World::new();
+    world.insert_resource(GameConfig::default());
+    world.insert_resource(BoardGrid::default());
+    world.insert_resource(SimulationEvents::default());
+    world.insert_resource(MatchSetup {
+        field_seed: 91,
+        npc_roster_seed: 92,
+        npc_difficulty: crate::npc::NpcDifficulty::Normal,
+        total_competitors: 2,
+        humans: Vec::new(),
+        replay_same_field: false,
+    });
+    world.insert_resource(MatchLaunchMode::LobbyCountdownCompleted);
+    world.insert_resource(MatchLoadingFrames::default());
+
+    begin_from_lobby(&mut world);
+    assert_eq!(world.resource::<MatchSession>().phase, MatchPhase::Running);
+    let loading = world.resource::<MatchLoadingFrames>();
+    assert_eq!(loading.destination, AppState::Playing);
+    assert_eq!(
+        *world.resource::<MatchLaunchMode>(),
+        MatchLaunchMode::StandardCountdown
+    );
+
+    begin_from_lobby(&mut world);
+    assert_eq!(
+        world.resource::<MatchSession>().phase,
+        MatchPhase::Countdown,
+        "a pause-menu restart must restore the normal gameplay countdown"
+    );
 }
 
 #[test]

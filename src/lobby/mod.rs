@@ -18,16 +18,54 @@ pub const MAX_HUMANS: usize = 8;
 pub const MIN_COMPETITORS: u8 = 2;
 pub const MAX_COMPETITORS: u8 = 12;
 pub const PLAYER_COLOR_COUNT: u8 = crate::palette::PLAYER_COLORS.len() as u8;
+pub const READY_COUNTDOWN_SECONDS: f32 = 3.0;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LobbyProfileSelection {
+    Temporary,
+    Saved(String),
+    CreateNew,
+}
+
+impl LobbyProfileSelection {
+    pub fn saved_id(&self) -> Option<&str> {
+        match self {
+            Self::Saved(id) => Some(id),
+            Self::Temporary | Self::CreateNew => None,
+        }
+    }
+
+    pub fn is_create_new(&self) -> bool {
+        matches!(self, Self::CreateNew)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LobbyPlayer {
     pub device: InputDeviceId,
-    pub profile_id: Option<String>,
+    pub profile: LobbyProfileSelection,
     pub display_name: String,
     pub color_id: u8,
     pub pattern_id: u8,
     pub ready: bool,
     pub connected: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum LobbyLaunchState {
+    #[default]
+    Waiting,
+    CountingDown(f32),
+    Launching,
+}
+
+impl LobbyLaunchState {
+    pub fn remaining(self) -> Option<f32> {
+        match self {
+            Self::CountingDown(remaining) => Some(remaining),
+            Self::Waiting | Self::Launching => None,
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -37,6 +75,9 @@ pub struct Lobby {
     pub npc_count: u8,
     pub npc_difficulty: NpcDifficulty,
     pub shared_focus_owner: Option<InputDeviceId>,
+    /// The lobby remains interactive during the countdown so any racer can
+    /// unready and cancel launch without entering a second confirmation flow.
+    pub launch_state: LobbyLaunchState,
 }
 
 impl Lobby {
@@ -61,11 +102,20 @@ impl Lobby {
             && self
                 .players
                 .iter()
-                .all(|player| player.ready && player.connected)
+                .all(|player| player.ready && player.connected && !player.profile.is_create_new())
     }
 
     pub fn set_npc_count(&mut self, requested: i16) {
-        self.npc_count = requested.clamp(0, i16::from(self.max_npc_count())) as u8;
+        let count = requested.clamp(0, i16::from(self.max_npc_count())) as u8;
+        if self.npc_count != count {
+            self.npc_count = count;
+            self.cancel_launch();
+        }
+    }
+
+    pub fn cycle_npc_difficulty(&mut self, direction: i8) {
+        self.npc_difficulty = self.npc_difficulty.cycle(direction);
+        self.cancel_launch();
     }
 
     pub fn slot_for_device(&self, device: InputDeviceId) -> Option<usize> {
@@ -81,7 +131,7 @@ impl Lobby {
         let used_profiles: HashSet<&str> = self
             .players
             .iter()
-            .filter_map(|player| player.profile_id.as_deref())
+            .filter_map(|player| player.profile.saved_id())
             .collect();
         let profile = profiles
             .profiles
@@ -94,12 +144,16 @@ impl Lobby {
         let occupied_colors: HashSet<u8> =
             self.players.iter().map(|player| player.color_id).collect();
         let color_id = first_available_color(selected.preferred_color_id, &occupied_colors);
+        let pattern_id = assigned_pattern(device, number);
+        self.cancel_launch();
         self.players.push(LobbyPlayer {
             device,
-            profile_id: profile.map(|profile| profile.id.clone()),
+            profile: profile
+                .map(|profile| LobbyProfileSelection::Saved(profile.id.clone()))
+                .unwrap_or(LobbyProfileSelection::Temporary),
             display_name: selected.display_name.clone(),
             color_id,
-            pattern_id: selected.icon_id % 8,
+            pattern_id,
             ready: false,
             connected: true,
         });
@@ -108,10 +162,24 @@ impl Lobby {
         true
     }
 
+    pub fn clear_humans(&mut self) {
+        self.players.clear();
+        self.shared_focus_owner = None;
+        self.cancel_launch();
+    }
+
     pub fn leave(&mut self, device: InputDeviceId) -> bool {
         let before = self.players.len();
         self.players.retain(|player| player.device != device);
-        before != self.players.len()
+        let changed = before != self.players.len();
+        if changed {
+            self.cancel_launch();
+        }
+        changed
+    }
+
+    fn cancel_launch(&mut self) {
+        self.launch_state = LobbyLaunchState::Waiting;
     }
 
     pub fn cycle_color(&mut self, slot: usize, direction: i8) {
@@ -130,13 +198,15 @@ impl Lobby {
                 .rem_euclid(i16::from(PLAYER_COLOR_COUNT)) as u8;
             if !occupied.contains(&candidate) {
                 self.players[slot].color_id = candidate;
+                self.players[slot].ready = false;
+                self.cancel_launch();
                 break;
             }
         }
     }
 
     pub fn cycle_profile(&mut self, slot: usize, direction: i8, profiles: &ProfileStore) {
-        if slot >= self.players.len() || profiles.profiles.is_empty() {
+        if slot >= self.players.len() {
             return;
         }
         let occupied: HashSet<&str> = self
@@ -144,32 +214,56 @@ impl Lobby {
             .iter()
             .enumerate()
             .filter_map(|(index, player)| {
-                (index != slot)
-                    .then_some(player.profile_id.as_deref())
-                    .flatten()
+                (index != slot).then(|| player.profile.saved_id()).flatten()
             })
             .collect();
-        let current = self.players[slot]
-            .profile_id
-            .as_deref()
-            .and_then(|id| {
-                profiles
-                    .profiles
-                    .iter()
-                    .position(|profile| profile.id == id)
-            })
-            .unwrap_or(0);
-        for distance in 1..=profiles.profiles.len() {
-            let index = (current as isize + isize::from(direction) * distance as isize)
-                .rem_euclid(profiles.profiles.len() as isize) as usize;
-            let profile = &profiles.profiles[index];
-            if !occupied.contains(profile.id.as_str()) {
-                self.players[slot].profile_id = Some(profile.id.clone());
-                self.players[slot].display_name = profile.display_name.clone();
-                break;
-            }
+        let available: Vec<_> = profiles
+            .profiles
+            .iter()
+            .filter(|profile| !occupied.contains(profile.id.as_str()))
+            .collect();
+        // A temporary identity remains a real carousel tile until replaced by
+        // a saved profile. The position after all identities is the actionable
+        // create-profile destination.
+        let has_temporary = matches!(self.players[slot].profile, LobbyProfileSelection::Temporary);
+        let profile_offset = usize::from(has_temporary);
+        let new_profile_index = profile_offset + available.len();
+        let current = match &self.players[slot].profile {
+            LobbyProfileSelection::CreateNew => new_profile_index,
+            LobbyProfileSelection::Temporary => 0,
+            LobbyProfileSelection::Saved(id) => available
+                .iter()
+                .position(|profile| profile.id == *id)
+                .unwrap_or(0),
+        };
+        let count = new_profile_index + 1;
+        let next = (current as isize + isize::from(direction)).rem_euclid(count as isize) as usize;
+        self.players[slot].ready = false;
+        self.cancel_launch();
+        if next == new_profile_index {
+            self.players[slot].profile = LobbyProfileSelection::CreateNew;
+        } else if has_temporary && next == 0 {
+            self.players[slot].profile = LobbyProfileSelection::Temporary;
+        } else if let Some(profile) = available.get(next - profile_offset) {
+            self.players[slot].profile = LobbyProfileSelection::Saved(profile.id.clone());
+            self.players[slot].display_name = profile.display_name.clone();
         }
     }
+}
+
+fn assigned_pattern(device: InputDeviceId, slot_number: usize) -> u8 {
+    // Devices receive a stable mixed value for this lobby session. It feels
+    // randomly dealt to players without introducing nondeterminism into tests
+    // or match replay setup.
+    let device_seed = match device {
+        InputDeviceId::Mouse => 0x31_u64,
+        InputDeviceId::KeyboardPrimary => 0x57,
+        InputDeviceId::Gamepad(index) => 0x9b ^ u64::from(index).wrapping_mul(0x045d_9f3b),
+    };
+    let mixed = device_seed
+        .wrapping_add(slot_number as u64 * 0x9e37_79b9)
+        .wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    ((mixed ^ (mixed >> 29)) % 8) as u8
 }
 
 fn first_available_color(preferred: u8, occupied: &HashSet<u8>) -> u8 {
@@ -263,8 +357,6 @@ pub enum LobbyCommand {
     ChangeNpcDifficulty(i8),
     CycleColor(InputDeviceId, i8),
     CycleProfile(InputDeviceId, i8),
-    CyclePattern(InputDeviceId, i8),
-    Start,
 }
 
 #[derive(Message, Debug, Clone, Copy)]
@@ -324,9 +416,17 @@ impl<'de> Deserialize<'de> for LastLobbySettings {
 
 pub struct LobbyPlugin;
 
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MatchLaunchMode {
+    #[default]
+    StandardCountdown,
+    LobbyCountdownCompleted,
+}
+
 #[derive(SystemParam)]
 struct LobbyLaunch<'w> {
     setup: ResMut<'w, MatchSetup>,
+    mode: ResMut<'w, MatchLaunchMode>,
     next: ResMut<'w, NextState<AppState>>,
 }
 
@@ -334,6 +434,7 @@ impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Lobby>()
             .init_resource::<MatchSetup>()
+            .init_resource::<MatchLaunchMode>()
             .init_resource::<MatchDisconnectNotice>()
             .init_resource::<LastLobbySettings>()
             .add_message::<LobbyCommandMessage>()
@@ -344,6 +445,7 @@ impl Plugin for LobbyPlugin {
                     translate_menu_input,
                     handle_disconnections,
                     apply_lobby_commands,
+                    tick_ready_countdown,
                 )
                     .chain()
                     .run_if(in_state(AppState::Lobby)),
@@ -470,6 +572,10 @@ fn replace_disconnected_with_npc(
 fn restore_lobby_settings(last: Res<LastLobbySettings>, mut lobby: ResMut<Lobby>) {
     lobby.set_npc_count(i16::from(last.npc_count));
     lobby.npc_difficulty = last.npc_difficulty;
+    lobby.cancel_launch();
+    for player in &mut lobby.players {
+        player.ready = false;
+    }
 }
 
 fn translate_menu_input(
@@ -505,7 +611,7 @@ fn lobby_command_for_input(lobby: &Lobby, input: MenuInput) -> Option<LobbyComma
             Some(LobbyCommand::ToggleReady(input.device))
         }
         (Some(_), MenuAction::Back) => Some(LobbyCommand::Leave(input.device)),
-        (Some(_), MenuAction::Pause) => Some(LobbyCommand::Start),
+        (Some(_), MenuAction::Pause) => Some(LobbyCommand::ToggleReady(input.device)),
         (Some(_), MenuAction::ColorPrevious) => Some(LobbyCommand::CycleColor(input.device, -1)),
         (Some(_), MenuAction::ColorNext) => Some(LobbyCommand::CycleColor(input.device, 1)),
         _ => None,
@@ -531,7 +637,6 @@ fn apply_lobby_commands(
     mut last: ResMut<LastLobbySettings>,
     mut persistence: ResMut<PersistenceStatus>,
     mut audio: MessageWriter<PlayAudioCue>,
-    mut launch: LobbyLaunch,
 ) {
     for message in messages.read() {
         match message.0 {
@@ -544,19 +649,23 @@ fn apply_lobby_commands(
                 lobby.leave(device);
             }
             LobbyCommand::ToggleReady(device) => {
-                if let Some(slot) = lobby.slot_for_device(device) {
+                if let Some(slot) = lobby.slot_for_device(device)
+                    && !lobby.players[slot].profile.is_create_new()
+                {
                     lobby.players[slot].ready = !lobby.players[slot].ready;
+                    lobby.cancel_launch();
                     audio.write(PlayAudioCue::human(AudioCue::Ready));
                 }
             }
             LobbyCommand::ChangeNpcCount(delta) => {
                 let requested = i16::from(lobby.npc_count()) + i16::from(delta);
                 lobby.set_npc_count(requested);
+                lobby.cancel_launch();
                 last.npc_count = lobby.npc_count();
                 persistence.dirty = true;
             }
             LobbyCommand::ChangeNpcDifficulty(delta) => {
-                lobby.npc_difficulty = lobby.npc_difficulty.cycle(delta);
+                lobby.cycle_npc_difficulty(delta);
                 last.npc_difficulty = lobby.npc_difficulty;
                 persistence.dirty = true;
             }
@@ -570,21 +679,47 @@ fn apply_lobby_commands(
                     lobby.cycle_profile(slot, direction, &profiles);
                 }
             }
-            LobbyCommand::CyclePattern(device, direction) => {
-                if let Some(slot) = lobby.slot_for_device(device) {
-                    lobby.players[slot].pattern_id = (i16::from(lobby.players[slot].pattern_id)
-                        + i16::from(direction))
-                    .rem_euclid(8) as u8;
-                }
-            }
-            LobbyCommand::Start if lobby.can_start() => {
-                prepare_match_setup(&lobby, &mut launch.setup);
-                audio.write(PlayAudioCue::human(AudioCue::MenuConfirm));
-                launch.next.set(AppState::MatchLoading);
-            }
-            LobbyCommand::Start => {}
         }
     }
+}
+
+fn tick_ready_countdown(
+    time: Res<Time>,
+    mut lobby: ResMut<Lobby>,
+    mut audio: MessageWriter<PlayAudioCue>,
+    mut launch: LobbyLaunch,
+) {
+    let before = lobby.launch_state.remaining().map(f32::ceil);
+    if advance_ready_countdown(&mut lobby, time.delta_secs()) {
+        audio.write(PlayAudioCue::human(AudioCue::Countdown));
+        prepare_match_setup(&lobby, &mut launch.setup);
+        *launch.mode = MatchLaunchMode::LobbyCountdownCompleted;
+        audio.write(PlayAudioCue::human(AudioCue::MenuConfirm));
+        launch.next.set(AppState::MatchLoading);
+    } else if lobby.launch_state.remaining().map(f32::ceil) != before
+        && lobby.launch_state.remaining().is_some()
+    {
+        audio.write(PlayAudioCue::human(AudioCue::Countdown));
+    }
+}
+
+fn advance_ready_countdown(lobby: &mut Lobby, delta_seconds: f32) -> bool {
+    if !lobby.can_start() {
+        lobby.cancel_launch();
+        return false;
+    }
+    let remaining = match lobby.launch_state {
+        LobbyLaunchState::Waiting => READY_COUNTDOWN_SECONDS,
+        LobbyLaunchState::CountingDown(remaining) => remaining,
+        LobbyLaunchState::Launching => return false,
+    };
+    let remaining = (remaining - delta_seconds.max(0.0)).max(0.0);
+    if remaining > 0.0 {
+        lobby.launch_state = LobbyLaunchState::CountingDown(remaining);
+        return false;
+    }
+    lobby.launch_state = LobbyLaunchState::Launching;
+    true
 }
 
 fn prepare_match_setup(lobby: &Lobby, setup: &mut MatchSetup) {
@@ -604,7 +739,7 @@ fn prepare_match_setup(lobby: &Lobby, setup: &mut MatchSetup) {
             .iter()
             .map(|player| HumanSetup {
                 device: player.device,
-                profile_id: player.profile_id.clone(),
+                profile_id: player.profile.saved_id().map(str::to_owned),
                 display_name: player.display_name.clone(),
                 color_id: player.color_id,
                 pattern_id: player.pattern_id,
@@ -615,204 +750,5 @@ fn prepare_match_setup(lobby: &Lobby, setup: &mut MatchSetup) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn robot_count_is_explicit_and_clamped_to_available_slots() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        assert_eq!(lobby.npc_count(), 0);
-        for index in 0..5 {
-            lobby.join(InputDeviceId::Gamepad(index), &profiles);
-        }
-        lobby.set_npc_count(99);
-        assert_eq!(lobby.npc_count(), 7);
-        assert_eq!(lobby.total_competitors(), 12);
-    }
-
-    #[test]
-    fn start_requires_two_connected_ready_total_competitors() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        lobby.join(InputDeviceId::Mouse, &profiles);
-        lobby.players[0].ready = true;
-        assert!(!lobby.can_start());
-
-        lobby.set_npc_count(1);
-        assert!(lobby.can_start());
-
-        lobby.players[0].connected = false;
-        assert!(!lobby.can_start());
-    }
-
-    #[test]
-    fn two_ready_humans_can_start_without_robots() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        lobby.join(InputDeviceId::Mouse, &profiles);
-        lobby.join(InputDeviceId::KeyboardPrimary, &profiles);
-        lobby
-            .players
-            .iter_mut()
-            .for_each(|player| player.ready = true);
-
-        assert!(lobby.can_start());
-    }
-
-    #[test]
-    fn preparing_a_match_commits_players_without_a_second_lobby_countdown() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        lobby.join(InputDeviceId::Mouse, &profiles);
-        lobby.players[0].ready = true;
-        lobby.set_npc_count(1);
-        let mut setup = MatchSetup::default();
-
-        prepare_match_setup(&lobby, &mut setup);
-
-        assert_eq!(setup.humans.len(), 1);
-        assert_eq!(setup.humans[0].device, InputDeviceId::Mouse);
-        assert_eq!(setup.total_competitors, 2);
-        assert_eq!(setup.total_competitors, lobby.total_competitors());
-    }
-
-    #[test]
-    fn version_one_lobby_preferences_migrate_to_robot_count() {
-        let migrated: LastLobbySettings =
-            serde_json::from_str(r#"{"schema_version":1,"total_competitors":8}"#).unwrap();
-        assert_eq!(migrated.schema_version, 3);
-        assert_eq!(migrated.npc_count, 6);
-        assert_eq!(migrated.npc_difficulty, NpcDifficulty::Normal);
-    }
-
-    #[test]
-    fn version_three_lobby_preferences_round_trip() {
-        let settings = LastLobbySettings {
-            schema_version: 3,
-            npc_count: 4,
-            npc_difficulty: NpcDifficulty::Hard,
-        };
-        let encoded = serde_json::to_string(&settings).unwrap();
-        assert_eq!(
-            serde_json::from_str::<LastLobbySettings>(&encoded).unwrap(),
-            settings
-        );
-    }
-
-    #[test]
-    fn version_two_preferences_migrate_to_normal_difficulty() {
-        let migrated: LastLobbySettings =
-            serde_json::from_str(r#"{"schema_version":2,"npc_count":4}"#).unwrap();
-        assert_eq!(migrated.schema_version, 3);
-        assert_eq!(migrated.npc_count, 4);
-        assert_eq!(migrated.npc_difficulty, NpcDifficulty::Normal);
-    }
-
-    #[test]
-    fn replay_field_only_preserves_the_field_seed() {
-        let mut setup = MatchSetup::default();
-        let field = setup.field_seed;
-        let roster = setup.npc_roster_seed;
-        setup.advance_rematch(true);
-        assert_eq!(setup.field_seed, field);
-        assert_ne!(setup.npc_roster_seed, roster);
-
-        let roster = setup.npc_roster_seed;
-        setup.advance_rematch(false);
-        assert_ne!(setup.field_seed, field);
-        assert_ne!(setup.npc_roster_seed, roster);
-    }
-
-    #[test]
-    fn human_colors_remain_unique_when_cycled() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        lobby.join(InputDeviceId::Mouse, &profiles);
-        lobby.join(InputDeviceId::Gamepad(1), &profiles);
-        lobby.cycle_color(1, -1);
-        assert_ne!(lobby.players[0].color_id, lobby.players[1].color_id);
-    }
-
-    #[test]
-    fn an_assigned_mouse_can_toggle_ready_with_join_action() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        let device = InputDeviceId::Mouse;
-        assert_eq!(
-            lobby_command_for_input(
-                &lobby,
-                MenuInput {
-                    device,
-                    action: MenuAction::Join,
-                },
-            ),
-            Some(LobbyCommand::Join(device))
-        );
-        lobby.join(device, &profiles);
-        assert_eq!(
-            lobby_command_for_input(
-                &lobby,
-                MenuInput {
-                    device,
-                    action: MenuAction::Join,
-                },
-            ),
-            Some(LobbyCommand::ToggleReady(device))
-        );
-    }
-
-    #[test]
-    fn unassigned_keyboard_movement_joins_without_consuming_back() {
-        let lobby = Lobby::default();
-        assert_eq!(
-            lobby_command_for_input(
-                &lobby,
-                MenuInput {
-                    device: InputDeviceId::KeyboardPrimary,
-                    action: MenuAction::Up,
-                },
-            ),
-            Some(LobbyCommand::Join(InputDeviceId::KeyboardPrimary))
-        );
-        assert_eq!(
-            lobby_command_for_input(
-                &lobby,
-                MenuInput {
-                    device: InputDeviceId::KeyboardPrimary,
-                    action: MenuAction::Back,
-                },
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn keyboard_and_mouse_can_join_separate_slots() {
-        let profiles = ProfileStore::default();
-        let mut lobby = Lobby::default();
-        assert!(lobby.join(InputDeviceId::KeyboardPrimary, &profiles));
-        assert!(lobby.join(InputDeviceId::Mouse, &profiles));
-        assert_eq!(
-            lobby.slot_for_device(InputDeviceId::KeyboardPrimary),
-            Some(0)
-        );
-        assert_eq!(lobby.slot_for_device(InputDeviceId::Mouse), Some(1));
-    }
-
-    #[test]
-    fn unassigned_controller_navigation_joins() {
-        let lobby = Lobby::default();
-        let device = InputDeviceId::Gamepad(3);
-        assert_eq!(
-            lobby_command_for_input(
-                &lobby,
-                MenuInput {
-                    device,
-                    action: MenuAction::Right,
-                },
-            ),
-            Some(LobbyCommand::Join(device))
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;

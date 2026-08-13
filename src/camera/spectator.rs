@@ -22,7 +22,7 @@ pub(super) fn reconcile_spectator_camera(
     presentation: Res<PresentationSettings>,
     tuning: Res<super::CameraTuning>,
 ) {
-    let should_exist = (*state.get() == AppState::Home
+    let should_exist = (state.get().shows_attract_match()
         && session.purpose == MatchPurpose::Attract
         && session.phase != MatchPhase::Idle)
         || (matches!(*state.get(), AppState::Countdown | AppState::Playing)
@@ -141,6 +141,29 @@ mod tests {
         );
         assert!(large > small * 1.8);
         assert!(small > 10.0);
+    }
+
+    #[test]
+    fn shell_states_keep_the_attract_field_behind_their_ui() {
+        for state in [
+            AppState::Home,
+            AppState::Lobby,
+            AppState::LocalLeaderboard,
+            AppState::Settings,
+        ] {
+            assert!(state.shows_attract_match());
+        }
+        for state in [
+            AppState::Boot,
+            AppState::MatchLoading,
+            AppState::Countdown,
+            AppState::Playing,
+            AppState::Paused,
+            AppState::GameOver,
+            AppState::Results,
+        ] {
+            assert!(!state.shows_attract_match());
+        }
     }
 
     #[test]

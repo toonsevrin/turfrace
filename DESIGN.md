@@ -6,13 +6,20 @@ These are intentional product-level guardrails for future UI work.
 
 - Menu controls, cards, panels, and focus treatments use crisp square geometry. Do not add
   rounded corners, pill buttons, or radius-based containers.
-- Keep the paper field, ink typography, colored rails, and sparse deliberate rules as the visual
-  vocabulary. Do not use repeated row underlines as a substitute for hierarchy or spacing.
+- Keep the paper field, ink typography, and sparse deliberate geometry as the visual vocabulary.
+  Do not use repeated row underlines or detached left focus rails as a substitute for hierarchy;
+  focus belongs in type color, scale, and motion.
+- Never place a hover, focus, or selection background behind menu text—not colored, white, neutral,
+  translucent, or otherwise. Menu labels stand directly on the composition; use text color and
+  subtle motion for interaction feedback.
 - Decorative turf marks may remain organic/circular because they are background texture, not UI
   containers.
 - Prefer integrated text, color, motion, and icon cues over opaque HUD slabs or diagnostic copy.
 - Keep copy lean. Let hierarchy, color, symbols, spacing, and motion carry meaning before adding
   another label or sentence.
+- Shell screens keep the animated attract match visible until a playable match starts. Use a
+  restrained translucent scrim or paper card for legibility rather than replacing it with generic
+  decorative lines.
 
 ## Gameplay information
 
