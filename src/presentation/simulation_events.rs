@@ -29,6 +29,11 @@ pub(super) fn bridge_simulation_events(
             audio_writer.write(cue);
         }
     };
+    let listener_positions: Vec<_> = competitors
+        .iter()
+        .filter(|(_, competitor, _)| competitor.kind == CompetitorKind::Human)
+        .map(|(_, _, motion)| motion.position)
+        .collect();
     let current_leader = rankings.as_ref().and_then(|rankings| rankings.leader());
     if current_leader.is_none() {
         *last_leader = None;
@@ -43,13 +48,15 @@ pub(super) fn bridge_simulation_events(
                 play(PlayAudioCue::human(AudioCue::Go));
             }
             SimulationEvent::TrailStarted { player } => {
-                let human = lookup(&competitors, player)
-                    .is_some_and(|(_, competitor, _)| competitor.kind == CompetitorKind::Human);
-                play(PlayAudioCue {
-                    cue: AudioCue::TrailStart,
-                    human_involved: human,
-                    intensity: 0.3,
-                });
+                if let Some((_entity, competitor, motion)) = lookup(&competitors, player) {
+                    play(positional_cue(
+                        AudioCue::TrailStart,
+                        competitor,
+                        motion.position,
+                        0.3,
+                        &listener_positions,
+                    ));
+                }
             }
             SimulationEvent::Capture { player, area, .. } => {
                 if let Some((entity, competitor, motion)) = lookup(&competitors, player) {
@@ -66,11 +73,13 @@ pub(super) fn bridge_simulation_events(
                         color_id: competitor.color_id,
                         percent,
                     });
-                    play(PlayAudioCue {
-                        cue: AudioCue::Capture,
-                        human_involved: competitor.kind == CompetitorKind::Human,
-                        intensity: (percent / 10.0).clamp(0.0, 1.0),
-                    });
+                    play(positional_cue(
+                        AudioCue::Capture,
+                        competitor,
+                        motion.position,
+                        (percent / 10.0).clamp(0.0, 1.0),
+                        &listener_positions,
+                    ));
                 }
             }
             SimulationEvent::Death { victim, cause, .. } => {
@@ -85,11 +94,13 @@ pub(super) fn bridge_simulation_events(
                         DeathCause::TrailCut => AudioCue::TrailCut,
                         DeathCause::Displaced => AudioCue::Death,
                     };
-                    play(PlayAudioCue {
+                    play(positional_cue(
                         cue,
-                        human_involved: competitor.kind == CompetitorKind::Human,
-                        intensity: 0.8,
-                    });
+                        competitor,
+                        motion.position,
+                        0.8,
+                        &listener_positions,
+                    ));
                 }
             }
             SimulationEvent::Kill { killer, progress } => {
@@ -100,11 +111,13 @@ pub(super) fn bridge_simulation_events(
                         color_id: competitor.color_id,
                         progress,
                     });
-                    play(PlayAudioCue {
-                        cue: AudioCue::Kill,
-                        human_involved: competitor.kind == CompetitorKind::Human,
-                        intensity: kill_audio_intensity(progress),
-                    });
+                    play(positional_cue(
+                        AudioCue::Kill,
+                        competitor,
+                        motion.position,
+                        kill_audio_intensity(progress),
+                        &listener_positions,
+                    ));
                 }
             }
             SimulationEvent::Respawn { player } => {
@@ -114,11 +127,13 @@ pub(super) fn bridge_simulation_events(
                         position: motion.position,
                         color_id: competitor.color_id,
                     });
-                    play(PlayAudioCue {
-                        cue: AudioCue::Respawn,
-                        human_involved: competitor.kind == CompetitorKind::Human,
-                        intensity: 0.5,
-                    });
+                    play(positional_cue(
+                        AudioCue::Respawn,
+                        competitor,
+                        motion.position,
+                        0.5,
+                        &listener_positions,
+                    ));
                 }
             }
             SimulationEvent::RankingChanged => {
@@ -130,8 +145,14 @@ pub(super) fn bridge_simulation_events(
                             position: motion.position,
                             color_id: competitor.color_id,
                         });
+                        play(positional_cue(
+                            AudioCue::LeaderChange,
+                            competitor,
+                            motion.position,
+                            0.5,
+                            &listener_positions,
+                        ));
                     }
-                    play(PlayAudioCue::human(AudioCue::LeaderChange));
                     *last_leader = current_leader;
                 }
             }
@@ -141,8 +162,14 @@ pub(super) fn bridge_simulation_events(
                         position: motion.position,
                         color_id: competitor.color_id,
                     });
+                    play(positional_cue(
+                        AudioCue::Victory,
+                        competitor,
+                        motion.position,
+                        1.0,
+                        &listener_positions,
+                    ));
                 }
-                play(PlayAudioCue::human(AudioCue::Victory));
             }
         }
     }
@@ -161,6 +188,38 @@ fn lookup<'a>(
         .find(|(_, competitor, _)| competitor.id == id)
 }
 
+// Gameplay audio is a local awareness cue, not an arena-wide event feed. Keep
+// full volume only at immediate contact and make off-screen action inaudible.
+const AUDIO_FULL_VOLUME_RADIUS: f32 = 0.75;
+const AUDIO_SILENT_RADIUS: f32 = 6.0;
+
+fn positional_cue(
+    cue: AudioCue,
+    source: &Competitor,
+    position: Vec2,
+    intensity: f32,
+    listeners: &[Vec2],
+) -> PlayAudioCue {
+    PlayAudioCue {
+        cue,
+        human_involved: source.kind == CompetitorKind::Human,
+        intensity,
+        proximity: nearest_listener_gain(position, listeners),
+    }
+}
+
+fn nearest_listener_gain(source: Vec2, listeners: &[Vec2]) -> f32 {
+    let distance = listeners
+        .iter()
+        .map(|listener| source.distance(*listener))
+        .reduce(f32::min)
+        .unwrap_or(f32::INFINITY);
+    let normalized = ((distance - AUDIO_FULL_VOLUME_RADIUS)
+        / (AUDIO_SILENT_RADIUS - AUDIO_FULL_VOLUME_RADIUS))
+        .clamp(0.0, 1.0);
+    (1.0 - normalized).powi(4)
+}
+
 fn kill_audio_intensity(progress: KillProgress) -> f32 {
     (progress.streak.saturating_add(progress.total) as f32 / 10.0).clamp(0.0, 1.0)
 }
@@ -169,7 +228,9 @@ fn kill_audio_intensity(progress: KillProgress) -> f32 {
 mod tests {
     use crate::match_game::{KillProgress, MatchPurpose, MatchSession};
 
-    use super::{kill_audio_intensity, should_emit_audio};
+    use bevy::prelude::Vec2;
+
+    use super::{kill_audio_intensity, nearest_listener_gain, should_emit_audio};
 
     #[test]
     fn saturated_kill_counts_keep_audio_intensity_finite() {
@@ -181,6 +242,21 @@ mod tests {
             1.0
         );
         assert_eq!(kill_audio_intensity(KillProgress::default()), 0.0);
+    }
+
+    #[test]
+    fn positional_audio_uses_the_nearest_local_player_once() {
+        let listeners = [Vec2::ZERO, Vec2::new(30.0, 0.0)];
+        assert_eq!(nearest_listener_gain(Vec2::ZERO, &listeners), 1.0);
+        assert_eq!(nearest_listener_gain(Vec2::new(30.0, 0.0), &listeners), 1.0);
+        assert!(nearest_listener_gain(Vec2::new(2.0, 0.0), &listeners) < 0.35);
+        assert!(nearest_listener_gain(Vec2::new(3.0, 0.0), &listeners) < 0.12);
+        assert_eq!(nearest_listener_gain(Vec2::new(6.0, 0.0), &listeners), 0.0);
+        assert_eq!(
+            nearest_listener_gain(Vec2::new(15.0, 15.0), &listeners),
+            0.0
+        );
+        assert_eq!(nearest_listener_gain(Vec2::ZERO, &[]), 0.0);
     }
 
     #[test]

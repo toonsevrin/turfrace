@@ -9,6 +9,24 @@ cd "$ROOT_DIR"
 # an order of magnitude larger and is not a valid browser release candidate.
 env -u NO_COLOR trunk build --release "$@"
 
+# Trunk injects its development WebSocket client into all builds by default.
+# Release artifacts are static and have no Trunk server, so remove the injected
+# client rather than shipping a permanent /.well-known/trunk/ws retry loop.
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+index = Path("dist/index.html")
+html = index.read_text()
+pattern = re.compile(r'\n\s*<script>"use strict";\s*\n\s*\(function \(\) \{.*?</script>\s*', re.DOTALL)
+html, count = pattern.subn("\n", html)
+if count > 1:
+    raise SystemExit("found multiple injected Trunk autoreload clients")
+if "{{__TRUNK_ADDRESS__}}" in html or ".well-known/trunk/ws" in html:
+    raise SystemExit("failed to remove the injected Trunk autoreload client")
+index.write_text(html)
+PY
+
 wasm_files=(dist/*.wasm)
 if [[ ${#wasm_files[@]} -ne 1 || ! -f ${wasm_files[0]} ]]; then
     printf 'expected exactly one release WASM file in dist/\n' >&2

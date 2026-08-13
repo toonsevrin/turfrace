@@ -109,7 +109,7 @@ vector-surface renderer without starting a match:
 
 - `AppShellPlugin`: states, profiles/persistence, input abstraction, lobby, responsive UI, and browser integration.
 - `MatchPlugin`: the deterministic 60 Hz authoritative board, movement, trails, capture, combat, ranking, respawn, and NPC simulation.
-- `PresentationPlugin`: split-screen cameras, revision-built elevated territory surfaces, lean flat-shaded cube/trail/effect rendering, and procedural shared audio.
+- `PresentationPlugin`: split-screen cameras, revision-built elevated territory surfaces, lean flat-shaded cube/trail/effect rendering, and a shared CC0 arcade sound suite.
 
 Gameplay is 2D and deterministic even though presentation is 3D. Input and NPCs both produce the same steering intent, and presentation consumes simulation events without owning rules. Territory ownership is converted into bounded smooth owner meshes only when its revision changes; the grid is never rendered directly and no territory work runs on ordinary frames.
 

@@ -9,6 +9,38 @@
     <title>Turfrace</title>
     <link data-trunk rel="copy-dir" href="assets" />
     <link data-trunk rel="css" href="web/styles.css" />
+    <!-- Browsers suspend Web Audio contexts created before the first user
+         gesture. Bevy creates its context during startup, so retain each
+         context and resume it in the capture phase before the game handles the
+         same click/key press and emits its first sound cue. -->
+    <script>
+      (() => {
+        const contexts = new Set();
+        for (const name of ["AudioContext", "webkitAudioContext"]) {
+          const NativeAudioContext = window[name];
+          if (!NativeAudioContext) continue;
+          window[name] = new Proxy(NativeAudioContext, {
+            construct(target, args, newTarget) {
+              const context = Reflect.construct(target, args, newTarget);
+              contexts.add(context);
+              return context;
+            },
+          });
+        }
+        const unlockAudio = () => {
+          for (const context of contexts) {
+            if (context.state === "suspended") {
+              context.resume().catch(error =>
+                console.warn("Web Audio could not be resumed", error),
+              );
+            }
+          }
+        };
+        for (const event of ["pointerdown", "touchstart", "keydown"]) {
+          window.addEventListener(event, unlockAudio, { capture: true, passive: true });
+        }
+      })();
+    </script>
     <!-- Rust's release profile performs the WASM optimization. Keep Trunk's
          wasm-opt pass disabled because its bundled validator does not accept
          the bulk-memory and non-trapping-float operations emitted here. -->

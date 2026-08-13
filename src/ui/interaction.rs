@@ -156,10 +156,10 @@ pub(super) fn button_interactions(
                 }
             }
             Interaction::Hovered => {
+                // Pointer hover only moves focus. Animated controls can cross a
+                // stationary cursor repeatedly, so hover audio would retrigger
+                // without deliberate user input and produce a clicking tail.
                 focus.entity = Some(entity);
-                if let Some(cue) = audio_cue_for_interaction(*interaction, action) {
-                    audio.write(PlayAudioCue::human(cue));
-                }
             }
             Interaction::None => {}
         }
@@ -169,7 +169,7 @@ pub(super) fn button_interactions(
 fn audio_cue_for_interaction(interaction: Interaction, action: &UiAction) -> Option<AudioCue> {
     match interaction {
         Interaction::Pressed => Some(audio_cue_for_action(action)),
-        Interaction::Hovered => Some(AudioCue::MenuMove),
+        Interaction::Hovered => None,
         Interaction::None => None,
     }
 }
@@ -826,7 +826,8 @@ mod tests {
         let action = UiAction::Resume;
         assert_eq!(
             audio_cue_for_interaction(Interaction::Hovered, &action),
-            Some(AudioCue::MenuMove)
+            None,
+            "pointer hover must stay silent even when animated controls retrigger it"
         );
         assert_eq!(
             audio_cue_for_interaction(Interaction::Pressed, &action),
