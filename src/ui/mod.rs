@@ -2,11 +2,13 @@
 
 mod gameplay_hud;
 mod interaction;
+mod local_hud;
 mod screens;
 mod theme;
 
 use gameplay_hud::*;
 use interaction::*;
+use local_hud::*;
 use screens::*;
 use theme::*;
 
@@ -326,7 +328,12 @@ impl Plugin for UiPlugin {
             )
             .add_systems(
                 Update,
-                (reconcile_human_huds, update_gameplay_hud, animate_kill_feed),
+                (
+                    reconcile_human_huds,
+                    update_local_hints,
+                    update_gameplay_hud,
+                    animate_kill_feed,
+                ),
             )
             .add_systems(
                 PostUpdate,

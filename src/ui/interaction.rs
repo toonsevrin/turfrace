@@ -97,7 +97,8 @@ pub(super) fn animate_background(
         } else {
             0.08 + pulse * 0.08
         });
-        transform.scale = Vec2::splat(1.0 + pulse * 0.028);
+        // Never move a control's hit target beneath a stationary pointer.
+        transform.scale = Vec2::ONE;
     }
     for (card, mut border, mut background, mut transform) in &mut animated.p2() {
         let pulse = if settings.reduced_motion || card.ready {
@@ -115,11 +116,7 @@ pub(super) fn animate_background(
         } else {
             Color::srgb_u8(247, 245, 239).with_alpha(0.94 + pulse * 0.025)
         };
-        transform.translation = if settings.reduced_motion {
-            Val2::ZERO
-        } else {
-            Val2::px(0.0, -(pulse * 1.5))
-        };
+        transform.translation = Val2::ZERO;
     }
     for (beacon, mut transform) in &mut animated.p3() {
         let pulse = if settings.reduced_motion {
@@ -320,20 +317,21 @@ pub(super) fn update_button_focus(
                 INK.with_alpha(0.22)
             });
         } else {
-            // Menu text stands on its own. Focus uses color and motion without
-            // placing a colored, white, or neutral slab behind the label.
-            background.0 = Color::NONE;
-            border.set_all(Color::NONE);
+            // Standard menu buttons stay transparent and unboxed. Focus is
+            // communicated by the label, including for keyboard navigation.
+            let (fill, outline) = standard_menu_button_colors();
+            background.0 = fill;
+            border.set_all(outline);
         }
         if let Ok(button_children) = children.get(entity) {
             for child in button_children.iter() {
                 if let Ok((label, mut color)) = labels.get_mut(child) {
-                    color.0 = if selected { label.focused } else { label.idle };
+                    color.0 = focused_label_color(label, selected);
                 }
                 if let Ok(grandchildren) = children.get(child) {
                     for grandchild in grandchildren.iter() {
                         if let Ok((label, mut color)) = labels.get_mut(grandchild) {
-                            color.0 = if selected { label.focused } else { label.idle };
+                            color.0 = focused_label_color(label, selected);
                         }
                     }
                 }
@@ -341,8 +339,6 @@ pub(super) fn update_button_focus(
         }
         let target_scale = if *interaction == Interaction::Pressed {
             0.975
-        } else if selected {
-            1.025
         } else {
             1.0
         };
@@ -350,6 +346,14 @@ pub(super) fn update_button_focus(
             .scale
             .lerp(Vec2::splat(target_scale), alpha.clamp(0.0, 1.0));
     }
+}
+
+fn standard_menu_button_colors() -> (Color, Color) {
+    (Color::NONE, Color::NONE)
+}
+
+fn focused_label_color(label: &IntegratedButtonLabel, selected: bool) -> Color {
+    if selected { label.focused } else { label.idle }
 }
 
 pub(super) fn dispatch_ui_actions(
@@ -819,6 +823,20 @@ mod tests {
             true,
             InputDeviceId::KeyboardPrimary,
         ));
+    }
+
+    #[test]
+    fn standard_menu_buttons_are_unboxed_while_labels_still_focus() {
+        let label = IntegratedButtonLabel {
+            idle: INK,
+            focused: CORAL,
+        };
+
+        let (fill, outline) = standard_menu_button_colors();
+        assert_eq!(fill, Color::NONE);
+        assert_eq!(outline, Color::NONE);
+        assert_eq!(focused_label_color(&label, false), INK);
+        assert_eq!(focused_label_color(&label, true), CORAL);
     }
 
     #[test]

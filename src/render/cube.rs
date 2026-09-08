@@ -95,10 +95,7 @@ pub(super) fn sync_competitor_visuals(
     let Some(assets) = assets else { return };
     let mut rendered = [false; 12];
     for (entity, mut proxy, mut transform, mut root_visibility, children) in &mut proxies {
-        let Some((_, visual, trail)) = sources
-            .iter()
-            .find(|(source, _, _)| *source == proxy.source)
-        else {
+        let Ok((_, visual, trail)) = sources.get(proxy.source) else {
             commands.entity(entity).despawn();
             continue;
         };
@@ -339,6 +336,28 @@ fn horizontal_disc_transform(translation: Vec3, scale: Vec3) -> Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_source_lookup_targets_the_simulation_entity() {
+        let mut world = World::new();
+        let source = world
+            .spawn((CompetitorVisual::default(), TrailVisual::default()))
+            .id();
+        let proxy = world
+            .spawn(CompetitorProxy {
+                source,
+                rendered_heading: Vec2::NEG_Y,
+                lean_radians: 0.0,
+            })
+            .id();
+        let mut sources = world.query::<(Entity, &CompetitorVisual, Option<&TrailVisual>)>();
+        let Ok((_, visual, trail)) = sources.get(&world, source) else {
+            panic!("source entity should be queryable");
+        };
+        assert_eq!(visual.id, 0);
+        assert!(trail.is_some());
+        assert!(sources.get(&world, proxy).is_err());
+    }
 
     #[test]
     fn disc_meshes_are_rotated_from_xy_onto_the_field() {

@@ -71,10 +71,7 @@ pub(super) fn sync_trail_visuals(
     let Some(assets) = assets else { return };
     let mut rendered = [false; 12];
     for (entity, mut proxy, mesh_handle) in &mut proxies {
-        let Some((_, visual, trail)) = sources
-            .iter()
-            .find(|(source, _, _)| *source == proxy.source)
-        else {
+        let Ok((_, visual, trail)) = sources.get(proxy.source) else {
             commands.entity(entity).despawn();
             continue;
         };
@@ -387,7 +384,13 @@ mod tests {
         let indices = mesh.indices().unwrap();
 
         assert_eq!(indices.iter().take(12).count(), 12);
-        for triangle in indices.iter().take(12).collect::<Vec<_>>().chunks_exact(3) {
+        for triangle in indices
+            .iter()
+            .take(12)
+            .collect::<Vec<_>>()
+            .as_chunks::<3>()
+            .0
+        {
             let [a, b, c] = [
                 positions[triangle[0]],
                 positions[triangle[1]],

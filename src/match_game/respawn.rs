@@ -104,7 +104,6 @@ pub(super) fn advance_respawns(
             position,
             config.starting_territory_radius,
             competitor.id,
-            &living_scratch,
             &mut displacement_credits,
         );
         reset_respawn_anchor(&board, &mut motion, &mut last_owned, position);
@@ -261,7 +260,6 @@ pub(super) fn claim_respawn_seed(
     position: Vec2,
     radius: f32,
     respawning: CompetitorId,
-    occupants: &[(CompetitorId, Vec2)],
     credits: &mut DisplacementCredits,
 ) {
     let previous_areas: [f32; MAX_COMPETITORS] =
@@ -270,9 +268,6 @@ pub(super) fn claim_respawn_seed(
     let result = territory_map.seed_owner(position, radius, respawning);
     if territory_map.revision != revision {
         territory_map.refresh_sample_cache(board, &result.claim);
-        for (_, removed) in &result.disconnected_by_owner {
-            territory_map.refresh_sample_cache(board, removed);
-        }
     }
     for (index, previous) in previous_areas.into_iter().enumerate() {
         let victim = CompetitorId(index as u8);
@@ -280,19 +275,6 @@ pub(super) fn claim_respawn_seed(
             credits.0.push((victim, respawning));
         }
     }
-    credits.0.extend(
-        occupants
-            .iter()
-            .filter(|(owner, position)| {
-                result
-                    .disconnected_by_owner
-                    .iter()
-                    .any(|(removed_owner, removed)| {
-                        owner == removed_owner && removed.contains_world(*position)
-                    })
-            })
-            .map(|(owner, _)| (*owner, respawning)),
-    );
     credits.0.sort_unstable();
     credits.0.dedup();
 }

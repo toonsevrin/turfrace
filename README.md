@@ -5,8 +5,9 @@ Turfrace is a fast local multiplayer territory game for 1–8 humans, with NPCs 
 The v0.1 implementation is a static Rust/Bevy 0.19 WebAssembly application. It has no server, telemetry, or network play. Profiles, preferences, lobby choices, and lifetime statistics remain in browser-local storage. Fresh lobbies start with no robots; add them explicitly with the robot stepper.
 
 Territory is exact fixed-point vector geometry with a bounded render/broadphase cache. Every
-competitor has one spawn-anchored island: a capture severs any other lobe, and a cube standing on
-that removed lobe is displaced through the normal respawn flow.
+competitor keeps every island they have claimed: cutting a bridge steals the bridge, not the
+land beyond it, and never kills a racer on that island. Only exposed trail collisions or losing
+all remaining turf eliminate a racer. Respawns take 2 seconds, then 4, capped at 5 seconds.
 
 ## Run it
 
@@ -22,6 +23,16 @@ Web development requires the WASM target and [Trunk-rs](https://github.com/trunk
 rustup target add wasm32-unknown-unknown
 cargo install trunk --locked
 trunk serve --open
+```
+
+**Performance note:** plain `trunk serve` builds debug WebAssembly. It is useful for
+iteration but is not a valid performance benchmark: Rust debug WASM is substantially
+less optimized (and often larger) than release WASM. Use the following release command
+when measuring browser performance; it keeps the same development workflow and only
+changes the build profile:
+
+```sh
+trunk serve --release --open
 ```
 
 To test the optimized browser build locally, let Trunk build the release WASM

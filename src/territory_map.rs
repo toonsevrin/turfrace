@@ -14,11 +14,9 @@ use crate::{
 };
 
 mod arena_boundary;
-mod connectivity;
 mod spatial_index;
 
 pub use arena_boundary::ArenaBoundary;
-use connectivity::retain_spawn_components;
 use spatial_index::TerritorySpatialIndex;
 
 const CIRCLE_SAMPLES: usize = 32;
@@ -27,8 +25,6 @@ const STROKE_SAMPLES: usize = 12;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorCaptureResult {
     pub claim: MultiPolygon,
-    /// Territory removed because it was severed from an owner's spawn anchor.
-    pub disconnected_by_owner: Vec<(CompetitorId, MultiPolygon)>,
     pub claimed_area: f32,
     pub stolen_by_owner: Vec<(CompetitorId, f32)>,
     pub used_loop_fill: bool,
@@ -40,7 +36,6 @@ pub struct TerritoryMap {
     pub territories: [MultiPolygon; MAX_COMPETITORS],
     pub arena_area: f32,
     pub revision: u64,
-    spawn_anchors: [Option<Vec2>; MAX_COMPETITORS],
     index: TerritorySpatialIndex,
 }
 
@@ -58,7 +53,6 @@ impl TerritoryMap {
             territories: std::array::from_fn(|_| MultiPolygon::empty()),
             arena_area,
             revision: 1,
-            spawn_anchors: [None; MAX_COMPETITORS],
             index: TerritorySpatialIndex::default(),
         }
     }
@@ -167,8 +161,7 @@ impl TerritoryMap {
     /// Establishes a fresh spawn seed for an owner with no existing territory.
     ///
     /// Seeding is a lifecycle transition, not a general-purpose claim mode:
-    /// callers must clear the owner first. The commit still enforces every
-    /// other owner's spawn connectivity and reports any territory it removes.
+    /// callers must clear the owner first.
     pub fn seed_owner(
         &mut self,
         center: Vec2,
@@ -179,14 +172,12 @@ impl TerritoryMap {
             self.territories[player.index()].is_empty(),
             "cannot seed an owner that still has territory"
         );
-        self.spawn_anchors[player.index()] = Some(center);
         let disk = circle(center, radius, CIRCLE_SAMPLES);
         self.apply_claim(player, disk)
     }
 
     pub fn clear_owner(&mut self, player: CompetitorId) -> f32 {
         let old = self.area(player);
-        self.spawn_anchors[player.index()] = None;
         if old > 0.0 {
             self.territories[player.index()] = MultiPolygon::empty();
             self.rebuild_index();
@@ -248,7 +239,6 @@ impl TerritoryMap {
 
         VectorCaptureResult {
             claim,
-            disconnected_by_owner: Vec::new(),
             claimed_area: 0.0,
             stolen_by_owner: Vec::new(),
             used_loop_fill,
@@ -276,8 +266,6 @@ impl TerritoryMap {
             }
         }
         self.territories[player.index()] = self.territories[player.index()].union(&claim);
-        let disconnected_by_owner =
-            retain_spawn_components(&mut self.territories, &mut self.spawn_anchors);
         self.rebuild_index();
         let claimed_area = (self.area(player) - before).max(0.0);
         if claimed_area > 1e-5 || !stolen_by_owner.is_empty() {
@@ -285,7 +273,6 @@ impl TerritoryMap {
         }
         VectorCaptureResult {
             claim,
-            disconnected_by_owner,
             claimed_area,
             stolen_by_owner,
             used_loop_fill: false,
@@ -313,7 +300,6 @@ impl TerritoryMap {
             let applied = self.apply_claim(*player, result.claim.clone());
             result.claimed_area = applied.claimed_area;
             result.stolen_by_owner = applied.stolen_by_owner;
-            result.disconnected_by_owner = applied.disconnected_by_owner;
             if index + 1 < capture_count {
                 if committed.is_empty() {
                     committed.clone_from(&result.claim);
@@ -405,6 +391,16 @@ impl TerritoryMap {
             let Some(end_anchor) = nearest_contour_anchor(&polygon.outer, end) else {
                 continue;
             };
+            // Both ends must belong to this island. Snapping a trail to an
+            // unrelated nearest contour can manufacture a remote capture (or
+            // select a smaller, wrong lobe when an owner has several islands).
+            // Allow only fixed-point/boundary-crossing roundoff outside it.
+            let touches = |point: Vec2, anchor: ContourAnchor| {
+                polygon.contains_world(point) || point.distance_squared(anchor.point) <= 0.0001
+            };
+            if !touches(start, start_anchor) || !touches(end, end_anchor) {
+                continue;
+            }
             let Some(first) = closed_loop(trail, &polygon.outer, start_anchor, end_anchor, false)
             else {
                 continue;
@@ -580,69 +576,142 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_removes_territory_severed_from_spawn_anchor() {
-        let arena = MultiPolygon::from_outer(&[
-            Vec2::new(-12.0, -8.0),
-            Vec2::new(12.0, -8.0),
-            Vec2::new(12.0, 8.0),
-            Vec2::new(-12.0, 8.0),
-        ]);
-        let mut map = TerritoryMap::new(arena);
+    fn claim_only_removes_the_geometry_it_covers_and_preserves_islands() {
+        let mut map = TerritoryMap::new(arena());
         let victim = CompetitorId(0);
         let attacker = CompetitorId(1);
         let left = rectangle(Vec2::new(-8.0, -3.0), Vec2::new(-2.0, 3.0));
         let bridge = rectangle(Vec2::new(-2.0, -0.6), Vec2::new(2.0, 0.6));
         let right = rectangle(Vec2::new(2.0, -3.0), Vec2::new(8.0, 3.0));
         map.territories[victim.index()] = left.union(&bridge).union(&right);
-        map.spawn_anchors[victim.index()] = Some(Vec2::new(-5.0, 0.0));
         map.rebuild_index();
+        let before_right_area = map.area(victim);
 
-        let cut = rectangle(Vec2::new(-0.4, -2.0), Vec2::new(0.4, 2.0));
-        let result = map.apply_claim(attacker, cut);
+        let result = map.apply_claim(
+            attacker,
+            rectangle(Vec2::new(-0.4, -2.0), Vec2::new(0.4, 2.0)),
+        );
 
+        assert!(
+            result
+                .stolen_by_owner
+                .iter()
+                .any(|(owner, area)| { *owner == victim && *area > 0.0 })
+        );
         assert!(map.owns(Vec2::new(-5.0, 0.0), victim));
-        assert!(!map.owns(Vec2::new(5.0, 0.0), victim));
-        assert_eq!(map.territories[victim.index()].polygons.len(), 1);
-        assert!(result.disconnected_by_owner.iter().any(
-            |(owner, removed)| *owner == victim && removed.contains_world(Vec2::new(5.0, 0.0))
-        ));
+        assert!(map.owns(Vec2::new(5.0, 0.0), victim));
+        assert_eq!(map.territories[victim.index()].polygons.len(), 2);
+        assert!(map.area(victim) > before_right_area - 3.0);
     }
 
     #[test]
-    fn losing_the_spawn_anchor_removes_all_remaining_islands() {
+    fn stealing_the_anchor_area_does_not_erase_the_remainder() {
         let mut map = TerritoryMap::new(arena());
         let victim = CompetitorId(0);
         let attacker = CompetitorId(1);
-        map.spawn_anchors[victim.index()] = Some(Vec2::new(-5.0, 0.0));
         map.territories[victim.index()] = rectangle(Vec2::new(-8.0, -2.0), Vec2::new(8.0, 2.0));
         map.rebuild_index();
 
-        let result = map.apply_claim(
+        map.apply_claim(
             attacker,
             rectangle(Vec2::new(-6.0, -3.0), Vec2::new(-4.0, 3.0)),
         );
 
-        assert!(map.territories[victim.index()].is_empty());
-        assert!(map.spawn_anchors[victim.index()].is_none());
-        assert!(result.disconnected_by_owner.iter().any(
-            |(owner, removed)| *owner == victim && removed.contains_world(Vec2::new(5.0, 0.0))
-        ));
+        assert!(!map.owns(Vec2::new(-5.0, 0.0), victim));
+        assert!(map.owns(Vec2::new(5.0, 0.0), victim));
+        assert!(!map.territories[victim.index()].is_empty());
     }
 
     #[test]
-    fn seed_anchor_is_replaced_after_a_full_clear() {
+    fn clear_owner_removes_all_islands_for_respawn_lifecycle() {
         let mut map = TerritoryMap::new(arena());
         let player = CompetitorId(0);
-        map.seed_owner(Vec2::new(-6.0, 0.0), 2.0, player);
-        assert_eq!(
-            map.spawn_anchors[player.index()],
-            Some(Vec2::new(-6.0, 0.0))
-        );
+        map.territories[player.index()] = rectangle(Vec2::new(-8.0, -2.0), Vec2::new(8.0, 2.0));
+        assert!(map.clear_owner(player) > 0.0);
+        assert!(map.territories[player.index()].is_empty());
+    }
 
-        map.clear_owner(player);
-        assert!(map.spawn_anchors[player.index()].is_none());
-        map.seed_owner(Vec2::new(6.0, 0.0), 2.0, player);
-        assert_eq!(map.spawn_anchors[player.index()], Some(Vec2::new(6.0, 0.0)));
+    #[test]
+    fn disconnected_island_can_close_a_trail() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        let main = rectangle(Vec2::new(-8.0, -8.0), Vec2::new(8.0, 8.0));
+        let island = rectangle(Vec2::new(12.0, -3.0), Vec2::new(16.0, 3.0));
+        map.territories[player.index()] = main.union(&island);
+        map.rebuild_index();
+
+        let mut trail = ActiveTrail::new(
+            player,
+            crate::board::Cell::new(0, 0),
+            Vec2::new(12.0, -3.0),
+            -Vec2::Y,
+        );
+        trail.append_exact(Vec2::new(12.0, -10.0));
+        trail.append_exact(Vec2::new(16.0, -10.0));
+        trail.append_exact(Vec2::new(16.0, -3.0));
+
+        let result = map.calculate_capture(player, &trail, 0.6);
+
+        assert!(result.used_loop_fill);
+        assert!(result.claim.contains_world(Vec2::new(14.0, -7.0)));
+    }
+
+    #[test]
+    fn joining_separate_islands_claims_only_the_corridor() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        map.apply_claim(
+            player,
+            rectangle(Vec2::new(-8.0, -2.0), Vec2::new(-4.0, 2.0)),
+        );
+        map.apply_claim(player, rectangle(Vec2::new(4.0, -2.0), Vec2::new(8.0, 2.0)));
+        let mut trail = ActiveTrail::new(
+            player,
+            crate::board::Cell::new(0, 0),
+            Vec2::new(-4.0, 0.0),
+            Vec2::X,
+        );
+        trail.append_exact(Vec2::new(0.0, -8.0));
+        trail.append_exact(Vec2::new(4.0, 0.0));
+        let result = map.calculate_capture(player, &trail, 0.6);
+        assert!(!result.used_loop_fill);
+        assert!(result.claim.contains_world(Vec2::new(0.0, -8.0)));
+        assert!(!result.claim.contains_world(Vec2::new(0.0, -3.0)));
+    }
+
+    #[test]
+    fn sample_cache_and_records_follow_geometry_after_island_capture() {
+        let config = crate::config::GameConfig::default();
+        let mut board = BoardGrid::generate(31, 2, &config);
+        let mut map = TerritoryMap::from_board(&board);
+        let player = CompetitorId(0);
+        let opponent = CompetitorId(1);
+        map.apply_claim(
+            player,
+            rectangle(Vec2::new(-10.0, -4.0), Vec2::new(10.0, 4.0)),
+        );
+        map.apply_claim(
+            opponent,
+            rectangle(Vec2::new(12.0, -4.0), Vec2::new(18.0, 4.0)),
+        );
+        map.rebuild_sample_cache(&mut board);
+
+        let before_area = map.area(opponent);
+        let claim = rectangle(Vec2::new(14.0, -1.0), Vec2::new(16.0, 1.0));
+        let result = map.apply_claim(player, claim);
+        map.refresh_sample_cache(&mut board, &result.claim);
+
+        assert!(map.area(opponent) > 0.0);
+        assert!(map.area(opponent) < before_area);
+        assert_eq!(
+            board.owner_counts[player.index()],
+            board.owned_cells[player.index()].len() as u32
+        );
+        assert_eq!(
+            board.owner_counts[opponent.index()],
+            board.owned_cells[opponent.index()].len() as u32
+        );
+        assert!(board.verify_counts());
     }
 
     #[test]

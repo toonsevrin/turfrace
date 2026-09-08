@@ -45,8 +45,9 @@ impl Default for GameConfig {
             starting_territory_radius: 2.75,
             spawn_protection_seconds: 1.25,
             spawn_protection_minimum_seconds: 0.5,
-            respawn_base_seconds: 5.0,
-            respawn_cap_seconds: None,
+            // Keep a cut costly without turning a local party game into spectating.
+            respawn_base_seconds: 2.0,
+            respawn_cap_seconds: Some(5.0),
             victory_territory_percent: 95,
             self_trail_exclusion_distance: 1.5,
             trail_sample_distance: 0.2,
@@ -99,12 +100,12 @@ mod tests {
     #[test]
     fn respawn_delay_escalates_and_can_be_capped() {
         let mut config = GameConfig::default();
-        assert_eq!(
-            [1, 2, 3].map(|n| config.respawn_delay(n)),
-            [5.0, 10.0, 15.0]
-        );
-        config.respawn_cap_seconds = Some(12.0);
-        assert_eq!(config.respawn_delay(3), 12.0);
+        assert_eq!([1, 2, 3].map(|n| config.respawn_delay(n)), [2.0, 4.0, 5.0]);
+        assert_eq!(config.respawn_delay(100), 5.0);
+        config.respawn_cap_seconds = None;
+        assert_eq!(config.respawn_delay(3), 6.0);
+        config.respawn_cap_seconds = Some(3.0);
+        assert_eq!(config.respawn_delay(3), 3.0);
     }
 
     #[test]

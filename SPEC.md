@@ -47,7 +47,7 @@ The initial version includes:
 * Dynamically generated field contours.
 * Territory capture and stealing.
 * Trail cutting and self-trail collisions.
-* Escalating respawn times.
+* Short, capped respawn times.
 * Split-screen cameras.
 * Home, lobby, leaderboard, settings, pause, and results screens.
 * Browser-local profiles and statistics.
@@ -99,8 +99,9 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | Ownership grid cell size            |                          0.50 units |
 | Starting territory radius           |                          2.75 units |
 | Spawn protection                    |                        1.25 seconds |
-| First respawn delay                 |                           5 seconds |
-| Respawn increase per death          |                           5 seconds |
+| First respawn delay                 |                           2 seconds |
+| Respawn increase per death          |                           2 seconds |
+| Maximum respawn delay               |                           5 seconds |
 | Victory territory threshold         |                                 95% |
 | Leaderboard rows                    |                               Top 3 |
 | Camera downward angle               |  Approximately 68° below horizontal |
@@ -109,22 +110,14 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | Mouse deadzone                      |                    24 screen pixels |
 | Standard NPC think frequency        |                                8 Hz |
 
-The final respawn rule supersedes the earlier fixed ten-second proposal:
+Respawns keep local players in the action rather than imposing escalating spectator time:
 
 ```text
-respawn_delay_seconds = 5 × number_of_deaths_this_match
+respawn_delay_seconds = min(2 × number_of_deaths_this_match, 5)
 ```
 
-Therefore:
-
-* First death: 5 seconds.
-* Second death: 10 seconds.
-* Third death: 15 seconds.
-* Fourth death: 20 seconds.
-* No cap in v0.1.
-* Humans and NPCs use exactly the same formula.
-
-The cap must remain configurable so playtesting can introduce one later without changing gameplay code.
+The first death costs 2 seconds, the second 4 seconds, and every subsequent death 5 seconds.
+Humans and NPCs use exactly the same formula. Base delay and cap remain configurable.
 
 ---
 
@@ -227,15 +220,15 @@ territory. The ownership grid mirrors this state for trail rasterization and bro
 While safe:
 
 * No active trail is drawn.
-* The player may move freely through the single territory island connected to their spawn anchor.
+* The player may move freely through any of their owned territory islands.
 * Opponents may still steal the cell from underneath them through a capture.
 
-### 6.1.1 Single-island invariant
+### 6.1.1 Islands remain yours
 
-Each competitor stores the center of their current spawn seed as a persistent anchor. After every
-committed capture, territory polygons that no longer contain that anchor are removed. A competitor
-standing on removed geometry dies with cause `Displaced`; a competitor still on the anchor-connected
-polygon is unaffected. This invariant makes it impossible for one competitor to own two islands.
+Captures steal only the geometry they actually cover. Cutting a bridge does not erase the land
+beyond it, and capturing an original spawn does not erase remaining territory. A racer standing
+on an isolated owned island remains safe. Any currently owned island can finish a trail; connecting
+different islands claims the trail corridor when there is no valid enclosed lobe.
 
 ## 6.2 Starting a trail
 
@@ -339,7 +332,7 @@ If a player’s territory count reaches zero:
 * The player dies with cause `Displaced`.
 * Their active trail is removed.
 * The competitor responsible for the final territory removal receives kill credit.
-* Their normal escalating respawn begins.
+* Their normal capped respawn begins.
 
 Capturing territory around another player’s cube does not otherwise kill that player.
 
@@ -753,7 +746,7 @@ Capture geometry uses deterministic fixed-point `MultiPolygon` booleans:
 3. Intersect the result with the arena.
 4. Difference the claim from every other owner.
 5. Union the claim into the capturing owner.
-6. Retain only each owner’s polygon containing its spawn anchor; report removed polygons.
+6. Preserve all remaining polygons for every owner, including disconnected islands.
 
 The sample grid is refreshed only over changed geometry AABBs for rendering and broadphase. Exact
 vector areas and containment remain authoritative for statistics, displacement, ranking, and the
@@ -764,7 +757,7 @@ vector areas and containment remain authoritative for statistics, displacement, 
 After a committed vector mutation:
 
 * Clear the capturing player’s active trail and its raster bits.
-* Emit displacement credits for owners reduced to zero or cubes standing on severed polygons.
+* Emit displacement credits only for owners reduced to zero total territory.
 * Start trails for safe competitors whose current ground was stolen.
 * Refresh changed board-cache AABBs and owner mesh revisions.
 * Emit capture statistics and visual events.
@@ -778,7 +771,7 @@ fn resolve_closure(player: PlayerId, map: &mut TerritoryMap, trail: &ActiveTrail
     let committed = map.apply_claim(player, result.claim);
     refresh_changed_cache_aabbs(&committed);
     clear_active_trail(player);
-    kill_cubes_on(committed.disconnected_by_owner);
+    resolve_zero_territory_owners(&committed);
 }
 ```
 
@@ -2184,7 +2177,7 @@ For randomized field seeds and capture shapes:
 * Every generated field has sufficient spawn capacity.
 * Capture results are deterministic for the same board and trail.
 * Capture cannot change cells outside the field.
-* Every non-empty competitor territory contains its spawn anchor and has one connected outer island.
+* Captures never remove territory outside the committed claim, even when it disconnects islands.
 
 ## 25.3 Integration tests
 
@@ -2199,9 +2192,9 @@ For randomized field seeds and capture shapes:
 * Window resizing recalculates all viewports.
 * Browser focus loss pauses.
 * Death clears all territory.
-* First three deaths respawn after 5, 10, and 15 seconds.
+* First three deaths respawn after 2, 4, and 5 seconds; later delays remain capped at 5.
 * NPCs can complete captures and cut trails.
-* Severing a non-anchor island removes it and kills a cube standing on that island.
+* Severing an occupied island preserves the island and does not kill its occupant.
 * NPC soak test runs for at least one simulated hour without invalid state.
 * Match cannot continue after exact full-field capture.
 
@@ -2248,7 +2241,7 @@ The initial version is complete when all of the following are true:
 10. Touching an opponent’s active trail kills its owner.
 11. Touching an old section of one’s own trail causes self-death.
 12. Death removes all territory and active trail immediately.
-13. Respawn delays follow 5, 10, 15, 20 seconds and onward for humans and NPCs.
+13. Respawn delays follow 2, 4, 5 seconds, capped at 5 for humans and NPCs.
 14. Respawn positions are safe and grant a small starting territory.
 15. All human players receive correctly sized split-screen cameras.
 16. The global top-right leaderboard shows the top three competitors including NPCs.
@@ -2354,7 +2347,8 @@ Add:
 
 These decisions remove ambiguity for implementation:
 
-* The final respawn sequence is 5, 10, 15, 20 seconds and onward.
+* The respawn sequence is 2, 4, 5 seconds, capped at 5 thereafter.
+* Severed territory islands remain owned and safe; spawn location has no connectivity privilege.
 * The sequence is identical for humans and NPCs.
 * The boundary is solid and non-lethal.
 * Cubes do not physically collide with one another.

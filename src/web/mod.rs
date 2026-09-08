@@ -61,6 +61,7 @@ fn load_local_data(
     mut last_lobby: ResMut<LastLobbySettings>,
     mut status: ResMut<PersistenceStatus>,
 ) {
+    warn_if_debug_wasm();
     #[cfg(target_arch = "wasm32")]
     {
         let profiles = &mut *profiles;
@@ -111,6 +112,17 @@ fn save_changed_local_data(
     }
     status.dirty = false;
 }
+
+#[cfg(target_arch = "wasm32")]
+fn warn_if_debug_wasm() {
+    #[cfg(debug_assertions)]
+    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(
+        "Turfrace is running a debug WebAssembly build; performance is not representative. Benchmark with `trunk serve --release` or `./scripts/build-web`.",
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn warn_if_debug_wasm() {}
 
 #[cfg(target_arch = "wasm32")]
 fn browser_storage() -> Result<web_sys::Storage, String> {

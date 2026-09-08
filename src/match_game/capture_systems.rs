@@ -51,11 +51,7 @@ pub(super) fn resolve_captures(
     mut events: ResMut<SimulationEvents>,
     mut npc_events: Option<ResMut<NpcEventQueue>>,
     mut captures: Local<Vec<(CompetitorId, VectorCaptureResult)>>,
-    mut query: Query<(
-        &Competitor,
-        &crate::movement::CompetitorMotion,
-        &mut MatchStatistics,
-    )>,
+    mut query: Query<(&Competitor, &mut MatchStatistics)>,
 ) {
     pending.0.sort_by(|a, b| {
         a.time
@@ -98,11 +94,7 @@ fn resolve_capture_group(
     events: &mut SimulationEvents,
     mut npc_events: Option<&mut ResMut<NpcEventQueue>>,
     captures: &mut Vec<(CompetitorId, VectorCaptureResult)>,
-    query: &mut Query<(
-        &Competitor,
-        &crate::movement::CompetitorMotion,
-        &mut MatchStatistics,
-    )>,
+    query: &mut Query<(&Competitor, &mut MatchStatistics)>,
 ) {
     captures.clear();
     captures.extend(pending.iter().map(|capture| {
@@ -119,9 +111,6 @@ fn resolve_capture_group(
         // sample scans themselves for a large late-match lobe.
         for (_, result) in captures.iter() {
             territory.refresh_sample_cache(board, &result.claim);
-            for (_, removed) in &result.disconnected_by_owner {
-                territory.refresh_sample_cache(board, removed);
-            }
         }
     }
 
@@ -141,26 +130,14 @@ fn resolve_capture_group(
                 .filter(|(victim, _)| territory.area(*victim) <= 1e-4)
                 .map(|(victim, _)| (*victim, pending.player)),
         );
-        displaced.0.extend(
-            query
-                .iter()
-                .filter(|(competitor, motion, _)| {
-                    is_on_disconnected_section(
-                        &result.disconnected_by_owner,
-                        competitor.id,
-                        motion.position,
-                    )
-                })
-                .map(|(competitor, _, _)| (competitor.id, pending.player)),
-        );
         displaced.0.sort_unstable();
         displaced.0.dedup();
         let cell_area = board.cell_size * board.cell_size;
         let cells = area_as_cells(result.claimed_area, cell_area);
         let stolen = area_as_cells(stolen_area, cell_area);
-        if let Some((_, _, mut stats)) = query
+        if let Some((_, mut stats)) = query
             .iter_mut()
-            .find(|(competitor, _, _)| competitor.id == pending.player)
+            .find(|(competitor, _)| competitor.id == pending.player)
         {
             stats.captures_completed += 1;
             stats.area_captured_total += result.claimed_area;
@@ -200,49 +177,6 @@ fn resolve_capture_group(
     }
 }
 
-fn is_on_disconnected_section(
-    disconnected: &[(CompetitorId, crate::geometry::MultiPolygon)],
-    player: CompetitorId,
-    position: Vec2,
-) -> bool {
-    disconnected
-        .iter()
-        .any(|(owner, removed)| *owner == player && removed.contains_world(position))
-}
-
 fn area_as_cells(area: f32, cell_area: f32) -> u32 {
     (area / cell_area).round().max(0.0) as u32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::geometry::MultiPolygon;
-
-    #[test]
-    fn only_players_standing_on_the_severed_island_are_displaced() {
-        let victim = CompetitorId(1);
-        let removed = MultiPolygon::from_outer(&[
-            Vec2::new(4.0, -2.0),
-            Vec2::new(8.0, -2.0),
-            Vec2::new(8.0, 2.0),
-            Vec2::new(4.0, 2.0),
-        ]);
-        let disconnected = vec![(victim, removed)];
-        assert!(is_on_disconnected_section(
-            &disconnected,
-            victim,
-            Vec2::new(6.0, 0.0)
-        ));
-        assert!(!is_on_disconnected_section(
-            &disconnected,
-            victim,
-            Vec2::ZERO
-        ));
-        assert!(!is_on_disconnected_section(
-            &disconnected,
-            CompetitorId(2),
-            Vec2::new(6.0, 0.0)
-        ));
-    }
 }

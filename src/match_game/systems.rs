@@ -459,14 +459,18 @@ fn resolve_territory_consequences(
     displaced.0.clear();
     for (entity, c, m, life, protection, mut territory, mut stats, last_owned, trail) in &mut query
     {
-        let count = board.owner_counts[c.id.index()];
-        let area = territory_map.area(c.id);
-        territory.current_area = area;
-        territory.peak_area = territory.peak_area.max(area);
-        territory.current_cells = count;
-        territory.peak_cells = territory.peak_cells.max(count);
-        stats.peak_territory_area = stats.peak_territory_area.max(area);
-        stats.peak_territory_cells = stats.peak_territory_cells.max(count);
+        // Exact polygon areas only change on ownership commits. Do not walk
+        // every contour at 60 Hz merely to repeat the same score.
+        if territory_map.is_changed() {
+            let count = board.owner_counts[c.id.index()];
+            let area = territory_map.area(c.id);
+            territory.current_area = area;
+            territory.peak_area = territory.peak_area.max(area);
+            territory.current_cells = count;
+            territory.peak_cells = territory.peak_cells.max(count);
+            stats.peak_territory_area = stats.peak_territory_area.max(area);
+            stats.peak_territory_cells = stats.peak_territory_cells.max(count);
+        }
         if life.is_alive() {
             stats.time_alive_seconds += time.delta_secs();
         }
@@ -556,6 +560,20 @@ fn update_rankings(
     query: Query<(&Competitor, &LifeState, &MatchStatistics)>,
     mut scratch: Local<Vec<(CompetitorId, f32, bool, u32)>>,
 ) {
+    // Alive-time statistics change every tick, so Changed<MatchStatistics>
+    // would invalidate this cache continuously. Compare only ranking inputs.
+    if !territory_map.is_changed()
+        && rankings.entries.len() == query.iter().len()
+        && query.iter().all(|(competitor, life, stats)| {
+            rankings.rank_of(competitor.id).is_some_and(|entry| {
+                entry.alive == life.is_alive()
+                    && entry.kills == stats.kills
+                    && entry.territory_cells == board.owner_counts[competitor.id.index()]
+            })
+        })
+    {
+        return;
+    }
     scratch.clear();
     scratch.extend(
         query
@@ -599,3 +617,7 @@ fn update_rankings(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ranking_cache_tests.rs"]
+mod ranking_cache_tests;

@@ -123,7 +123,7 @@ pub(super) fn sync_board_visuals(
 pub(super) fn sync_competitor_snapshots(
     mut commands: Commands,
     settings: Res<super::PresentationSettings>,
-    territory_map: Option<Res<TerritoryMap>>,
+    board: Option<Res<BoardGrid>>,
     rankings: Option<Res<Rankings>>,
     mut territory: ResMut<TerritoryVisual>,
     competitors: Query<(
@@ -169,10 +169,10 @@ pub(super) fn sync_competitor_snapshots(
                 .count() as u8
         });
         let awareness = if human_slot.is_some() {
-            let edge = territory_map.as_ref().map_or(0.0, |map| {
-                // Begin revealing arena context before the player reaches the
-                // lip; the edge should be a navigational cue, not a surprise.
-                (1.0 - map.arena_signed_distance(motion.position) / 18.0).clamp(0.0, 1.0)
+            let edge = board.as_ref().map_or(0.0, |board| {
+                // This is cosmetic awareness only. Gameplay continues to use
+                // TerritoryMap's exact arena polygon geometry.
+                arena_edge_awareness(board, motion.position)
             });
             edge.max(trail.map_or(0.0, |trail| (trail.length / 28.0).clamp(0.0, 1.0)))
         } else {
@@ -230,6 +230,12 @@ pub(super) fn sync_competitor_snapshots(
     }
 }
 
+fn arena_edge_awareness(board: &BoardGrid, position: Vec2) -> f32 {
+    // The board distance field is an inexpensive presentation approximation;
+    // authoritative arena containment remains in TerritoryMap.
+    (1.0 - board.signed_distance_at(position) / 18.0).clamp(0.0, 1.0)
+}
+
 fn trail_render_budget(quality: super::GraphicsQuality) -> usize {
     match quality {
         super::GraphicsQuality::Low => 128,
@@ -282,6 +288,14 @@ mod tests {
         assert!(
             trail_render_budget(crate::render::GraphicsQuality::High) > MAX_RENDER_TRAIL_POINTS
         );
+    }
+
+    #[test]
+    fn cosmetic_awareness_uses_the_board_distance_field() {
+        let mut board = tiny_board();
+        board.signed_distance = vec![9.0];
+        assert_eq!(arena_edge_awareness(&board, Vec2::ZERO), 0.5);
+        assert_eq!(arena_edge_awareness(&board, Vec2::new(10.0, 10.0)), 1.0);
     }
 
     #[test]

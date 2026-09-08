@@ -285,7 +285,7 @@ fn build_owner_mesh(territory: &TerritoryVisual, owner: u8) -> Option<Mesh> {
             continue;
         };
         let base = positions.len() as u32;
-        for pair in coordinates.chunks_exact(2) {
+        for pair in coordinates.as_chunks::<2>().0 {
             let point = Vec2::new(pair[0] as f32, pair[1] as f32);
             positions.push([point.x, surface_height, point.y]);
             normals.push([0.0, 1.0, 0.0]);

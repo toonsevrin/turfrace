@@ -22,23 +22,30 @@ pub(super) fn bridge_simulation_events(
     mut visual_writer: MessageWriter<VisualEffect>,
     mut audio_writer: MessageWriter<PlayAudioCue>,
     mut last_leader: Local<Option<CompetitorId>>,
+    mut listener_positions: Local<Vec<Vec2>>,
 ) {
+    let Some(mut events) = events else { return };
+    let current_leader = rankings.as_ref().and_then(|rankings| rankings.leader());
+    if current_leader.is_none() {
+        *last_leader = None;
+    }
+    if events.0.is_empty() {
+        return;
+    }
+
     let audio_enabled = should_emit_audio(session.as_deref());
     let mut play = |cue| {
         if audio_enabled {
             audio_writer.write(cue);
         }
     };
-    let listener_positions: Vec<_> = competitors
-        .iter()
-        .filter(|(_, competitor, _)| competitor.kind == CompetitorKind::Human)
-        .map(|(_, _, motion)| motion.position)
-        .collect();
-    let current_leader = rankings.as_ref().and_then(|rankings| rankings.leader());
-    if current_leader.is_none() {
-        *last_leader = None;
-    }
-    let Some(mut events) = events else { return };
+    listener_positions.clear();
+    listener_positions.extend(
+        competitors
+            .iter()
+            .filter(|(_, competitor, _)| competitor.kind == CompetitorKind::Human)
+            .map(|(_, _, motion)| motion.position),
+    );
     for event in events.drain() {
         match event {
             SimulationEvent::Countdown(_) => {

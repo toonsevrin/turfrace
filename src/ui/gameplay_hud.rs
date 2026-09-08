@@ -331,26 +331,30 @@ pub(super) fn reconcile_human_huds(
                     Pickable::IGNORE,
                 ))
                 .with_children(|root| {
+                    if let Ok((_, _, competitor)) = visuals.get(player_camera.subject) {
+                        spawn_identity(root, &theme, player_camera.subject, competitor, text_scale);
+                    }
                     root.spawn((
                         Text::new(""),
                         TextFont {
                             font: theme.display_font.clone(),
-                            font_size: FontSize::Px(30.0 * text_scale),
+                            font_size: FontSize::Px(22.0 * text_scale),
                             ..default()
                         },
                         TextColor(CORAL),
                         TextShadow {
-                            offset: Vec2::new(3.0, 3.0),
+                            offset: Vec2::new(2.0, 2.0),
                             color: INK,
                         },
                         TextLayout::justify(Justify::Center),
                         Node {
                             position_type: PositionType::Absolute,
-                            top: percent(46),
-                            left: percent(27),
-                            width: percent(46),
+                            // Keep the countdown below the centered cube
+                            // even when the respawn camera has eased low.
+                            top: percent(68),
+                            left: percent(22),
+                            width: percent(56),
                             min_width: px(140),
-                            max_width: px(230),
                             ..default()
                         },
                         HumanRespawnText(player_camera.subject),
@@ -412,30 +416,22 @@ pub(super) fn update_name_tags(
 ) {
     for (marker, mut node, mut visibility) in &mut tags {
         let Ok((camera, camera_transform)) = cameras.get(marker.camera) else {
-            if *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
-            }
+            hide_name_tag(&mut visibility);
             continue;
         };
         let Ok(visual) = visuals.get(marker.source) else {
-            if *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
-            }
+            hide_name_tag(&mut visibility);
             continue;
         };
         if !visual.alive {
-            if *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
-            }
+            hide_name_tag(&mut visibility);
             continue;
         }
         let Some((_, competitor_transform)) = proxies
             .iter()
             .find(|(proxy, _)| proxy.source == marker.source)
         else {
-            if *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
-            }
+            hide_name_tag(&mut visibility);
             continue;
         };
         // Track the interpolated render proxy, not the fixed-step simulation
@@ -449,30 +445,53 @@ pub(super) fn update_name_tags(
         let camera_transform = GlobalTransform::from(*camera_transform);
         let Ok(screen_position) = camera.world_to_viewport(&camera_transform, world_position)
         else {
-            if *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
-            }
+            hide_name_tag(&mut visibility);
             continue;
         };
         let Some(viewport) = camera.logical_viewport_rect() else {
-            if *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
-            }
+            hide_name_tag(&mut visibility);
             continue;
         };
+        // Do not place a label that cannot be seen by this split-screen camera.
+        // In particular, this avoids changing hidden labels' layout every frame.
+        if !viewport.contains(screen_position) {
+            hide_name_tag(&mut visibility);
+            continue;
+        }
         // Camera projection is target-logical, while this camera-local UI root
         // uses scaled logical pixels.
         let ui_position = name_tag_ui_position(screen_position, viewport.min, ui_scale.0);
-        node.left = px(ui_position.x - NAME_TAG_WIDTH * 0.5);
-        node.top = px(ui_position.y - NAME_TAG_VERTICAL_OFFSET);
-        if *visibility != Visibility::Inherited {
-            *visibility = Visibility::Inherited;
-        }
+        set_name_tag_layout(&mut node, &mut visibility, ui_position);
     }
 }
 
 fn name_tag_ui_position(screen_position: Vec2, viewport_position: Vec2, ui_scale: f32) -> Vec2 {
     (screen_position - viewport_position) / ui_scale.max(0.001)
+}
+
+fn hide_name_tag(visibility: &mut Visibility) {
+    if *visibility != Visibility::Hidden {
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn set_name_tag_layout(node: &mut Node, visibility: &mut Visibility, position: Vec2) -> bool {
+    let left = px(position.x - NAME_TAG_WIDTH * 0.5);
+    let top = px(position.y - NAME_TAG_VERTICAL_OFFSET);
+    let mut changed = false;
+    if node.left != left {
+        node.left = left;
+        changed = true;
+    }
+    if node.top != top {
+        node.top = top;
+        changed = true;
+    }
+    if *visibility != Visibility::Inherited {
+        *visibility = Visibility::Inherited;
+        changed = true;
+    }
+    changed
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -652,13 +671,35 @@ pub(super) fn animate_kill_feed(
         });
     let reduced_motion = settings.reduced_motion;
     for (mut transform, mut background) in &mut panels {
-        let (translation, scale) = kill_feed_transform(age, reduced_motion);
-        transform.translation = Val2::px(translation, 0.0);
-        transform.scale = Vec2::splat(scale);
-        // The rail and text carry the event; a dark block should not compete
-        // with the leaderboard or active trails.
-        background.0 = Color::NONE;
+        set_kill_feed_style(&mut transform, &mut background, age, reduced_motion);
     }
+}
+
+fn set_kill_feed_style(
+    transform: &mut UiTransform,
+    background: &mut BackgroundColor,
+    age: f32,
+    reduced_motion: bool,
+) -> bool {
+    let (translation, scale) = kill_feed_transform(age, reduced_motion);
+    let next_translation = Val2::px(translation, 0.0);
+    let next_scale = Vec2::splat(scale);
+    let mut changed = false;
+    if transform.translation != next_translation {
+        transform.translation = next_translation;
+        changed = true;
+    }
+    if transform.scale != next_scale {
+        transform.scale = next_scale;
+        changed = true;
+    }
+    // The rail and text carry the event; a dark block should not compete
+    // with the leaderboard or active trails.
+    if background.0 != Color::NONE {
+        background.0 = Color::NONE;
+        changed = true;
+    }
+    changed
 }
 
 fn kill_feed_transform(age: f32, reduced_motion: bool) -> (f32, f32) {
@@ -838,9 +879,12 @@ pub(super) fn collect_match_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{kill_feed_transform, name_tag_ui_position, write_respawn_status};
+    use super::{
+        kill_feed_transform, name_tag_ui_position, set_kill_feed_style, set_name_tag_layout,
+        write_respawn_status,
+    };
     use crate::match_game::{LifeState, LifeStatus};
-    use bevy::prelude::Vec2;
+    use bevy::prelude::{BackgroundColor, Color, Node, UiTransform, Vec2, Visibility};
 
     #[test]
     fn living_players_have_no_spawn_protection_countdown_text() {
@@ -889,5 +933,32 @@ mod tests {
     #[test]
     fn reduced_motion_shows_the_kill_feed_at_rest_immediately() {
         assert_eq!(kill_feed_transform(0.0, true), (0.0, 1.0));
+    }
+
+    #[test]
+    fn settled_kill_feed_does_not_rewrite_idle_style() {
+        let mut transform = UiTransform::default();
+        let mut background = BackgroundColor(Color::srgb(1.0, 0.0, 0.0));
+        assert!(set_kill_feed_style(
+            &mut transform,
+            &mut background,
+            1.0,
+            false
+        ));
+        assert!(!set_kill_feed_style(
+            &mut transform,
+            &mut background,
+            1.0,
+            false
+        ));
+    }
+
+    #[test]
+    fn settled_name_tag_does_not_rewrite_idle_layout() {
+        let mut node = Node::default();
+        let mut visibility = Visibility::Hidden;
+        let position = Vec2::new(120.0, 80.0);
+        assert!(set_name_tag_layout(&mut node, &mut visibility, position));
+        assert!(!set_name_tag_layout(&mut node, &mut visibility, position));
     }
 }

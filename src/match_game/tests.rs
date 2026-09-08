@@ -562,7 +562,6 @@ fn respawn_seed_displacement_is_credited() {
         Vec2::ZERO,
         config.starting_territory_radius,
         respawning,
-        &[(victim, Vec2::ZERO)],
         &mut credits,
     );
     assert_eq!(board.owner_counts[victim.index()], 0);
@@ -570,7 +569,7 @@ fn respawn_seed_displacement_is_credited() {
 }
 
 #[test]
-fn severed_occupied_island_runs_the_full_displacement_lifecycle() {
+fn occupied_island_survives_capture_that_severs_its_bridge() {
     let config = GameConfig::default();
     let mut board = BoardGrid::generate(31, 2, &config);
     let mut territory = TerritoryMap::from_board(&board);
@@ -662,7 +661,7 @@ fn severed_occupied_island_runs_the_full_displacement_lifecycle() {
 
     let world = app.world();
     assert!(
-        !world
+        world
             .entity(victim_entity)
             .get::<LifeState>()
             .unwrap()
@@ -674,7 +673,7 @@ fn severed_occupied_island_runs_the_full_displacement_lifecycle() {
             .get::<MatchStatistics>()
             .unwrap()
             .deaths,
-        1
+        0
     );
     assert_eq!(
         world
@@ -682,22 +681,25 @@ fn severed_occupied_island_runs_the_full_displacement_lifecycle() {
             .get::<MatchStatistics>()
             .unwrap()
             .kills,
-        1
+        0
     );
     assert!(
         world
-            .resource::<SimulationEvents>()
-            .0
-            .iter()
-            .any(|event| matches!(
-                event,
-                SimulationEvent::Death {
-                    victim: event_victim,
-                    killer: Some(event_killer),
-                    cause: DeathCause::Displaced,
-                } if *event_victim == victim && *event_killer == attacker
-            ))
+            .resource::<TerritoryMap>()
+            .owns(Vec2::new(5.0, 0.0), victim)
     );
+    let victim_record = world
+        .entity(victim_entity)
+        .get::<TerritoryRecord>()
+        .unwrap();
+    let territory = world.resource::<TerritoryMap>();
+    let board = world.resource::<BoardGrid>();
+    assert!((victim_record.current_area - territory.area(victim)).abs() < 0.001);
+    assert_eq!(
+        victim_record.current_cells,
+        board.owner_counts[victim.index()]
+    );
+    assert!(board.verify_counts());
 }
 
 #[test]

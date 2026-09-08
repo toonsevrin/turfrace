@@ -6,16 +6,18 @@ pub(in crate::ui) fn spawn_home(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((ScreenRoot, screen_node(), BackgroundColor(Color::NONE)))
         .with_children(|root| {
-            let mut home_panel = panel_node(percent(52));
-            home_panel.max_width = px(580);
-            home_panel.padding = UiRect::axes(px(28), px(24));
+            let mut home_panel = panel_node(percent(90));
+            home_panel.max_width = px(620);
+            home_panel.padding = UiRect::axes(px(28), px(28));
             root.spawn((
                 home_panel,
                 BackgroundColor(Color::NONE),
                 BorderColor::all(Color::NONE),
             ))
             .with_children(|panel| {
+                spawn_subtitle(panel, &theme, "LOCAL MULTIPLAYER / 1–8 PLAYERS");
                 spawn_title(panel, &theme, "TURFRACE", 64.0);
+                spawn_subtitle(panel, &theme, "DRAW LOOPS. CLAIM TURF. CUT TRAILS.");
                 spawn_button(panel, &theme, "PLAY", UiAction::State(AppState::Lobby), 0);
                 spawn_button(
                     panel,
