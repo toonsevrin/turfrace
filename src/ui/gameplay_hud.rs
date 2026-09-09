@@ -793,16 +793,16 @@ pub(super) fn collect_match_results(
     rows.sort_by(|(a_competitor, a), (b_competitor, b)| {
         b.peak_territory_area
             .total_cmp(&a.peak_territory_area)
-            .then_with(|| b.peak_territory_cells.cmp(&a.peak_territory_cells))
             .then_with(|| b.kills.cmp(&a.kills))
             .then_with(|| a.deaths.cmp(&b.deaths))
             .then_with(|| a_competitor.id.cmp(&b_competitor.id))
     });
+    let arena_area = territory_map.arena_area();
     let percent = |area: f32| {
-        if territory_map.arena_area <= f32::EPSILON {
+        if arena_area <= f32::EPSILON {
             0.0
         } else {
-            config.display_territory_percent(area.max(0.0) * 100.0 / territory_map.arena_area)
+            config.display_territory_percent(area.max(0.0) * 100.0 / arena_area)
         }
     };
     results.winner_name = session
@@ -826,8 +826,8 @@ pub(super) fn collect_match_results(
             kills: stats.kills,
             deaths: stats.deaths,
             largest_capture_percent: percent(stats.largest_capture_area),
-            total_cells_captured: stats.cells_captured_total,
             longest_trail: stats.longest_trail_length,
+            total_captured_area: stats.area_captured_total,
         })
         .collect();
 
@@ -859,10 +859,6 @@ pub(super) fn collect_match_results(
             kills: stats.kills,
             deaths: stats.deaths,
             captures_completed: stats.captures_completed,
-            cells_captured_total: stats.cells_captured_total,
-            cells_stolen_total: stats.cells_stolen_total,
-            largest_capture_cells: stats.largest_capture_cells,
-            peak_territory_cells: stats.peak_territory_cells,
             longest_trail_length: stats.longest_trail_length,
             time_alive_seconds: stats.time_alive_seconds,
         };
@@ -870,7 +866,7 @@ pub(super) fn collect_match_results(
             &mut profile.statistics,
             &profile_stats,
             session.winner == Some(competitor.id),
-            territory_map.arena_area,
+            arena_area,
         );
     }
     persisted.0 = Some(session.field_seed);

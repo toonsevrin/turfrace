@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 
 use crate::{
-    board::{BoardGrid, OwnerFrontier},
+    board::BoardGrid,
     ids::CompetitorId,
-    territory_map::TerritoryMap,
+    territory_map::{OwnerFrontier, TerritoryMap},
 };
 
 use super::{CapturePlan, NpcMatchMemory, NpcTraits, NpcVisibleRival};
@@ -37,7 +37,7 @@ pub fn propose_capture_plan(
         memory,
         rivals,
     } = context;
-    board.collect_owner_frontiers(position, id, traits.perception_radius(), frontier_scratch);
+    territory.collect_owner_frontiers(position, id, traits.perception_radius(), frontier_scratch);
     if frontier_scratch.len() < 2 {
         return None;
     }
@@ -246,10 +246,9 @@ mod tests {
             cell_size: 2.0,
             ..default()
         };
-        let mut board = BoardGrid::generate(91, 4, &config);
+        let board = BoardGrid::generate(91, 4, &config);
         let mut territory = TerritoryMap::from_board(&board);
         territory.seed_owner(Vec2::ZERO, 4.0, CompetitorId(0));
-        territory.rebuild_sample_cache(&mut board);
         let mut scratch = Vec::new();
         let plan = propose_capture_plan(
             CapturePlanContext {
@@ -321,10 +320,9 @@ mod tests {
     }
 
     fn territory_disk(radius: f32) -> (BoardGrid, TerritoryMap) {
-        let mut board = BoardGrid::generate(91, 2, &GameConfig::default());
+        let board = BoardGrid::generate(91, 2, &GameConfig::default());
         let mut territory = TerritoryMap::from_board(&board);
         territory.seed_owner(Vec2::ZERO, radius, CompetitorId(0));
-        territory.rebuild_sample_cache(&mut board);
         (board, territory)
     }
 

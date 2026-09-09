@@ -103,16 +103,9 @@ fn resolve_capture_group(
             territory.prepare_capture(capture.player, &capture.trail, config.trail_width),
         )
     }));
-    let revision = territory.revision;
+    // `apply_claim` updates exact geometry and the bounded sample cache as one
+    // atomic mutation. There is deliberately no presentation refresh pass here.
     territory.apply_equal_time_captures(captures);
-    if territory.revision != revision {
-        // Refresh each changed AABB directly. Unioning all capture geometry
-        // merely to derive one bounding box can cost more than the bounded
-        // sample scans themselves for a large late-match lobe.
-        for (_, result) in captures.iter() {
-            territory.refresh_sample_cache(board, &result.claim);
-        }
-    }
 
     for pending in pending {
         clear_trail_bits(board, pending.player, &pending.trail.cells);
@@ -132,9 +125,6 @@ fn resolve_capture_group(
         );
         displaced.0.sort_unstable();
         displaced.0.dedup();
-        let cell_area = board.cell_size * board.cell_size;
-        let cells = area_as_cells(result.claimed_area, cell_area);
-        let stolen = area_as_cells(stolen_area, cell_area);
         if let Some((_, mut stats)) = query
             .iter_mut()
             .find(|(competitor, _)| competitor.id == pending.player)
@@ -143,16 +133,11 @@ fn resolve_capture_group(
             stats.area_captured_total += result.claimed_area;
             stats.area_stolen_total += stolen_area;
             stats.largest_capture_area = stats.largest_capture_area.max(result.claimed_area);
-            stats.cells_captured_total += cells;
-            stats.cells_stolen_total += stolen;
-            stats.largest_capture_cells = stats.largest_capture_cells.max(cells);
         }
         events.0.push(SimulationEvent::Capture {
             player: pending.player,
             area: result.claimed_area,
             stolen_area,
-            cells,
-            stolen,
             loop_fill: result.used_loop_fill,
         });
         if let Some(npc_events) = npc_events.as_deref_mut() {
@@ -175,8 +160,4 @@ fn resolve_capture_group(
                 }));
         }
     }
-}
-
-fn area_as_cells(area: f32, cell_area: f32) -> u32 {
-    (area / cell_area).round().max(0.0) as u32
 }

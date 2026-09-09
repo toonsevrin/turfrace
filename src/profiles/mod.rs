@@ -10,12 +10,12 @@ pub const PROFILE_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PROFILE_NAME_CHARS: usize = 16;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LifetimeStatistics {
     pub games_played: u32,
     pub wins: u32,
     pub kills: u32,
     pub deaths: u32,
-    pub total_captured_cells: u64,
     pub total_captured_area: f32,
     pub best_territory_percent: f32,
     pub largest_capture_percent: f32,
@@ -31,6 +31,7 @@ pub struct LocalProfile {
     pub preferred_color_id: u8,
     pub created_at_unix_ms: u64,
     pub last_used_at_unix_ms: u64,
+    #[serde(default)]
     pub statistics: LifetimeStatistics,
 }
 
@@ -189,10 +190,6 @@ pub struct MatchStatistics {
     pub area_stolen_total: f32,
     pub largest_capture_area: f32,
     pub peak_territory_area: f32,
-    pub cells_captured_total: u32,
-    pub cells_stolen_total: u32,
-    pub largest_capture_cells: u32,
-    pub peak_territory_cells: u32,
     pub longest_trail_length: f32,
     pub time_alive_seconds: f32,
 }
@@ -208,9 +205,6 @@ pub fn apply_match_statistics(
     lifetime.wins = lifetime.wins.saturating_add(u32::from(won));
     lifetime.kills = lifetime.kills.saturating_add(stats.kills);
     lifetime.deaths = lifetime.deaths.saturating_add(stats.deaths);
-    lifetime.total_captured_cells = lifetime
-        .total_captured_cells
-        .saturating_add(u64::from(stats.cells_captured_total));
     lifetime.total_captured_area += stats.area_captured_total.max(0.0);
     if arena_area > 0.0 {
         let percent = |area: f32| area.max(0.0) * 100.0 / arena_area;
@@ -317,8 +311,6 @@ mod tests {
             kills: 3,
             peak_territory_area: 25.0,
             largest_capture_area: 10.0,
-            peak_territory_cells: 25,
-            largest_capture_cells: 10,
             ..default()
         };
         apply_match_statistics(&mut lifetime, &stats, true, 100.0);
@@ -326,5 +318,35 @@ mod tests {
         assert_eq!(lifetime.wins, 1);
         assert_eq!(lifetime.best_territory_percent, 25.0);
         assert_eq!(lifetime.largest_capture_percent, 10.0);
+    }
+
+    #[test]
+    fn missing_exact_area_fields_default_without_inventing_measurements() {
+        let migrated: LifetimeStatistics = serde_json::from_str(
+            r#"{
+                "best_territory_percent": 8.0
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(migrated.total_captured_area, 0.0);
+        assert_eq!(migrated.best_territory_percent, 8.0);
+        assert_eq!(migrated.games_played, 0);
+    }
+
+    #[test]
+    fn lifetime_statistics_exact_fields_round_trip() {
+        let original = LifetimeStatistics {
+            games_played: 4,
+            wins: 2,
+            kills: 7,
+            deaths: 3,
+            total_captured_area: 42.25,
+            best_territory_percent: 61.5,
+            largest_capture_percent: 19.75,
+            longest_trail_world_units: 108.0,
+        };
+        let encoded = serde_json::to_string(&original).unwrap();
+        let decoded: LifetimeStatistics = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, original);
     }
 }

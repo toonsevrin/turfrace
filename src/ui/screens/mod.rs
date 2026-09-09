@@ -551,7 +551,7 @@ pub(super) fn spawn_results(
                         header.spawn(result_column("TURF", px(58), false, &theme));
                         header.spawn(result_column("K/D", px(48), false, &theme));
                         header.spawn(result_column("BEST CAP", px(72), false, &theme));
-                        header.spawn(result_column("CELLS", px(58), false, &theme));
+                        header.spawn(result_column("AREA", px(58), false, &theme));
                         header.spawn(result_column("TRAIL", px(58), false, &theme));
                     });
                 if results.rows.is_empty() {
@@ -616,13 +616,7 @@ pub(super) fn spawn_results(
                                 (format!("{:.0}%", row.peak_percent), 58),
                                 (format!("{}/{}", row.kills, row.deaths), 48),
                                 (format!("{:.0}%", row.largest_capture_percent), 72),
-                                (
-                                    format!(
-                                        "{}k",
-                                        (row.total_cells_captured as f32 / 1000.0).round()
-                                    ),
-                                    58,
-                                ),
+                                (format!("{:.1}", row.total_captured_area), 58),
                                 (format!("{:.0}m", row.longest_trail), 58),
                             ] {
                                 line.spawn((

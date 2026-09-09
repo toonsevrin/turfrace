@@ -18,7 +18,9 @@ use turfrace::{
     camera::{PlayerCamera, SpectatorCamera, ViewportSubject},
     input::InputDeviceId,
     lobby::{HumanSetup, LastLobbySettings, Lobby, LobbyPlayer, MatchSetup},
-    match_game::{MatchPhase, MatchPlugin, MatchSession, start_match},
+    match_game::{
+        MatchGeneration, MatchPhase, MatchPlugin, MatchSession, PresentationReady, start_match,
+    },
     presentation::PresentationPlugin,
     ui::{MatchResults, ResultRow},
 };
@@ -242,7 +244,7 @@ fn drive_harness(world: &mut World) {
     if trigger_capture {
         let area = world
             .resource::<turfrace::territory_map::TerritoryMap>()
-            .arena_area
+            .arena_area()
             * 0.08;
         world
             .resource_mut::<turfrace::match_game::SimulationEvents>()
@@ -251,8 +253,6 @@ fn drive_harness(world: &mut World) {
                 player: turfrace::ids::CompetitorId(0),
                 area,
                 stolen_area: 0.0,
-                cells: 0,
-                stolen: 0,
                 loop_fill: true,
             });
         world.resource_mut::<Harness>().capture_triggered = true;
@@ -402,6 +402,10 @@ fn configure_match(world: &mut World) {
     };
     *world.resource_mut::<MatchSetup>() = setup.clone();
     start_match(world, &setup);
+    // This scenario deliberately bypasses MatchLoading to reach a staged HUD
+    // quickly; acknowledge only the generation we just started. Scenarios that
+    // exercise loading readiness leave this to the real presentation plugin.
+    acknowledge_generation(world);
     // Enter the real countdown state so its HUD and lifecycle hooks run, while
     // keeping automated captures fast and deterministic.
     world.resource_mut::<MatchSession>().phase = MatchPhase::Countdown;
@@ -409,6 +413,11 @@ fn configure_match(world: &mut World) {
     world
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Countdown);
+}
+
+fn acknowledge_generation(world: &mut World) {
+    let generation = world.resource::<MatchGeneration>().0;
+    world.resource_mut::<PresentationReady>().0 = Some(generation);
 }
 
 fn configure_npc_match(world: &mut World) {
@@ -461,7 +470,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 6,
                 deaths: 1,
                 largest_capture_percent: 18.4,
-                total_cells_captured: 12_480,
+                total_captured_area: 12_480.0,
                 longest_trail: 42.7,
             },
             ResultRow {
@@ -472,7 +481,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 3,
                 deaths: 2,
                 largest_capture_percent: 9.1,
-                total_cells_captured: 5_220,
+                total_captured_area: 5_220.0,
                 longest_trail: 31.2,
             },
             ResultRow {
@@ -483,7 +492,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 2,
                 deaths: 3,
                 largest_capture_percent: 7.8,
-                total_cells_captured: 4_810,
+                total_captured_area: 4_810.0,
                 longest_trail: 27.4,
             },
             ResultRow {
@@ -494,7 +503,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 2,
                 deaths: 4,
                 largest_capture_percent: 6.2,
-                total_cells_captured: 3_990,
+                total_captured_area: 3_990.0,
                 longest_trail: 22.8,
             },
             ResultRow {
@@ -505,7 +514,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 1,
                 deaths: 4,
                 largest_capture_percent: 5.0,
-                total_cells_captured: 3_210,
+                total_captured_area: 3_210.0,
                 longest_trail: 19.6,
             },
             ResultRow {
@@ -516,7 +525,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 1,
                 deaths: 5,
                 largest_capture_percent: 3.9,
-                total_cells_captured: 2_760,
+                total_captured_area: 2_760.0,
                 longest_trail: 16.3,
             },
             ResultRow {
@@ -527,7 +536,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 0,
                 deaths: 5,
                 largest_capture_percent: 3.1,
-                total_cells_captured: 2_180,
+                total_captured_area: 2_180.0,
                 longest_trail: 13.7,
             },
             ResultRow {
@@ -538,7 +547,7 @@ fn configure_results_screen(world: &mut World, state: AppState) {
                 kills: 0,
                 deaths: 6,
                 largest_capture_percent: 2.4,
-                total_cells_captured: 1_540,
+                total_captured_area: 1_540.0,
                 longest_trail: 9.8,
             },
         ],

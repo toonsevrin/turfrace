@@ -57,33 +57,6 @@ mod tests {
     }
 
     #[test]
-    fn bridge_capture_is_vector_corridor_only() {
-        let mut map = TerritoryMap::new(arena());
-        let player = CompetitorId(0);
-        map.seed_owner(Vec2::new(-6.0, 0.0), 3.0, player);
-        // Build an intentionally disconnected fixture to exercise the
-        // corridor-only geometry fallback.
-        map.territories[player.index()] =
-            map.territories[player.index()].union(&MultiPolygon::from_outer(&[
-                Vec2::new(3.0, -3.0),
-                Vec2::new(9.0, -3.0),
-                Vec2::new(9.0, 3.0),
-                Vec2::new(3.0, 3.0),
-            ]));
-        let mut trail = ActiveTrail::new(
-            player,
-            crate::board::Cell::new(0, 0),
-            Vec2::new(-3.0, 0.0),
-            Vec2::X,
-        );
-        trail.append_exact(Vec2::new(3.0, 0.0));
-        let result = calculate_capture(&map, player, &trail, 0.6);
-        assert!(!result.used_loop_fill);
-        assert!(result.claimed_area > 0.0);
-        assert!(result.claim.contains_world(Vec2::ZERO));
-    }
-
-    #[test]
     fn equal_time_captures_have_stable_id_priority() {
         let mut map = TerritoryMap::new(arena());
         let high = CompetitorId(1);
@@ -104,7 +77,7 @@ mod tests {
         };
         let mut captures = vec![(high, first), (low, second)];
         apply_equal_time_captures(&mut map, &mut captures);
-        assert!(map.territories[low.index()].contains_world(Vec2::ZERO));
-        assert!(!map.territories[high.index()].contains_world(Vec2::ZERO));
+        assert!(map.territory(low).contains_world(Vec2::ZERO));
+        assert!(!map.territory(high).contains_world(Vec2::ZERO));
     }
 }

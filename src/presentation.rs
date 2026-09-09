@@ -6,6 +6,7 @@ use crate::{
     audio::GameAudioPlugin, camera::SplitScreenPlugin, effects::EffectsPlugin, render::RenderPlugin,
 };
 
+mod readiness;
 mod simulation_events;
 
 pub struct PresentationPlugin;
@@ -18,6 +19,7 @@ impl Plugin for PresentationPlugin {
             EffectsPlugin,
             GameAudioPlugin,
         ));
+        readiness::install(app);
         app.add_systems(
             Update,
             (

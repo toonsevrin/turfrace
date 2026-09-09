@@ -113,6 +113,7 @@ fn arguments() -> PathBuf {
 fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
         CameraRenderGraph::new(Core3d),
         Camera {
             clear_color: ClearColorConfig::Custom(Color::srgb_u8(10, 18, 31)),

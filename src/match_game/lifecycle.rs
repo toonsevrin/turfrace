@@ -1,112 +1,87 @@
+//! Lifecycle for the authoritative, device-free simulation.
+//!
+//! Starting a simulation is a world operation so it can be used by the normal
+//! shell and by the headless replay runner. No application state, lobby, input
+//! device, or presentation type is used here.
+
 use bevy::{prelude::*, time::Fixed};
 
 use crate::{
-    app_state::AppState,
     board::{BoardGrid, choose_initial_spawns},
     config::GameConfig,
     ids::CompetitorId,
-    input::{ControlSource, HumanController, SteeringIntent},
-    lobby::{MatchLaunchMode, MatchSetup},
     movement::CompetitorMotion,
-    npc::{
-        NpcController, NpcDifficulty, NpcEvent, NpcEventQueue, NpcRosterEntry, generate_npc_roster,
-    },
+    npc::{NpcController, NpcEvent, NpcEventQueue, NpcRosterEntry, generate_npc_roster},
     territory_map::TerritoryMap,
 };
 
-use super::model::*;
+use super::replay::{MatchReplay, PendingCommands};
+use super::{
+    Competitor, CompetitorKind, DisplacementCredits, EliminationFeed, LastOwnedCell, LifeState,
+    MatchGeneration, MatchPhase, MatchSession, MatchSpec, MatchStatistics, PendingCaptures,
+    PendingDeaths, PresentationReady, Rankings, RosterDescriptor, SimulationClock,
+    SimulationEvents, SimulationPaused, SpawnProtection, SteeringIntent, TerritoryRecord,
+};
 
-pub(super) fn begin_from_lobby(world: &mut World) {
-    let setup = world.resource::<MatchSetup>().clone();
-    let mode = std::mem::take(&mut *world.resource_mut::<MatchLaunchMode>());
-    start_match(world, &setup);
-    if mode == MatchLaunchMode::LobbyCountdownCompleted {
-        let mut session = world.resource_mut::<MatchSession>();
-        session.phase = MatchPhase::Running;
-        session.countdown_remaining = 0.0;
+/// Fully resets and starts a simulation from a serializable specification.
+/// Starting a match is deliberately the only place that advances its
+/// generation and clears transient state.
+pub fn start_simulation(world: &mut World, spec: &MatchSpec) {
+    if let Err(error) = spec.validate() {
+        panic!("invalid MatchSpec: {error:?}");
     }
-    *world.resource_mut::<MatchLoadingFrames>() = MatchLoadingFrames {
-        elapsed: 0,
-        destination: match mode {
-            MatchLaunchMode::StandardCountdown => AppState::Countdown,
-            MatchLaunchMode::LobbyCountdownCompleted => AppState::Playing,
-        },
-    };
-}
-
-const ATTRACT_NPC_COUNT: u8 = 6;
-const ATTRACT_SEED_START: u64 = 0xA77A_C7A5_5EED;
-const SEED_STEP: u64 = 6_364_136_223_846_793_005;
-
-#[derive(Resource, Debug, Clone, Copy)]
-pub(super) struct AttractSeedSequence(pub u64);
-
-impl Default for AttractSeedSequence {
-    fn default() -> Self {
-        Self(ATTRACT_SEED_START)
+    // The specification, rather than a mutable shell resource, is the
+    // authoritative configuration for this run.
+    world.insert_resource(spec.config.clone());
+    if !world.contains_resource::<SimulationEvents>() {
+        world.insert_resource(SimulationEvents::default());
     }
-}
-
-pub(super) fn begin_attract_match(world: &mut World) {
-    let seed = {
-        let mut sequence = world.resource_mut::<AttractSeedSequence>();
-        let seed = sequence.0;
-        sequence.0 = seed.wrapping_mul(SEED_STEP).wrapping_add(1);
-        seed
-    };
-    let setup = MatchSetup {
-        field_seed: seed,
-        npc_roster_seed: seed ^ 0x4e50_4352_4f53_5445,
-        npc_difficulty: NpcDifficulty::Normal,
-        total_competitors: ATTRACT_NPC_COUNT,
-        humans: Vec::new(),
-        replay_same_field: false,
-    };
-    start_match_for(world, &setup, MatchPurpose::Attract);
-}
-
-#[derive(Resource)]
-pub(super) struct MatchLoadingFrames {
-    elapsed: u8,
-    pub(super) destination: AppState,
-}
-
-impl Default for MatchLoadingFrames {
-    fn default() -> Self {
-        Self {
-            elapsed: 0,
-            destination: AppState::Countdown,
-        }
+    if !world.contains_resource::<Rankings>() {
+        world.insert_resource(Rankings::default());
     }
-}
-
-const MATCH_LOADING_MIN_FRAMES: u8 = 6;
-
-pub(super) fn finish_match_loading(
-    mut frames: ResMut<MatchLoadingFrames>,
-    mut next: ResMut<NextState<AppState>>,
-) {
-    frames.elapsed = frames.elapsed.saturating_add(1);
-    if frames.elapsed >= MATCH_LOADING_MIN_FRAMES {
-        next.set(frames.destination);
+    if !world.contains_resource::<EliminationFeed>() {
+        world.insert_resource(EliminationFeed::default());
     }
-}
-
-/// Fully resets authoritative state using a lobby composition. Useful for rematches and tests.
-pub fn start_match(world: &mut World, setup: &MatchSetup) {
-    start_match_for(world, setup, MatchPurpose::Playable);
-}
-
-pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: MatchPurpose) {
+    if !world.contains_resource::<PendingDeaths>() {
+        world.insert_resource(PendingDeaths::default());
+    }
+    if !world.contains_resource::<PendingCaptures>() {
+        world.insert_resource(PendingCaptures::default());
+    }
+    if !world.contains_resource::<DisplacementCredits>() {
+        world.insert_resource(DisplacementCredits::default());
+    }
+    if !world.contains_resource::<SimulationClock>() {
+        world.insert_resource(SimulationClock::default());
+    }
+    if !world.contains_resource::<PendingCommands>() {
+        world.insert_resource(PendingCommands::default());
+    }
+    if !world.contains_resource::<MatchGeneration>() {
+        world.insert_resource(MatchGeneration::default());
+    }
+    if !world.contains_resource::<PresentationReady>() {
+        world.insert_resource(PresentationReady::default());
+    }
+    if !world.contains_resource::<crate::match_game::rules::MatchRules>() {
+        world.insert_resource(spec.rules.clone());
+    }
     if !world.contains_resource::<NpcEventQueue>() {
         world.insert_resource(NpcEventQueue::default());
     }
+    world.init_resource::<SimulationPaused>();
+    reset_transient_resources(world);
     despawn_competitors(world);
+
     let config = world.resource::<GameConfig>().clone();
-    let count = usize::from(setup.total_competitors.clamp(2, 12));
-    let mut board = BoardGrid::generate(setup.field_seed, count, &config);
+    // Restarting also resets fixed-time accumulation. Otherwise a restart
+    // can inherit a partial old timestep and consume an extra tick.
+    world.insert_resource(Time::<Fixed>::from_hz(config.fixed_hz));
+    let roster = spec.roster.clone();
+    let count = roster.len();
+    let board = BoardGrid::generate(spec.seed, count, &config);
     let mut territory = TerritoryMap::from_board(&board);
-    let spawns = choose_initial_spawns(&board, count, 8.0, setup.field_seed);
+    let spawns = choose_initial_spawns(&board, count, 8.0, spec.seed);
     for (index, &spawn) in spawns.iter().enumerate() {
         territory.seed_owner(
             spawn,
@@ -114,48 +89,64 @@ pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: Ma
             CompetitorId(index as u8),
         );
     }
-    // The grid is now a derived sample cache used by broadphase and legacy
-    // integrations. Gameplay ownership remains in the vector map.
-    territory.rebuild_sample_cache(&mut board);
-    let counts = board.owner_counts;
-    let (phase, countdown_remaining) = match purpose {
-        MatchPurpose::Playable => (MatchPhase::Countdown, 3.0),
-        MatchPurpose::Attract => (MatchPhase::Running, 0.0),
-    };
+    let countdown_remaining = spec.countdown_ticks as f32 / config.fixed_hz as f32;
+
     world.insert_resource(board);
     world.insert_resource(territory);
     world.insert_resource(MatchSession {
-        field_seed: setup.field_seed,
-        npc_roster_seed: setup.npc_roster_seed,
-        purpose,
-        phase,
+        field_seed: spec.seed,
+        npc_roster_seed: spec.npc_roster_seed,
+        purpose: spec.purpose,
+        phase: MatchPhase::Loading,
         elapsed_seconds: 0.0,
         countdown_remaining,
+        countdown_ticks_remaining: spec.countdown_ticks,
         winner: None,
         result_hold_remaining: 0.0,
     });
+    world.insert_resource(spec.clone());
+    world.insert_resource(spec.rules.clone());
+    world.insert_resource(MatchReplay::new(spec.clone(), Vec::new()));
     world.insert_resource(Rankings::default());
+    world.resource_mut::<SimulationPaused>().0 = false;
+    world
+        .resource_mut::<PendingCommands>()
+        .set_controlled_players(&roster);
     world.resource_mut::<SimulationEvents>().0.clear();
     world.resource_mut::<NpcEventQueue>().0.clear();
     world.insert_resource(EliminationFeed::default());
-    let npc_count = count.saturating_sub(setup.humans.len());
-    let npc_roster = generate_npc_roster(setup.npc_roster_seed, npc_count, setup.npc_difficulty);
-    for (index, &position) in spawns.iter().enumerate() {
+    world.resource_mut::<SimulationClock>().0 = 0;
+    let generation = world.resource::<MatchGeneration>().0.wrapping_add(1);
+    world.resource_mut::<MatchGeneration>().0 = generation;
+    world.resource_mut::<PresentationReady>().0 = None;
+
+    let npc_count = roster
+        .iter()
+        .filter(|entry| matches!(entry, RosterDescriptor::Npc))
+        .count();
+    let npc_roster = generate_npc_roster(spec.npc_roster_seed, npc_count, spec.npc_difficulty);
+    let mut next_npc = 0;
+    for (index, (descriptor, &position)) in roster.iter().zip(spawns.iter()).enumerate() {
+        let npc_entry = if matches!(descriptor, RosterDescriptor::Npc) {
+            let entry = npc_roster.get(next_npc);
+            next_npc += 1;
+            entry
+        } else {
+            None
+        };
+        let territory_area = world
+            .resource::<TerritoryMap>()
+            .area(CompetitorId(index as u8));
         spawn_competitor(
             world,
-            setup,
             &config,
-            counts[index],
-            world
-                .resource::<TerritoryMap>()
-                .area(CompetitorId(index as u8)),
+            territory_area,
             index,
             position,
-            index
-                .checked_sub(setup.humans.len())
-                .and_then(|npc_index| npc_roster.get(npc_index)),
+            descriptor,
+            npc_entry,
         );
-        if index >= setup.humans.len() {
+        if matches!(descriptor, RosterDescriptor::Npc) {
             world
                 .resource_mut::<NpcEventQueue>()
                 .0
@@ -164,21 +155,78 @@ pub(super) fn start_match_for(world: &mut World, setup: &MatchSetup, purpose: Ma
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn reset_transient_resources(world: &mut World) {
+    if let Some(mut queue) = world.get_resource_mut::<NpcEventQueue>() {
+        queue.0.clear();
+    }
+    if let Some(mut events) = world.get_resource_mut::<SimulationEvents>() {
+        events.0.clear();
+    }
+    if let Some(mut feed) = world.get_resource_mut::<EliminationFeed>() {
+        feed.0.clear();
+    }
+    if let Some(mut pending) = world.get_resource_mut::<PendingDeaths>() {
+        pending.0.clear();
+    }
+    if let Some(mut pending) = world.get_resource_mut::<PendingCaptures>() {
+        pending.0.clear();
+    }
+    if let Some(mut credits) = world.get_resource_mut::<DisplacementCredits>() {
+        credits.0.clear();
+    }
+    if let Some(mut clock) = world.get_resource_mut::<SimulationClock>() {
+        clock.0 = 0;
+    }
+    if let Some(mut commands) = world.get_resource_mut::<PendingCommands>() {
+        commands.reset();
+    }
+    if let Some(mut paused) = world.get_resource_mut::<SimulationPaused>() {
+        paused.0 = false;
+    }
+}
+
 fn spawn_competitor(
     world: &mut World,
-    setup: &MatchSetup,
     config: &GameConfig,
-    territory_cells: u32,
     territory_area: f32,
     index: usize,
     position: Vec2,
+    descriptor: &RosterDescriptor,
     npc_entry: Option<&NpcRosterEntry>,
 ) {
     let id = CompetitorId(index as u8);
     let heading = (-position).try_normalize().unwrap_or(Vec2::Y);
-    let base = (
+    let (kind, display_name, color_id, pattern_id) = match descriptor {
+        RosterDescriptor::Human {
+            display_name,
+            color_id,
+            pattern_id,
+            ..
+        } => (
+            CompetitorKind::Human,
+            display_name.clone(),
+            *color_id,
+            *pattern_id,
+        ),
+        RosterDescriptor::Npc => {
+            let entry = npc_entry.expect("every NPC slot has a deterministic roster entry");
+            (
+                CompetitorKind::Npc,
+                entry.name.clone(),
+                index as u8,
+                (index % 8) as u8,
+            )
+        }
+    };
+    world.spawn((
         id,
+        Competitor {
+            id,
+            display_name,
+            kind,
+            color_id,
+            pattern_id,
+        },
         CompetitorMotion::new(position, heading),
         LifeState::alive(),
         SpawnProtection {
@@ -188,12 +236,9 @@ fn spawn_competitor(
         TerritoryRecord {
             current_area: territory_area,
             peak_area: territory_area,
-            current_cells: territory_cells,
-            peak_cells: territory_cells,
         },
         MatchStatistics {
             peak_territory_area: territory_area,
-            peak_territory_cells: territory_cells,
             ..default()
         },
         LastOwnedCell(
@@ -205,36 +250,24 @@ fn spawn_competitor(
         SteeringIntent {
             desired_direction: heading,
             magnitude: 0.0,
-            source: ControlSource::Npc,
+            source: super::ControlSource::Npc,
         },
-    );
-    if let Some(human) = setup.humans.get(index) {
-        world.spawn((
-            base,
-            Competitor {
-                id,
-                display_name: human.display_name.clone(),
-                kind: CompetitorKind::Human,
-                color_id: human.color_id,
-                pattern_id: human.pattern_id,
-            },
-            HumanController {
-                device: human.device,
-            },
-        ));
-    } else {
-        let npc_entry = npc_entry.expect("every NPC slot has a deterministic roster entry");
-        world.spawn((
-            base,
-            Competitor {
-                id,
-                display_name: npc_entry.name.clone(),
-                kind: CompetitorKind::Npc,
-                color_id: index as u8,
-                pattern_id: (index % 8) as u8,
-            },
-            NpcController::from_roster(id, npc_entry, index),
-        ));
+    ));
+    if kind == CompetitorKind::Npc {
+        let entry = npc_entry.expect("NPC descriptor without roster entry");
+        // Insert separately so the base entity remains device-free and the
+        // controller is still an ordinary simulation component.
+        let entity = {
+            let mut query = world.query::<(Entity, &Competitor)>();
+            query
+                .iter(world)
+                .find(|(_, competitor)| competitor.id == id)
+                .map(|(entity, _)| entity)
+                .expect("new competitor entity exists")
+        };
+        world
+            .entity_mut(entity)
+            .insert(NpcController::from_roster(id, entry, index));
     }
 }
 
@@ -248,57 +281,46 @@ fn despawn_competitors(world: &mut World) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(super) fn cleanup_match(
-    mut commands: Commands,
-    competitors: Query<Entity, With<Competitor>>,
-    mut board: ResMut<BoardGrid>,
-    mut territory: ResMut<TerritoryMap>,
-    mut session: ResMut<MatchSession>,
-    mut rankings: ResMut<Rankings>,
-    mut events: ResMut<SimulationEvents>,
-    feed: Option<ResMut<EliminationFeed>>,
-) {
-    for entity in &competitors {
-        commands.entity(entity).despawn();
-    }
-    *board = BoardGrid::default();
-    *territory = TerritoryMap::default();
-    *session = MatchSession::default();
-    rankings.entries.clear();
-    events.0.clear();
-    if let Some(mut feed) = feed {
-        feed.0.clear();
-    }
-}
-
-pub(super) fn advance_countdown(
-    time: Res<Time<Fixed>>,
+/// Loading is released only by an acknowledgement for this exact match
+/// generation. This keeps an acknowledgement from a previous restart inert.
+pub(super) fn transition_when_ready(
+    generation: Res<MatchGeneration>,
+    ready: Res<PresentationReady>,
+    paused: Res<SimulationPaused>,
     mut session: ResMut<MatchSession>,
     mut events: ResMut<SimulationEvents>,
-    mut next: ResMut<NextState<AppState>>,
 ) {
-    let before = session.countdown_remaining.ceil() as u8;
-    session.countdown_remaining = (session.countdown_remaining - time.delta_secs()).max(0.0);
-    let after = session.countdown_remaining.ceil() as u8;
-    if after < before && after > 0 {
-        events.0.push(SimulationEvent::Countdown(after));
+    if paused.0 || session.phase != MatchPhase::Loading || ready.0 != Some(generation.0) {
+        return;
     }
-    if session.countdown_remaining <= 0.0 {
+    if session.countdown_ticks_remaining == 0 {
         session.phase = MatchPhase::Running;
-        events.0.push(SimulationEvent::Go);
-        next.set(AppState::Playing);
+        events.0.push(super::SimulationEvent::Go);
+    } else {
+        session.phase = MatchPhase::Countdown;
     }
 }
 
-pub(super) fn advance_result_hold(
-    time: Res<Time>,
+/// Countdown advances by exactly one authoritative fixed update, rather than
+/// subtracting a float and hoping it lands on zero.
+pub(super) fn advance_countdown(
+    config: Res<GameConfig>,
+    paused: Res<SimulationPaused>,
     mut session: ResMut<MatchSession>,
-    mut next: ResMut<NextState<AppState>>,
+    mut events: ResMut<SimulationEvents>,
 ) {
-    session.result_hold_remaining = (session.result_hold_remaining - time.delta_secs()).max(0.0);
-    if session.result_hold_remaining <= 0.0 {
-        next.set(AppState::Results);
+    if paused.0 || session.phase != MatchPhase::Countdown {
+        return;
+    }
+    let before = (session.countdown_ticks_remaining as f32 / config.fixed_hz as f32).ceil() as u8;
+    session.countdown_ticks_remaining = session.countdown_ticks_remaining.saturating_sub(1);
+    session.countdown_remaining = session.countdown_ticks_remaining as f32 / config.fixed_hz as f32;
+    let after = (session.countdown_ticks_remaining as f32 / config.fixed_hz as f32).ceil() as u8;
+    if after < before && after > 0 {
+        events.0.push(super::SimulationEvent::Countdown(after));
+    }
+    if session.countdown_ticks_remaining == 0 {
+        session.phase = MatchPhase::Running;
+        events.0.push(super::SimulationEvent::Go);
     }
 }

@@ -1,6 +1,9 @@
 use bevy::{
-    asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
+    asset::RenderAssetUsages, camera::visibility::NoFrustumCulling, mesh::Indices, prelude::*,
+    render::render_resource::PrimitiveTopology,
 };
+
+use crate::match_game::MatchGeneration;
 
 use super::{CompetitorVisual, materials::RenderAssets, territory::TERRITORY_SURFACE_HEIGHT};
 
@@ -29,20 +32,48 @@ pub struct TrailVisual {
 #[derive(Component)]
 pub(super) struct TrailProxy {
     source: Entity,
+    generation: u64,
     revision: u64,
 }
 
 #[derive(Component)]
-pub(super) struct TrailPipelineWarmup;
+pub(crate) struct TrailPipelineWarmup {
+    pub(crate) generation: u64,
+}
 
-pub(super) fn spawn_trail_pipeline_warmup(
+pub(super) fn sync_trail_pipeline_warmup(
     mut commands: Commands,
+    generation: Option<Res<MatchGeneration>>,
+    session: Option<Res<crate::match_game::MatchSession>>,
+    warmups: Query<(Entity, &TrailPipelineWarmup)>,
     assets: Res<RenderAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    let loading_generation =
+        generation
+            .as_ref()
+            .zip(session.as_ref())
+            .and_then(|(generation, session)| {
+                (session.phase == crate::match_game::MatchPhase::Loading).then_some(generation.0)
+            });
+    let mut exists = false;
+    for (entity, warmup) in &warmups {
+        if Some(warmup.generation) == loading_generation {
+            exists = true;
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+    let Some(generation) = loading_generation.filter(|_| !exists) else {
+        return;
+    };
     commands.spawn((
         Name::new("Trail Pipeline Warmup"),
-        TrailPipelineWarmup,
+        TrailPipelineWarmup { generation },
+        // The warmup is a pipeline witness, not gameplay geometry. Keeping it
+        // visible prevents a narrow or centered camera frustum from making
+        // readiness wait forever.
+        NoFrustumCulling,
         Mesh3d(meshes.add(ribbon_mesh(
             &[Vec2::new(-0.01, 0.0), Vec2::new(0.01, 0.0)],
             0.01,
@@ -52,25 +83,22 @@ pub(super) fn spawn_trail_pipeline_warmup(
     ));
 }
 
-pub(super) fn cleanup_trail_pipeline_warmup(
-    mut commands: Commands,
-    warmups: Query<Entity, With<TrailPipelineWarmup>>,
-) {
-    for entity in &warmups {
-        commands.entity(entity).despawn();
-    }
-}
-
 pub(super) fn sync_trail_visuals(
     mut commands: Commands,
     assets: Option<Res<RenderAssets>>,
+    generation: Option<Res<MatchGeneration>>,
     mut meshes: ResMut<Assets<Mesh>>,
     sources: Query<(Entity, &CompetitorVisual, &TrailVisual)>,
     mut proxies: Query<(Entity, &mut TrailProxy, &Mesh3d)>,
 ) {
     let Some(assets) = assets else { return };
+    let generation = generation.map_or(0, |generation| generation.0);
     let mut rendered = [false; 12];
     for (entity, mut proxy, mesh_handle) in &mut proxies {
+        if proxy.generation != generation {
+            commands.entity(entity).despawn();
+            continue;
+        }
         let Ok((_, visual, trail)) = sources.get(proxy.source) else {
             commands.entity(entity).despawn();
             continue;
@@ -92,6 +120,7 @@ pub(super) fn sync_trail_visuals(
             Name::new(format!("Competitor {} Trail", visual.id)),
             TrailProxy {
                 source,
+                generation,
                 revision: trail.revision,
             },
             Mesh3d(meshes.add(ribbon_mesh(&trail.points, 0.65))),

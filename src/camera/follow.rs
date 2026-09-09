@@ -114,6 +114,7 @@ pub(super) fn reconcile_player_cameras(
             .spawn((
                 Name::new(format!("Player {} Camera", subject.slot + 1)),
                 Camera3d::default(),
+                bevy::core_pipeline::tonemapping::Tonemapping::None,
                 presentation.gameplay_msaa(local_player_count),
                 Projection::Perspective(PerspectiveProjection {
                     fov: tuning.vertical_fov_radians,

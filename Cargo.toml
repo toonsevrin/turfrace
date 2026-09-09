@@ -3,12 +3,32 @@ name = "turfrace"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["shell"]
+# The simulation builds without windowing, devices, rendering, or audio.
+# Custom flat materials need PBR's material pipeline, not the 3d umbrella's
+# glTF, morph targets, post-processing, anti-alias plugins, or texture LUTs.
+shell = ["bevy/bevy_pbr", "bevy/ui", "bevy/audio"]
+
+[[bin]]
+name = "turfrace"
+path = "src/main.rs"
+required-features = ["shell"]
+
+[[example]]
+name = "visual_playtest"
+required-features = ["shell"]
+
+[[example]]
+name = "territory_review"
+required-features = ["shell"]
+
+[[example]]
+name = "performance_benchmark"
+required-features = ["shell"]
+
 [dependencies]
-bevy = { version = "0.19.0", default-features = false, features = [
-    "3d",
-    "ui",
-    "audio",
-] }
+bevy = { version = "0.19.0", default-features = false, features = ["std", "async_executor"] }
 earcutr = "0.5.0"
 i_overlay = { version = "7.0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }

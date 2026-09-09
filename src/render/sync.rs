@@ -15,57 +15,59 @@ use crate::{
 use super::trail::MAX_RENDER_TRAIL_POINTS;
 use super::{CompetitorVisual, FieldVisual, TerritoryVisual, TrailVisual};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_board_visuals(
-    board: Option<ResMut<BoardGrid>>,
-    vector_map: Option<Res<TerritoryMap>>,
+    board: Option<Res<BoardGrid>>,
+    vector_map: Option<ResMut<TerritoryMap>>,
     mut field: ResMut<FieldVisual>,
     mut territory: ResMut<TerritoryVisual>,
     mut last_generation_revision: Local<u64>,
-    mut last_ownership_revision: Local<u64>,
+    mut last_sample_revision: Local<u64>,
     mut last_vector_revision: Local<u64>,
+    mut ownership_changes: Local<Vec<crate::territory_map::OwnershipChange>>,
 ) {
-    let Some(mut board) = board else { return };
-    let vector_changed = vector_map
-        .as_ref()
-        .is_some_and(|map| map.revision != *last_vector_revision && !map.arena.is_empty());
+    let Some(board) = board else { return };
     let generation_changed = *last_generation_revision != board.generation_revision;
-    let had_ownership_changes = !board.ownership_changes.is_empty();
-    let mut ownership_changes = std::mem::take(&mut board.ownership_changes);
-    let ownership_changed =
-        *last_ownership_revision != board.ownership_revision || had_ownership_changes;
-    if !generation_changed && !ownership_changed && !vector_changed {
-        board.ownership_changes = ownership_changes;
-        return;
-    }
     if generation_changed {
         field.contour.clone_from(&board.contour.points);
         field.revision = field.revision.wrapping_add(1);
         *last_generation_revision = board.generation_revision;
     }
+
+    // The board owns field and trail spatial data only. Ownership snapshots and
+    // exact geometry both come from the map, including in headless worlds.
+    let Some(mut map) = vector_map else { return };
+    let vector_changed = map.revision() != *last_vector_revision && !map.arena().is_empty();
+    ownership_changes.clear();
+    map.drain_ownership_changes(&mut ownership_changes);
+    let sample_revision = map.sample_ownership_revision();
+    let ownership_changed =
+        *last_sample_revision != sample_revision || !ownership_changes.is_empty();
+    if !generation_changed && !ownership_changed && !vector_changed {
+        return;
+    }
+
+    let (width, height, cell_size, origin) = map.sample_dimensions();
+    let samples = map.sample_owners();
     let geometry_changed = generation_changed
-        || territory.width != board.width
-        || territory.height != board.height
-        || territory.cell_size != board.cell_size
-        || territory.origin != board.world_origin
-        || territory.owners.len() != board.owner.len();
+        || territory.width != width
+        || territory.height != height
+        || territory.cell_size != cell_size
+        || territory.origin != origin
+        || territory.owners.len() != samples.len();
     if ownership_changed && !geometry_changed && ownership_changes.is_empty() {
-        ownership_changes.extend(
-            territory
-                .owners
-                .iter()
-                .zip(&board.owner)
-                .enumerate()
-                .filter_map(|(index, (old, new))| {
-                    (*old != new.0).then_some(crate::board::OwnershipChange {
-                        index,
-                        old: crate::ids::OwnerId(*old),
-                        new: *new,
-                    })
-                }),
-        );
+        ownership_changes.extend(territory.owners.iter().zip(samples).enumerate().filter_map(
+            |(index, (old, new))| {
+                (*old != new.0).then_some(crate::territory_map::OwnershipChange {
+                    index,
+                    old: crate::ids::OwnerId(*old),
+                    new: *new,
+                })
+            },
+        ));
     }
     if ownership_changed {
-        for change in &ownership_changes {
+        for change in ownership_changes.iter() {
             let old = territory
                 .owners
                 .get(change.index)
@@ -84,39 +86,32 @@ pub(super) fn sync_board_visuals(
             }
         }
     }
-    if !geometry_changed && !ownership_changed && !vector_changed {
-        board.ownership_changes = ownership_changes;
-        return;
-    }
-    territory.width = board.width;
-    territory.height = board.height;
-    territory.cell_size = board.cell_size;
-    territory.origin = board.world_origin;
+
+    territory.width = width;
+    territory.height = height;
+    territory.cell_size = cell_size;
+    territory.origin = origin;
     if geometry_changed {
         territory.owners.clear();
-        territory
-            .owners
-            .extend(board.owner.iter().map(|owner| owner.0));
+        territory.owners.extend(samples.iter().map(|owner| owner.0));
         for revision in &mut territory.owner_revisions {
             *revision = revision.wrapping_add(1);
         }
     }
-    if vector_changed && let Some(map) = vector_map.as_ref() {
-        territory.arena.clone_from(&map.arena);
+    if vector_changed {
+        territory.arena.clone_from(map.arena());
         for index in 0..territory.polygons.len() {
-            if territory.polygons[index] != map.territories[index] {
-                territory.polygons[index].clone_from(&map.territories[index]);
+            let player = crate::ids::CompetitorId::new(index as u8);
+            let geometry = map.territory(player);
+            if territory.polygons[index] != *geometry {
+                territory.polygons[index].clone_from(geometry);
                 territory.owner_revisions[index] = territory.owner_revisions[index].wrapping_add(1);
             }
         }
-        *last_vector_revision = map.revision;
+        *last_vector_revision = map.revision();
     }
     territory.revision = territory.revision.wrapping_add(1);
-    *last_ownership_revision = board.ownership_revision;
-    // Keep the allocation for the next capture instead of dropping it after
-    // every presentation sync.
-    ownership_changes.clear();
-    board.ownership_changes = ownership_changes;
+    *last_sample_revision = sample_revision;
 }
 
 #[allow(clippy::type_complexity)]
@@ -261,7 +256,7 @@ fn trail_visual_needs_update(current: Option<&TrailVisual>, trail: &ActiveTrail)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{board::Cell, ids::CompetitorId, ids::OwnerId};
+    use crate::{board::Cell, ids::CompetitorId};
 
     fn tiny_board() -> BoardGrid {
         BoardGrid {
@@ -269,15 +264,12 @@ mod tests {
             height: 1,
             cell_size: 0.5,
             field_mask: vec![true],
-            owner: vec![OwnerId::UNCLAIMED],
             active_trail_bits: vec![0],
             contour: crate::board::FieldContour {
                 points: vec![Vec2::X, Vec2::Y, Vec2::NEG_X],
                 ..default()
             },
             generation_revision: 1,
-            ownership_revision: 1,
-            ownership_changes: Vec::with_capacity(8),
             ..default()
         }
     }
@@ -301,18 +293,18 @@ mod tests {
     #[test]
     fn trail_bit_changes_do_not_rebuild_territory() {
         let mut app = App::new();
+        let board = tiny_board();
+        let map = TerritoryMap::from_board(&board);
         app.init_resource::<FieldVisual>()
             .init_resource::<TerritoryVisual>()
-            .insert_resource(tiny_board())
+            .insert_resource(board)
+            .insert_resource(map)
             .add_systems(Update, sync_board_visuals);
         app.update();
         let revision = app.world().resource::<TerritoryVisual>().revision;
         assert_eq!(
-            app.world()
-                .resource::<BoardGrid>()
-                .ownership_changes
-                .capacity(),
-            8
+            app.world().resource::<TerritoryMap>().sample_owners().len(),
+            1
         );
         app.world_mut()
             .resource_mut::<BoardGrid>()
@@ -320,22 +312,26 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<TerritoryVisual>().revision, revision);
 
-        {
-            let mut board = app.world_mut().resource_mut::<BoardGrid>();
-            board.owner[0] = OwnerId(1);
-            board.ownership_revision += 1;
-        }
+        app.world_mut().resource_mut::<TerritoryMap>().apply_claim(
+            CompetitorId::new(0),
+            crate::geometry::MultiPolygon::from_outer(&[
+                Vec2::ZERO,
+                Vec2::new(0.5, 0.0),
+                Vec2::splat(0.5),
+                Vec2::new(0.0, 0.5),
+            ]),
+        );
         app.update();
         assert_eq!(
             app.world().resource::<TerritoryVisual>().revision,
             revision + 1
         );
         let owner_revision = app.world().resource::<TerritoryVisual>().owner_revisions[0];
-        assert!(
+        assert_eq!(
             app.world()
-                .resource::<BoardGrid>()
-                .ownership_changes
-                .is_empty()
+                .resource::<TerritoryMap>()
+                .sample_owner_at(crate::board::Cell::new(0, 0)),
+            CompetitorId::new(0).owner()
         );
         app.update();
         assert_eq!(

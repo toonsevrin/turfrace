@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::{
     config::GameConfig,
-    ids::{CompetitorId, MAX_COMPETITORS, OwnerId},
+    ids::{CompetitorId, MAX_COMPETITORS},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -37,19 +37,6 @@ pub struct TrailSegmentRef {
     pub segment: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OwnerFrontier {
-    pub position: Vec2,
-    pub outward: Vec2,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OwnershipChange {
-    pub index: usize,
-    pub old: OwnerId,
-    pub new: OwnerId,
-}
-
 #[derive(Resource, Clone, Debug)]
 pub struct BoardGrid {
     pub width: u32,
@@ -57,29 +44,12 @@ pub struct BoardGrid {
     pub cell_size: f32,
     pub world_origin: Vec2,
     pub field_mask: Vec<bool>,
-    /// Derived sample ownership for broadphase, rendering compatibility, and
-    /// legacy integrations. Exact gameplay ownership lives in `TerritoryMap`.
-    pub owner: Vec<OwnerId>,
     pub active_trail_bits: Vec<u16>,
     pub trail_segment_buckets: Vec<Vec<TrailSegmentRef>>,
     pub signed_distance: Vec<f32>,
-    /// Counts and reverse indexes derived from `owner`; never use them for
-    /// exact capture, elimination, ranking, or containment decisions.
-    pub owner_counts: [u32; MAX_COMPETITORS],
-    pub owned_cells: [Vec<usize>; MAX_COMPETITORS],
-    pub owner_cell_slots: Vec<u32>,
-    /// Cells on the boundary of each sampled owner. One bit per competitor.
-    /// Maintained with ownership changes so NPC home queries stay local.
-    pub owner_frontier_bits: Vec<u16>,
     pub spawn_candidates: Vec<usize>,
-    pub dirty_chunks: Vec<bool>,
     pub contour: FieldContour,
     pub playable_cells: u32,
-    /// Changes only when authoritative ownership changes, never for trail-bit updates.
-    pub ownership_revision: u64,
-    /// Changes are consumed by presentation once per ordinary update. Keeping
-    /// the compact change set here avoids a second full-board comparison.
-    pub ownership_changes: Vec<OwnershipChange>,
     /// Stable generation identity for contour/field-mask presentation caches.
     pub generation_revision: u64,
 }
@@ -92,20 +62,12 @@ impl Default for BoardGrid {
             cell_size: 0.5,
             world_origin: Vec2::ZERO,
             field_mask: Vec::new(),
-            owner: Vec::new(),
             active_trail_bits: Vec::new(),
             trail_segment_buckets: Vec::new(),
             signed_distance: Vec::new(),
-            owner_counts: [0; MAX_COMPETITORS],
-            owned_cells: std::array::from_fn(|_| Vec::new()),
-            owner_cell_slots: Vec::new(),
-            owner_frontier_bits: Vec::new(),
             spawn_candidates: Vec::new(),
-            dirty_chunks: Vec::new(),
             contour: FieldContour::default(),
             playable_cells: 0,
-            ownership_revision: 0,
-            ownership_changes: Vec::new(),
             generation_revision: 0,
         }
     }
@@ -221,20 +183,12 @@ impl BoardGrid {
             cell_size: config.cell_size,
             world_origin: origin,
             field_mask,
-            owner: vec![OwnerId::UNCLAIMED; len],
             active_trail_bits: vec![0; len],
             trail_segment_buckets: vec![Vec::new(); len],
             signed_distance,
-            owner_counts: [0; MAX_COMPETITORS],
-            owned_cells: std::array::from_fn(|_| Vec::new()),
-            owner_cell_slots: vec![u32::MAX; len],
-            owner_frontier_bits: vec![0; len],
             spawn_candidates,
-            dirty_chunks: vec![true; len.div_ceil(1024)],
             contour,
             playable_cells,
-            ownership_revision: 1,
-            ownership_changes: Vec::new(),
             generation_revision: seed ^ (count as u64).rotate_left(32),
         }
     }
@@ -289,14 +243,6 @@ impl BoardGrid {
     pub fn is_playable(&self, cell: Cell) -> bool {
         self.index(cell).is_some_and(|i| self.field_mask[i])
     }
-    pub fn owner_at(&self, cell: Cell) -> OwnerId {
-        self.index(cell)
-            .filter(|&i| self.field_mask[i])
-            .map_or(OwnerId::UNCLAIMED, |i| self.owner[i])
-    }
-    pub fn owns(&self, cell: Cell, player: CompetitorId) -> bool {
-        self.owner_at(cell) == player.owner()
-    }
     pub fn signed_distance_at(&self, position: Vec2) -> f32 {
         self.world_to_cell(position)
             .and_then(|c| self.index(c))
@@ -310,164 +256,6 @@ impl BoardGrid {
             self.field_mask[index] && self.signed_distance[index] >= margin
         })
         .unwrap_or(Vec2::ZERO)
-    }
-    pub fn nearest_owned_cell_center(&self, position: Vec2, player: CompetitorId) -> Option<Vec2> {
-        self.nearest_cell_center(position, |index| self.owner[index] == player.owner())
-    }
-    pub fn nearest_owner_frontier(
-        &self,
-        position: Vec2,
-        player: CompetitorId,
-        maximum_distance: f32,
-    ) -> Option<Vec2> {
-        let bit = 1u16 << player.index();
-        self.nearest_cell_center_bounded(position, maximum_distance, |index| {
-            self.owner_frontier_bits[index] & bit != 0
-        })
-    }
-
-    pub fn collect_owner_frontiers(
-        &self,
-        position: Vec2,
-        player: CompetitorId,
-        maximum_distance: f32,
-        output: &mut Vec<OwnerFrontier>,
-    ) {
-        output.clear();
-        let Some((minimum, maximum)) = self.clamped_cell_bounds(
-            position - Vec2::splat(maximum_distance),
-            position + Vec2::splat(maximum_distance),
-        ) else {
-            return;
-        };
-        let bit = 1u16 << player.index();
-        let maximum_distance_squared = maximum_distance * maximum_distance;
-        for y in minimum.y..=maximum.y {
-            for x in minimum.x..=maximum.x {
-                let cell = Cell::new(x, y);
-                let index = self.index(cell).expect("clamped frontier cell");
-                if self.owner_frontier_bits[index] & bit == 0 {
-                    continue;
-                }
-                let center = self.cell_center(cell);
-                if center.distance_squared(position) > maximum_distance_squared {
-                    continue;
-                }
-                let mut outward = Vec2::ZERO;
-                for (neighbor, direction) in [
-                    (Cell::new(x - 1, y), -Vec2::X),
-                    (Cell::new(x + 1, y), Vec2::X),
-                    (Cell::new(x, y - 1), -Vec2::Y),
-                    (Cell::new(x, y + 1), Vec2::Y),
-                ] {
-                    if self
-                        .index(neighbor)
-                        .is_none_or(|other| self.owner[other] != player.owner())
-                    {
-                        outward += direction;
-                    }
-                }
-                output.push(OwnerFrontier {
-                    position: center,
-                    outward: outward.normalize_or((center - position).normalize_or(Vec2::Y)),
-                });
-            }
-        }
-    }
-
-    fn nearest_cell_center_bounded(
-        &self,
-        position: Vec2,
-        maximum_distance: f32,
-        predicate: impl Fn(usize) -> bool,
-    ) -> Option<Vec2> {
-        if self.is_empty() {
-            return None;
-        }
-        let relative = (position - self.world_origin) / self.cell_size;
-        let start = Cell::new(
-            (relative.x.floor() as i32).clamp(0, self.width as i32 - 1),
-            (relative.y.floor() as i32).clamp(0, self.height as i32 - 1),
-        );
-        let maximum_radius = (maximum_distance / self.cell_size).ceil() as i32;
-        let mut best: Option<(Vec2, f32)> = None;
-        for radius in 0..=maximum_radius {
-            let mut consider = |cell: Cell| {
-                let Some(index) = self.index(cell) else {
-                    return;
-                };
-                if !predicate(index) {
-                    return;
-                }
-                let center = self.cell_center(cell);
-                let distance = center.distance_squared(position);
-                if distance <= maximum_distance * maximum_distance
-                    && best.is_none_or(|(_, current)| distance < current)
-                {
-                    best = Some((center, distance));
-                }
-            };
-            for x in start.x - radius..=start.x + radius {
-                consider(Cell::new(x, start.y - radius));
-                if radius > 0 {
-                    consider(Cell::new(x, start.y + radius));
-                }
-            }
-            for y in start.y - radius + 1..start.y + radius {
-                consider(Cell::new(start.x - radius, y));
-                if radius > 0 {
-                    consider(Cell::new(start.x + radius, y));
-                }
-            }
-            if best.is_some() {
-                break;
-            }
-        }
-        best.map(|(point, _)| point)
-    }
-
-    pub fn rebuild_owner_frontiers(&mut self) {
-        self.owner_frontier_bits.fill(0);
-        for index in 0..self.len() {
-            self.refresh_frontier_index(index);
-        }
-    }
-
-    fn refresh_frontier_around(&mut self, index: usize) {
-        let cell = self.cell(index);
-        for candidate in [
-            cell,
-            Cell::new(cell.x - 1, cell.y),
-            Cell::new(cell.x + 1, cell.y),
-            Cell::new(cell.x, cell.y - 1),
-            Cell::new(cell.x, cell.y + 1),
-        ] {
-            if let Some(index) = self.index(candidate) {
-                self.refresh_frontier_index(index);
-            }
-        }
-    }
-
-    fn refresh_frontier_index(&mut self, index: usize) {
-        self.owner_frontier_bits[index] = 0;
-        let Some(owner) = self.owner[index].competitor() else {
-            return;
-        };
-        let cell = self.cell(index);
-        let frontier = [
-            Cell::new(cell.x - 1, cell.y),
-            Cell::new(cell.x + 1, cell.y),
-            Cell::new(cell.x, cell.y - 1),
-            Cell::new(cell.x, cell.y + 1),
-        ]
-        .into_iter()
-        .any(|neighbor| {
-            self.index(neighbor)
-                .is_none_or(|other| self.owner[other] != owner.owner())
-        });
-        if frontier {
-            self.owner_frontier_bits[index] = 1u16 << owner.index();
-        }
     }
     fn nearest_cell_center(
         &self,
@@ -553,97 +341,6 @@ impl BoardGrid {
         output.sort_unstable_by_key(|reference| (reference.owner.0, reference.segment));
         output.dedup();
     }
-    pub fn set_owner_index(&mut self, index: usize, owner: OwnerId) -> bool {
-        if !self.field_mask[index] || self.owner[index] == owner {
-            return false;
-        }
-        let old_owner = self.owner[index];
-        if let Some(old) = old_owner.competitor() {
-            self.owner_counts[old.index()] -= 1;
-            self.remove_owned_cell(old, index);
-        }
-        self.owner[index] = owner;
-        if let Some(new) = owner.competitor() {
-            self.owner_counts[new.index()] += 1;
-            let slot = self.owned_cells[new.index()].len() as u32;
-            self.owned_cells[new.index()].push(index);
-            self.owner_cell_slots[index] = slot;
-        } else {
-            self.owner_cell_slots[index] = u32::MAX;
-        }
-        self.dirty_chunks[index / 1024] = true;
-        self.ownership_revision = self.ownership_revision.wrapping_add(1);
-        self.ownership_changes.push(OwnershipChange {
-            index,
-            old: old_owner,
-            new: owner,
-        });
-        self.refresh_frontier_around(index);
-        true
-    }
-    pub fn set_owner(&mut self, cell: Cell, owner: OwnerId) -> bool {
-        self.index(cell)
-            .is_some_and(|i| self.set_owner_index(i, owner))
-    }
-    pub fn clear_owner(&mut self, player: CompetitorId) -> u32 {
-        let mut changed = 0;
-        let owned = std::mem::take(&mut self.owned_cells[player.index()]);
-        for i in owned {
-            if self.owner[i] != player.owner() {
-                continue;
-            }
-            self.owner[i] = OwnerId::UNCLAIMED;
-            self.owner_cell_slots[i] = u32::MAX;
-            self.dirty_chunks[i / 1024] = true;
-            self.ownership_changes.push(OwnershipChange {
-                index: i,
-                old: player.owner(),
-                new: OwnerId::UNCLAIMED,
-            });
-            changed += 1;
-        }
-        self.owner_counts[player.index()] = 0;
-        if changed > 0 {
-            self.ownership_revision = self.ownership_revision.wrapping_add(1);
-            self.rebuild_owner_frontiers();
-        }
-        changed
-    }
-    pub fn claim_disk(&mut self, center: Vec2, radius: f32, player: CompetitorId) -> u32 {
-        let r2 = radius * radius;
-        let mut count = 0;
-        let Some((min, max)) =
-            self.clamped_cell_bounds(center - Vec2::splat(radius), center + Vec2::splat(radius))
-        else {
-            return 0;
-        };
-        for y in min.y..=max.y {
-            for x in min.x..=max.x {
-                let i = self.index(Cell::new(x, y)).unwrap();
-                if self.field_mask[i]
-                    && self.cell_center(self.cell(i)).distance_squared(center) <= r2
-                    && self.set_owner_index(i, player.owner())
-                {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-
-    fn remove_owned_cell(&mut self, owner: CompetitorId, index: usize) {
-        let slot = self.owner_cell_slots[index];
-        let cells = &mut self.owned_cells[owner.index()];
-        if slot == u32::MAX || slot as usize >= cells.len() || cells[slot as usize] != index {
-            return;
-        }
-        let last = cells.pop().unwrap();
-        if last != index {
-            cells[slot as usize] = last;
-            self.owner_cell_slots[last] = slot;
-        }
-        self.owner_cell_slots[index] = u32::MAX;
-    }
     pub fn connected_playable(&self) -> bool {
         let Some(start) = self.field_mask.iter().position(|inside| *inside) else {
             return false;
@@ -671,21 +368,6 @@ impl BoardGrid {
             }
         }
         total == self.playable_cells
-    }
-    pub fn verify_counts(&self) -> bool {
-        let mut actual = [0u32; MAX_COMPETITORS];
-        for (inside, owner) in self.field_mask.iter().zip(&self.owner) {
-            if !inside && *owner != OwnerId::UNCLAIMED {
-                return false;
-            }
-            if let Some(id) = owner.competitor() {
-                if id.index() >= MAX_COMPETITORS {
-                    return false;
-                }
-                actual[id.index()] += 1;
-            }
-        }
-        actual == self.owner_counts
     }
 }
 
@@ -867,29 +549,6 @@ mod tests {
         }
     }
     #[test]
-    fn ownership_never_escapes_field_and_counts_match() {
-        let mut b = BoardGrid::generate(9, 2, &GameConfig::default());
-        b.claim_disk(Vec2::new(10_000.0, 0.0), 100.0, CompetitorId(0));
-        b.claim_disk(Vec2::ZERO, 5.0, CompetitorId(1));
-        assert!(b.verify_counts());
-    }
-
-    #[test]
-    fn owner_index_tracks_reassignments_and_death_clears_only_owned_cells() {
-        let mut board = BoardGrid::generate(12, 2, &GameConfig::default());
-        let first = board.world_to_cell(Vec2::ZERO).unwrap();
-        let second = Cell::new(first.x + 2, first.y);
-        board.set_owner(first, CompetitorId(0).owner());
-        board.set_owner(second, CompetitorId(0).owner());
-        board.set_owner(first, CompetitorId(1).owner());
-        assert_eq!(board.owner_counts[0], 1);
-        assert_eq!(board.owner_counts[1], 1);
-        board.clear_owner(CompetitorId(0));
-        assert_eq!(board.owner_at(second), OwnerId::UNCLAIMED);
-        assert_eq!(board.owner_at(first), CompetitorId(1).owner());
-        assert!(board.verify_counts());
-    }
-    #[test]
     fn inward_direction_increases_distance() {
         let b = BoardGrid::generate(2, 2, &GameConfig::default());
         let p = b.contour.points[0] - Vec2::X;
@@ -897,39 +556,6 @@ mod tests {
         assert!(
             b.signed_distance_at(p + n * b.cell_size) >= b.signed_distance_at(p - n * b.cell_size)
         );
-    }
-
-    #[test]
-    fn owner_frontier_updates_incrementally_and_home_search_is_bounded() {
-        let mut board = BoardGrid::generate(22, 2, &GameConfig::default());
-        board.claim_disk(Vec2::ZERO, 3.0, CompetitorId(0));
-        let frontier = board
-            .nearest_owner_frontier(Vec2::new(4.0, 0.0), CompetitorId(0), 6.0)
-            .expect("frontier is locally visible");
-        assert!((2.0..=3.6).contains(&frontier.length()));
-        assert!(
-            board
-                .nearest_owner_frontier(Vec2::new(20.0, 0.0), CompetitorId(0), 2.0)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn local_frontier_samples_point_out_of_owned_ground() {
-        let mut board = BoardGrid::generate(24, 2, &GameConfig::default());
-        board.claim_disk(Vec2::ZERO, 5.0, CompetitorId(0));
-        let mut frontiers = Vec::new();
-        board.collect_owner_frontiers(Vec2::ZERO, CompetitorId(0), 8.0, &mut frontiers);
-        assert!(frontiers.len() > 8);
-        for frontier in frontiers {
-            let outside = frontier.position + frontier.outward * board.cell_size * 2.0;
-            assert_ne!(
-                board
-                    .world_to_cell(outside)
-                    .map(|cell| board.owner_at(cell)),
-                Some(CompetitorId(0).owner())
-            );
-        }
     }
 
     #[test]

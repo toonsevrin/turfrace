@@ -157,7 +157,7 @@ impl Material for PaperMaterial {
 }
 
 #[derive(Resource)]
-pub(super) struct RenderAssets {
+pub(crate) struct RenderAssets {
     pub cube_mesh: Handle<Mesh>,
     pub inner_cube_mesh: Handle<Mesh>,
     pub shadow_mesh: Handle<Mesh>,
@@ -171,6 +171,36 @@ pub(super) struct RenderAssets {
     pub accent_materials: Vec<Handle<FlatMaterial>>,
     pub trail_materials: Vec<Handle<FlatMaterial>>,
     pub paper_material: Handle<PaperMaterial>,
+}
+
+impl RenderAssets {
+    pub(crate) fn is_ready(
+        &self,
+        meshes: &Assets<Mesh>,
+        flat: &Assets<FlatMaterial>,
+        papers: &Assets<PaperMaterial>,
+    ) -> bool {
+        let mesh_ready = |handle: &Handle<Mesh>| meshes.get(handle).is_some();
+        let flat_ready = |handle: &Handle<FlatMaterial>| flat.get(handle).is_some();
+        let paper_ready = |handle: &Handle<PaperMaterial>| papers.get(handle).is_some();
+
+        mesh_ready(&self.cube_mesh)
+            && mesh_ready(&self.inner_cube_mesh)
+            && mesh_ready(&self.shadow_mesh)
+            && mesh_ready(&self.icon_mesh)
+            && mesh_ready(&self.ring_mesh)
+            && mesh_ready(&self.crown_mesh)
+            && flat_ready(&self.black_outline)
+            && flat_ready(&self.charcoal)
+            && flat_ready(&self.shadow)
+            && !self.cube_materials.is_empty()
+            && !self.accent_materials.is_empty()
+            && !self.trail_materials.is_empty()
+            && self.cube_materials.iter().all(flat_ready)
+            && self.accent_materials.iter().all(flat_ready)
+            && self.trail_materials.iter().all(flat_ready)
+            && paper_ready(&self.paper_material)
+    }
 }
 
 pub(super) fn setup_render_assets(

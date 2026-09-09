@@ -34,6 +34,7 @@ pub(super) fn reconcile_spectator_camera(
             Name::new("Full Field Spectator Camera"),
             SpectatorCamera,
             Camera3d::default(),
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
             presentation.msaa(),
             Projection::Perspective(PerspectiveProjection {
                 fov: tuning.vertical_fov_radians,
@@ -60,7 +61,7 @@ pub(super) fn fit_spectator_camera(
     mut cameras: Query<(&mut Camera, &mut Transform, &mut Projection), With<SpectatorCamera>>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Some((min, max)) = territory.arena.bounds() else {
+    let Some((min, max)) = territory.arena().bounds() else {
         return;
     };
     let min = min.world();

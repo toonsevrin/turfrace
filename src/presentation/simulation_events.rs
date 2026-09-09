@@ -68,8 +68,8 @@ pub(super) fn bridge_simulation_events(
             SimulationEvent::Capture { player, area, .. } => {
                 if let Some((entity, competitor, motion)) = lookup(&competitors, player) {
                     let percent = territory.as_ref().map_or(0.0, |map| {
-                        if map.arena_area > 0.0 {
-                            area * 100.0 / map.arena_area
+                        if map.arena_area() > 0.0 {
+                            area * 100.0 / map.arena_area()
                         } else {
                             0.0
                         }

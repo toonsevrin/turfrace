@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+# Run the deterministic native harness at the four viewport counts and emit one
+# JSON artifact. Native output is diagnostic only; browser/GPU gates stay
+# explicitly unverified until the physical validation checklist is completed.
+set -euo pipefail
+
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT_DIR"
+
+OUTPUT=target/performance/benchmark.json
+FRAMES=600
+WARMUP=120
+WIDTH=1920
+HEIGHT=1080
+SCENARIO=idle
+VIEWS=(1 2 4 8)
+BUILD=1
+
+usage() {
+    printf 'usage: %s [--scenario idle|capture-heavy] [--views 1,2,4,8] [--frames N] [--warmup N] [--width PX] [--height PX] [--output PATH] [--no-build]\n' "$0"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --scenario) SCENARIO=${2:?--scenario needs a value}; shift 2 ;;
+        --views) IFS=',' read -r -a VIEWS <<<"${2:?--views needs a value}"; shift 2 ;;
+        --frames) FRAMES=${2:?--frames needs a value}; shift 2 ;;
+        --warmup) WARMUP=${2:?--warmup needs a value}; shift 2 ;;
+        --width) WIDTH=${2:?--width needs a value}; shift 2 ;;
+        --height) HEIGHT=${2:?--height needs a value}; shift 2 ;;
+        --output) OUTPUT=${2:?--output needs a path}; shift 2 ;;
+        --no-build) BUILD=0; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+
+[[ $SCENARIO == idle || $SCENARIO == capture-heavy ]] || { printf 'invalid scenario\n' >&2; exit 2; }
+[[ $FRAMES =~ ^[1-9][0-9]*$ && $WARMUP =~ ^[0-9]+$ ]] || { printf 'frames/warmup must be integers\n' >&2; exit 2; }
+[[ $WIDTH =~ ^[1-9][0-9]*$ && $HEIGHT =~ ^[1-9][0-9]*$ ]] || { printf 'dimensions must be positive integers\n' >&2; exit 2; }
+for view in "${VIEWS[@]}"; do
+    [[ $view == 1 || $view == 2 || $view == 4 || $view == 8 ]] || {
+        printf 'views must contain only 1, 2, 4, or 8 (got %s)\n' "$view" >&2
+        exit 2
+    }
+done
+
+if (( BUILD )); then
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} cargo build --release --example performance_benchmark
+fi
+BINARY=target/release/examples/performance_benchmark
+[[ -x $BINARY ]] || { printf 'missing %s; build it or remove --no-build\n' "$BINARY" >&2; exit 1; }
+
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/turfrace-performance.XXXXXX")
+trap 'rm -rf "$RUN_DIR"' EXIT
+inputs=()
+for view in "${VIEWS[@]}"; do
+    input="$RUN_DIR/views-${view}.json"
+    VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json} \
+        WGPU_BACKEND=${WGPU_BACKEND:-vulkan} \
+        WGPU_SETTINGS_PRIO=${WGPU_SETTINGS_PRIO:-webgl2} \
+        xvfb-run -a "$BINARY" \
+        --views "$view" --scenario "$SCENARIO" --warmup "$WARMUP" --frames "$FRAMES" \
+        --width "$WIDTH" --height "$HEIGHT" --output "$input"
+    inputs+=("$input")
+done
+
+python3 scripts/performance_budget.py \
+    --root "$ROOT_DIR" --output "$OUTPUT" "${inputs[@]}"
+printf 'Native timing is diagnostic; browser, physical-GPU, memory, and fixed-system CPU budgets remain unverified.\n'

@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::ids::CompetitorId;
 
@@ -36,6 +37,7 @@ impl LifeState {
 pub enum LifeStatus {
     Alive,
     Respawning,
+    Eliminated,
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -51,12 +53,9 @@ impl SpawnProtection {
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct TerritoryRecord {
-    /// Exact vector area in world units. `*_cells` remains a sampled telemetry
-    /// value for compatibility with older HUD/replay consumers.
+    /// Exact vector area in world units.
     pub current_area: f32,
     pub peak_area: f32,
-    pub current_cells: u32,
-    pub peak_cells: u32,
 }
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
@@ -70,10 +69,6 @@ pub struct MatchStatistics {
     pub area_stolen_total: f32,
     pub largest_capture_area: f32,
     pub peak_territory_area: f32,
-    pub cells_captured_total: u32,
-    pub cells_stolen_total: u32,
-    pub largest_capture_cells: u32,
-    pub peak_territory_cells: u32,
     pub longest_trail_length: f32,
     pub time_alive_seconds: f32,
 }
@@ -110,7 +105,9 @@ pub struct MatchSession {
     pub purpose: MatchPurpose,
     pub phase: MatchPhase,
     pub elapsed_seconds: f32,
+    /// Display-friendly seconds, derived from the authoritative tick count.
     pub countdown_remaining: f32,
+    pub countdown_ticks_remaining: u64,
     pub winner: Option<CompetitorId>,
     pub result_hold_remaining: f32,
 }
@@ -123,6 +120,7 @@ impl Default for MatchSession {
             phase: MatchPhase::Idle,
             elapsed_seconds: 0.0,
             countdown_remaining: 3.0,
+            countdown_ticks_remaining: 0,
             winner: None,
             result_hold_remaining: 0.0,
         }
@@ -132,16 +130,19 @@ impl Default for MatchSession {
 /// Describes who owns the match lifecycle. The authoritative simulation is
 /// shared by playable matches and the Home attract match; only their shell
 /// behavior differs.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MatchPurpose {
     #[default]
     Playable,
     Attract,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MatchPhase {
     Idle,
+    /// The match world exists, but its generation has not been acknowledged
+    /// by presentation yet.
+    Loading,
     Countdown,
     Running,
     Finished,
@@ -152,7 +153,6 @@ pub struct RankingEntry {
     pub id: CompetitorId,
     pub rank: u8,
     pub territory_area: f32,
-    pub territory_cells: u32,
     pub territory_percent: f32,
     pub alive: bool,
     pub kills: u32,
@@ -187,8 +187,6 @@ pub enum SimulationEvent {
         player: CompetitorId,
         area: f32,
         stolen_area: f32,
-        cells: u32,
-        stolen: u32,
         loop_fill: bool,
     },
     Death {
@@ -256,6 +254,20 @@ pub enum MatchSystemSet {
     AdvanceRespawns,
     UpdateRankings,
 }
+
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MatchGeneration(pub u64);
+
+/// The renderer acknowledges a generation only after its pipeline and match
+/// world are ready. A stale acknowledgement can never unblock a new match.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PresentationReady(pub Option<u64>);
+
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimulationPaused(pub bool);
+
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimulationClock(pub u64);
 
 #[derive(Resource, Default)]
 pub(crate) struct PendingDeaths(pub Vec<crate::combat::TrailCollisionIntent>);

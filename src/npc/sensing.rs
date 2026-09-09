@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::{board::BoardGrid, ids::CompetitorId, territory_map::TerritoryMap};
+use crate::{ids::CompetitorId, territory_map::TerritoryMap};
 
 use super::{
     CapturePlan, NpcDecisionFrame, NpcMatchMemory, NpcTraits, NpcVisibleRival, NpcVisibleTrail,
@@ -8,7 +8,6 @@ use super::{
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_decision_frame(
-    board: &BoardGrid,
     territory: &TerritoryMap,
     self_id: CompetitorId,
     position: Vec2,
@@ -54,17 +53,17 @@ pub fn build_decision_frame(
         inward_direction: territory.arena_inward_normal(position),
         home: memory
             .capture_home()
-            .or_else(|| board.nearest_owner_frontier(position, self_id, radius * 1.6)),
+            .or_else(|| territory.nearest_owner_frontier(position, self_id, radius * 1.6)),
         active_waypoint: memory.active_waypoint(),
         proposed_capture,
-        quiet_direction: quiet_direction(board, self_id, position, heading, &nearest_rivals),
+        quiet_direction: quiet_direction(territory, self_id, position, heading, &nearest_rivals),
         rivals: nearest_rivals,
         trails: nearest_trails,
     }
 }
 
 fn quiet_direction(
-    board: &BoardGrid,
+    territory: &TerritoryMap,
     self_id: CompetitorId,
     position: Vec2,
     heading: Vec2,
@@ -74,16 +73,14 @@ fn quiet_direction(
         .map(|index| {
             let direction = rotate(heading, std::f32::consts::TAU * index as f32 / 8.0);
             let point = position + direction * 8.0;
-            let ownership = board.world_to_cell(point).map_or(-2.0, |cell| {
-                let owner = board.owner_at(cell);
-                if owner == self_id.owner() {
-                    1.0
-                } else if owner == crate::ids::OwnerId::UNCLAIMED {
-                    0.0
-                } else {
-                    -1.0
-                }
-            });
+            let owner = territory.sample_owner_at_world(point);
+            let ownership = if owner == self_id.owner() {
+                1.0
+            } else if owner == crate::ids::OwnerId::UNCLAIMED {
+                0.0
+            } else {
+                -1.0
+            };
             let clearance = rivals
                 .iter()
                 .flatten()
@@ -107,6 +104,7 @@ fn rotate(direction: Vec2, angle: f32) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::BoardGrid;
 
     #[test]
     fn sensing_excludes_rivals_and_trails_outside_the_skill_radius() {
@@ -137,7 +135,6 @@ mod tests {
             own: false,
         };
         let frame = build_decision_frame(
-            &board,
             &territory,
             CompetitorId(0),
             Vec2::ZERO,

@@ -10,10 +10,13 @@ use crate::{
     trail::ActiveTrail,
 };
 
-use super::model::{
-    Competitor, DisplacementCredits, LastOwnedCell, LifeState, LifeStatus, MatchPhase,
-    MatchSession, MatchStatistics, SimulationEvent, SimulationEvents, SpawnProtection,
-    TerritoryRecord,
+use super::{
+    model::{
+        Competitor, DisplacementCredits, LastOwnedCell, LifeState, LifeStatus, MatchPhase,
+        MatchSession, MatchStatistics, SimulationEvent, SimulationEvents, SpawnProtection,
+        TerritoryRecord,
+    },
+    rules::MatchRules,
 };
 
 type RespawnSnapshot = (
@@ -39,7 +42,8 @@ pub(super) fn advance_respawns(
     mut commands: Commands,
     time: Res<Time<Fixed>>,
     config: Res<GameConfig>,
-    mut board: ResMut<BoardGrid>,
+    rules: Option<Res<MatchRules>>,
+    board: Res<BoardGrid>,
     mut territory_map: ResMut<TerritoryMap>,
     session: Res<MatchSession>,
     mut events: ResMut<SimulationEvents>,
@@ -48,8 +52,16 @@ pub(super) fn advance_respawns(
     mut queries: ParamSet<(Query<RespawnSnapshot>, Query<RespawnControl>)>,
     mut living_scratch: Local<Vec<(CompetitorId, Vec2)>>,
     mut reserved_scratch: Local<Vec<Vec2>>,
+    mut respawning_scratch: Local<Vec<(CompetitorId, Entity)>>,
 ) {
     if session.phase != MatchPhase::Running {
+        return;
+    }
+    let rules = rules
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| MatchRules::from(config.as_ref()));
+    if !rules.respawn_enabled {
         return;
     }
     living_scratch.clear();
@@ -67,27 +79,38 @@ pub(super) fn advance_respawns(
             .then_with(|| a.cmp(b))
     });
     reserved_scratch.clear();
-    for (
-        entity,
-        competitor,
-        mut motion,
-        mut life,
-        mut protection,
-        mut territory,
-        mut stats,
-        mut last_owned,
-        trail,
-    ) in queries.p1().iter_mut()
-    {
-        if life.is_alive() {
+    respawning_scratch.clear();
+    let mut controls = queries.p1();
+    respawning_scratch.extend(
+        controls
+            .iter()
+            .filter_map(|(entity, competitor, _, life, ..)| {
+                (life.status == LifeStatus::Respawning).then_some((competitor.id, entity))
+            }),
+    );
+    respawning_scratch.sort_unstable_by_key(|(id, _)| *id);
+    for &(_, entity) in respawning_scratch.iter() {
+        let Ok((
+            entity,
+            competitor,
+            mut motion,
+            mut life,
+            mut protection,
+            mut territory,
+            mut stats,
+            mut last_owned,
+            trail,
+        )) = controls.get_mut(entity)
+        else {
             continue;
-        }
+        };
         life.respawn_remaining = (life.respawn_remaining - time.delta_secs()).max(0.0);
         if life.respawn_remaining > 0.0 {
             continue;
         }
         let position = choose_respawn(
             &board,
+            &territory_map,
             competitor.id,
             session.field_seed ^ stats.deaths as u64,
             &living_scratch,
@@ -99,7 +122,6 @@ pub(super) fn advance_respawns(
             commands.entity(entity).remove::<ActiveTrail>();
         }
         claim_respawn_seed(
-            &mut board,
             &mut territory_map,
             position,
             config.starting_territory_radius,
@@ -113,10 +135,7 @@ pub(super) fn advance_respawns(
         protection.elapsed = 0.0;
         territory.current_area = territory_map.area(competitor.id);
         territory.peak_area = territory.peak_area.max(territory.current_area);
-        territory.current_cells = board.owner_counts[competitor.id.index()];
-        territory.peak_cells = territory.peak_cells.max(territory.current_cells);
         stats.peak_territory_area = stats.peak_territory_area.max(territory.current_area);
-        stats.peak_territory_cells = stats.peak_territory_cells.max(territory.current_cells);
         events.0.push(SimulationEvent::Respawn {
             player: competitor.id,
         });
@@ -126,6 +145,7 @@ pub(super) fn advance_respawns(
 
 fn choose_respawn(
     board: &BoardGrid,
+    territory: &TerritoryMap,
     id: CompetitorId,
     seed: u64,
     living: &[(CompetitorId, Vec2)],
@@ -157,9 +177,12 @@ fn choose_respawn(
             {
                 continue;
             }
-            let unclaimed =
-                spawn_disk_unclaimed_ratio(board, position, config.starting_territory_radius)
-                    * 100.0;
+            let unclaimed = spawn_disk_unclaimed_ratio(
+                board,
+                territory,
+                position,
+                config.starting_territory_radius,
+            ) * 100.0;
             let score = unclaimed
                 + cube_distance.min(30.0)
                 + trail_distance.min(20.0)
@@ -212,7 +235,12 @@ fn nearest_active_trail_distance(board: &BoardGrid, point: Vec2, limit: f32) -> 
     nearest
 }
 
-fn spawn_disk_unclaimed_ratio(board: &BoardGrid, center: Vec2, radius: f32) -> f32 {
+fn spawn_disk_unclaimed_ratio(
+    board: &BoardGrid,
+    territory: &TerritoryMap,
+    center: Vec2,
+    radius: f32,
+) -> f32 {
     let radius_squared = radius * radius;
     let mut playable = 0_u32;
     let mut unclaimed = 0_u32;
@@ -231,7 +259,7 @@ fn spawn_disk_unclaimed_ratio(board: &BoardGrid, center: Vec2, radius: f32) -> f
                 && board.cell_center(cell).distance_squared(center) <= radius_squared
             {
                 playable += 1;
-                unclaimed += u32::from(board.owner[index].competitor().is_none());
+                unclaimed += u32::from(territory.sample_owner_at(cell).competitor().is_none());
             }
         }
     }
@@ -255,7 +283,6 @@ pub(super) fn reset_respawn_anchor(
 }
 
 pub(super) fn claim_respawn_seed(
-    board: &mut BoardGrid,
     territory_map: &mut TerritoryMap,
     position: Vec2,
     radius: f32,
@@ -264,11 +291,7 @@ pub(super) fn claim_respawn_seed(
 ) {
     let previous_areas: [f32; MAX_COMPETITORS] =
         std::array::from_fn(|index| territory_map.area(CompetitorId(index as u8)));
-    let revision = territory_map.revision;
-    let result = territory_map.seed_owner(position, radius, respawning);
-    if territory_map.revision != revision {
-        territory_map.refresh_sample_cache(board, &result.claim);
-    }
+    territory_map.seed_owner(position, radius, respawning);
     for (index, previous) in previous_areas.into_iter().enumerate() {
         let victim = CompetitorId(index as u8);
         if victim != respawning && previous > 1e-4 && territory_map.area(victim) <= 1e-4 {

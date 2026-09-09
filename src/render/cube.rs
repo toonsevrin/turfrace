@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::camera::ViewportSubject;
+use crate::{camera::ViewportSubject, match_game::MatchGeneration};
 
 use super::{
     PresentationSettings, TerritoryVisual, TrailVisual,
@@ -52,6 +52,9 @@ impl Default for CompetitorVisual {
 #[derive(Component)]
 pub(crate) struct CompetitorProxy {
     pub(crate) source: Entity,
+    /// Entity IDs can be reused after a restart, so source alone is not a
+    /// sufficient fence against stale render proxies.
+    pub(crate) generation: u64,
     rendered_heading: Vec2,
     lean_radians: f32,
 }
@@ -66,6 +69,7 @@ pub(super) fn sync_competitor_visuals(
     time: Res<Time>,
     settings: Res<PresentationSettings>,
     territory: Res<TerritoryVisual>,
+    generation: Option<Res<MatchGeneration>>,
     assets: Option<Res<RenderAssets>>,
     sources: Query<(Entity, &CompetitorVisual, Option<&TrailVisual>)>,
     mut proxies: Query<
@@ -93,8 +97,13 @@ pub(super) fn sync_competitor_visuals(
     mut subjects: Query<&mut ViewportSubject>,
 ) {
     let Some(assets) = assets else { return };
+    let generation = generation.map_or(0, |generation| generation.0);
     let mut rendered = [false; 12];
     for (entity, mut proxy, mut transform, mut root_visibility, children) in &mut proxies {
+        if proxy.generation != generation {
+            commands.entity(entity).despawn();
+            continue;
+        }
         let Ok((_, visual, trail)) = sources.get(proxy.source) else {
             commands.entity(entity).despawn();
             continue;
@@ -211,6 +220,7 @@ pub(super) fn sync_competitor_visuals(
             &mut commands,
             &assets,
             &territory,
+            generation,
             source,
             visual,
             trail.is_some(),
@@ -236,6 +246,7 @@ fn spawn_proxy(
     commands: &mut Commands,
     assets: &RenderAssets,
     territory: &TerritoryVisual,
+    generation: u64,
     source: Entity,
     visual: &CompetitorVisual,
     drawing: bool,
@@ -245,6 +256,7 @@ fn spawn_proxy(
         Name::new(format!("Competitor {} Visual", visual.id)),
         CompetitorProxy {
             source,
+            generation,
             rendered_heading: visual.heading,
             lean_radians: 0.0,
         },
@@ -346,6 +358,7 @@ mod tests {
         let proxy = world
             .spawn(CompetitorProxy {
                 source,
+                generation: 0,
                 rendered_heading: Vec2::NEG_Y,
                 lean_radians: 0.0,
             })

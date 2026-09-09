@@ -55,7 +55,8 @@ fn idle_rankings_are_not_rewritten_but_relevant_inputs_invalidate_them() {
     // Direct resource replacement must invalidate even with an identical
     // revision number (e.g. replaying the same field).
     let mut map = app.world().resource::<TerritoryMap>().clone();
-    map.territories[0] = map.arena.clone();
+    let arena = map.arena().clone();
+    map.apply_claim(CompetitorId(0), arena);
     app.insert_resource(map);
     app.update();
     assert!(

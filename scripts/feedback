@@ -10,6 +10,7 @@ export CARGO_TERM_COLOR=never
 # exceed the memory limit on constrained runners. Keep the default conservative
 # while allowing a caller with more headroom to opt into more jobs.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
 usage() {
     printf 'usage: %s [--quick]\n' "${BASH_SOURCE[0]}" >&2
@@ -87,7 +88,16 @@ if ! run_step clippy cargo clippy --workspace --all-targets --all-features -- -D
     exit 1
 fi
 
+if ! run_step headless cargo check --no-default-features --lib; then
+    finish
+    exit 1
+fi
+
 if [[ $QUICK -eq 0 ]]; then
+    if ! run_step replay cargo test --no-default-features --lib match_game; then
+        finish
+        exit 1
+    fi
     if ! run_step test cargo test --workspace --all-targets --all-features; then
         finish
         exit 1

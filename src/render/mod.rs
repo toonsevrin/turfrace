@@ -14,7 +14,9 @@ pub(crate) use cube::CompetitorProxy;
 pub use cube::CompetitorVisual;
 pub use field::FieldVisual;
 pub use materials::FlatMaterial;
+pub(crate) use materials::{PaperMaterial, RenderAssets, TerritoryMaterial};
 pub use territory::TerritoryVisual;
+pub(crate) use trail::TrailPipelineWarmup;
 pub use trail::TrailVisual;
 
 use bevy::prelude::*;
@@ -110,14 +112,7 @@ impl Plugin for RenderPlugin {
                 Startup,
                 (materials::setup_render_assets, field::setup_stage).chain(),
             )
-            .add_systems(
-                OnEnter(crate::app_state::AppState::MatchLoading),
-                trail::spawn_trail_pipeline_warmup,
-            )
-            .add_systems(
-                OnExit(crate::app_state::AppState::MatchLoading),
-                trail::cleanup_trail_pipeline_warmup,
-            )
+            .add_systems(Update, trail::sync_trail_pipeline_warmup)
             .add_systems(
                 Update,
                 (

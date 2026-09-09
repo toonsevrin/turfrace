@@ -1,15 +1,15 @@
 use bevy::{prelude::*, time::Fixed};
 
 use crate::{
-    board::{BoardGrid, OwnerFrontier, TrailSegmentRef},
+    board::{BoardGrid, TrailSegmentRef},
     ids::MAX_COMPETITORS,
-    input::SteeringIntent,
+    match_game::SteeringIntent,
     movement::CompetitorMotion,
     npc::{
         CapturePlanContext, NpcController, NpcVisibleRival, NpcVisibleTrail, build_decision_frame,
         propose_capture_plan, update_colored_error,
     },
-    territory_map::TerritoryMap,
+    territory_map::{OwnerFrontier, TerritoryMap},
     trail::ActiveTrail,
 };
 
@@ -106,12 +106,12 @@ pub(super) fn npc_think(
                     id: person.id,
                     relative: person.position - motion.position,
                     distance: person.position.distance(motion.position),
-                    territory_share: person.territory_area / territory.arena_area.max(1.0),
+                    territory_share: person.territory_area / territory.arena_area().max(1.0),
                     exposed: person.exposed,
                 })
                 .filter(|rival| rival.distance <= radius),
         );
-        nearby_people.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        sort_visible_rivals(&mut nearby_people);
         nearby_trails.clear();
         nearby_trails.extend(
             trail_perceptions[competitor.id.index()]
@@ -145,7 +145,6 @@ pub(super) fn npc_think(
             None
         };
         let frame = build_decision_frame(
-            &board,
             &territory,
             competitor.id,
             motion.position,
@@ -207,7 +206,7 @@ fn collect_trail_perceptions(
                 entries.push(perception);
             }
         }
-        trail_perceptions[viewer.id.index()].sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        sort_visible_trails(&mut trail_perceptions[viewer.id.index()]);
     }
 }
 
@@ -220,10 +219,71 @@ pub(super) struct NpcPersonSnapshot {
     exposed: bool,
 }
 
+fn sort_visible_rivals(rivals: &mut [NpcVisibleRival]) {
+    rivals.sort_by(|a, b| {
+        a.distance
+            .total_cmp(&b.distance)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn sort_visible_trails(trails: &mut [NpcVisibleTrail]) {
+    trails.sort_by(|a, b| {
+        a.distance
+            .total_cmp(&b.distance)
+            .then_with(|| a.owner.cmp(&b.owner))
+    });
+}
+
 fn nearest_point_on_segment(point: Vec2, a: Vec2, b: Vec2) -> Vec2 {
     let segment = b - a;
     if segment.length_squared() <= 1e-8 {
         return a;
     }
     a + segment * ((point - a).dot(segment) / segment.length_squared()).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::CompetitorId;
+
+    #[test]
+    fn perception_ties_are_ordered_by_competitor_id() {
+        let mut rivals = vec![
+            NpcVisibleRival {
+                id: CompetitorId(3),
+                distance: 4.0,
+                ..default()
+            },
+            NpcVisibleRival {
+                id: CompetitorId(1),
+                distance: 4.0,
+                ..default()
+            },
+        ];
+        sort_visible_rivals(&mut rivals);
+        assert_eq!(
+            rivals.iter().map(|rival| rival.id).collect::<Vec<_>>(),
+            vec![CompetitorId(1), CompetitorId(3)]
+        );
+
+        let mut trails = vec![
+            NpcVisibleTrail {
+                owner: CompetitorId(2),
+                distance: 4.0,
+                ..default()
+            },
+            NpcVisibleTrail {
+                owner: CompetitorId(0),
+                distance: 4.0,
+                ..default()
+            },
+        ];
+        sort_visible_trails(&mut trails);
+        assert_eq!(
+            trails.iter().map(|trail| trail.owner).collect::<Vec<_>>(),
+            vec![CompetitorId(0), CompetitorId(2)]
+        );
+    }
 }

@@ -264,7 +264,7 @@ pub struct ResultRow {
     pub kills: u32,
     pub deaths: u32,
     pub largest_capture_percent: f32,
-    pub total_cells_captured: u32,
+    pub total_captured_area: f32,
     pub longest_trail: f32,
 }
 

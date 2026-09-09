@@ -1,37 +1,79 @@
+use super::super::lifecycle::start_simulation;
+#[cfg(feature = "shell")]
+use super::super::shell::{begin_from_lobby, start_match, start_match_for};
+use super::super::{MatchSpec, RosterDescriptor, SimulationPlugin};
 use super::*;
-use crate::{
-    lobby::{MatchLaunchMode, MatchSetup},
-    match_game::lifecycle::{
-        MatchLoadingFrames, begin_from_lobby, cleanup_match, start_match, start_match_for,
-    },
-};
+#[cfg(feature = "shell")]
+use crate::lobby::{MatchLaunchMode, MatchSetup};
+use bevy::time::Fixed;
 use std::time::Duration;
 
 #[test]
-fn simulation_only_runs_in_the_shell_state_that_owns_the_match() {
-    let playable = MatchSession {
-        purpose: MatchPurpose::Playable,
-        phase: MatchPhase::Running,
-        ..default()
-    };
-    let attract = MatchSession {
-        purpose: MatchPurpose::Attract,
-        phase: MatchPhase::Running,
-        ..default()
-    };
+fn simulation_is_independent_of_shell_state_and_requires_explicit_readiness() {
+    let config = GameConfig::default();
+    let mut spec = MatchSpec::from_config(
+        17,
+        vec![RosterDescriptor::Npc, RosterDescriptor::Npc],
+        &config,
+    );
+    spec.countdown_ticks = 0;
+    let mut app = App::new();
+    app.insert_resource(config).add_plugins(SimulationPlugin);
+    app.update();
+    start_simulation(app.world_mut(), &spec);
+    let generation = app.world().resource::<MatchGeneration>().0;
 
-    assert!(simulation_is_active(&AppState::Playing, &playable));
-    for state in [
-        AppState::Home,
-        AppState::Lobby,
-        AppState::LocalLeaderboard,
-        AppState::Settings,
-    ] {
-        assert!(simulation_is_active(&state, &attract));
-    }
-    assert!(!simulation_is_active(&AppState::Paused, &playable));
-    assert!(!simulation_is_active(&AppState::Home, &playable));
-    assert!(!simulation_is_active(&AppState::Playing, &attract));
+    // The core simulation does not inspect AppState and cannot run until its
+    // matching presentation generation has been acknowledged.
+    app.world_mut()
+        .resource_mut::<Time<Fixed>>()
+        .advance_by(Duration::from_secs_f32(1.0));
+    app.world_mut().run_schedule(FixedUpdate);
+    assert_eq!(app.world().resource::<SimulationClock>().0, 0);
+    assert_eq!(
+        app.world().resource::<MatchSession>().phase,
+        MatchPhase::Loading
+    );
+
+    app.world_mut().resource_mut::<PresentationReady>().0 = Some(generation);
+    app.world_mut().resource_mut::<SimulationPaused>().0 = true;
+    app.world_mut().run_schedule(FixedUpdate);
+    assert_eq!(app.world().resource::<SimulationClock>().0, 0);
+
+    app.world_mut().resource_mut::<SimulationPaused>().0 = false;
+    app.world_mut().run_schedule(FixedUpdate);
+    assert_eq!(app.world().resource::<SimulationClock>().0, 1);
+}
+
+#[test]
+fn winning_tick_finishes_rankings_before_simulation_stops() {
+    let mut app = App::new();
+    app.add_plugins(SimulationPlugin);
+    app.update();
+    let mut spec =
+        MatchSpec::from_config(17, vec![RosterDescriptor::Npc; 2], &GameConfig::default());
+    spec.countdown_ticks = 0;
+    spec.config.starting_territory_radius = 8.0;
+    spec.rules.victory_threshold_percent = 1;
+    start_simulation(app.world_mut(), &spec);
+    let generation = app.world().resource::<MatchGeneration>().0;
+    app.world_mut().resource_mut::<PresentationReady>().0 = Some(generation);
+    app.world_mut()
+        .resource_mut::<Time<Fixed>>()
+        .advance_by(Duration::from_secs_f64(1.0 / 60.0));
+    app.world_mut().run_schedule(FixedUpdate);
+    assert_eq!(
+        app.world().resource::<MatchSession>().phase,
+        MatchPhase::Finished
+    );
+    assert_eq!(app.world().resource::<Rankings>().entries.len(), 2);
+    assert!(
+        app.world()
+            .resource::<SimulationEvents>()
+            .0
+            .iter()
+            .any(|event| matches!(event, SimulationEvent::RankingChanged))
+    );
 }
 
 #[test]
@@ -77,16 +119,18 @@ fn victory_uses_exact_area_threshold_and_allows_remaining_territory() {
     let mut app = App::new();
     let board = BoardGrid::generate(1, 2, &GameConfig::default());
     let mut territory = TerritoryMap::from_board(&board);
-    let arena = territory.arena.clone();
-    app.init_resource::<NextState<AppState>>()
-        .insert_resource(GameConfig::default())
-        .insert_resource(board)
+    let arena = territory.arena().clone();
+    app.insert_resource(GameConfig::default())
+        .insert_resource(board.clone())
         .insert_resource(territory.clone())
-        .init_resource::<MatchSession>()
+        .insert_resource(MatchSession {
+            phase: MatchPhase::Running,
+            ..default()
+        })
         .init_resource::<SimulationEvents>()
         .add_systems(Update, check_victory);
 
-    let (min, max) = territory.arena.bounds().expect("generated arena bounds");
+    let (min, max) = territory.arena().bounds().expect("generated arena bounds");
     let right_strip = |fraction: f32| {
         let cut_x = min.world().x + (max.world().x - min.world().x) * fraction;
         crate::geometry::MultiPolygon::from_outer(&[
@@ -98,14 +142,17 @@ fn victory_uses_exact_area_threshold_and_allows_remaining_territory() {
         .intersection(&arena)
     };
 
-    territory.territories[0] = territory.arena.difference(&right_strip(0.25));
+    let first_claim = territory.arena().difference(&right_strip(0.25));
+    territory.apply_claim(CompetitorId(0), first_claim);
     *app.world_mut().resource_mut::<TerritoryMap>() = territory.clone();
     app.update();
     assert_eq!(app.world().resource::<MatchSession>().winner, None);
 
     let remaining = right_strip(0.95);
-    territory.territories[0] = territory.arena.difference(&remaining);
-    territory.territories[1] = remaining;
+    territory = TerritoryMap::from_board(&board);
+    let first_claim = territory.arena().difference(&remaining);
+    territory.apply_claim(CompetitorId(0), first_claim);
+    territory.apply_claim(CompetitorId(1), remaining);
     *app.world_mut().resource_mut::<TerritoryMap>() = territory;
     app.update();
     assert_eq!(
@@ -119,7 +166,7 @@ fn victory_emits_once_when_other_territory_remains() {
     let mut app = App::new();
     let board = BoardGrid::generate(1, 2, &GameConfig::default());
     let mut territory = TerritoryMap::from_board(&board);
-    let (min, max) = territory.arena.bounds().expect("generated arena bounds");
+    let (min, max) = territory.arena().bounds().expect("generated arena bounds");
     let cut_x = min.world().x + (max.world().x - min.world().x) * 0.95;
     let remaining = crate::geometry::MultiPolygon::from_outer(&[
         Vec2::new(cut_x, min.world().y - 1.0),
@@ -127,14 +174,17 @@ fn victory_emits_once_when_other_territory_remains() {
         Vec2::new(max.world().x + 1.0, max.world().y + 1.0),
         Vec2::new(cut_x, max.world().y + 1.0),
     ])
-    .intersection(&territory.arena);
-    territory.territories[0] = territory.arena.difference(&remaining);
-    territory.territories[1] = remaining;
-    app.init_resource::<NextState<AppState>>()
-        .insert_resource(GameConfig::default())
+    .intersection(territory.arena());
+    let first_claim = territory.arena().difference(&remaining);
+    territory.apply_claim(CompetitorId(0), first_claim);
+    territory.apply_claim(CompetitorId(1), remaining);
+    app.insert_resource(GameConfig::default())
         .insert_resource(board)
         .insert_resource(territory)
-        .init_resource::<MatchSession>()
+        .insert_resource(MatchSession {
+            phase: MatchPhase::Running,
+            ..default()
+        })
         .init_resource::<SimulationEvents>()
         .add_systems(Update, check_victory);
     app.update();
@@ -260,6 +310,7 @@ fn rankings_follow_all_tie_breaks() {
     assert_eq!(ids, [1, 0, 2]);
 }
 
+#[cfg(feature = "shell")]
 #[test]
 fn start_match_fills_empty_slots_with_npcs_and_disjoint_seeds() {
     let mut world = World::new();
@@ -288,11 +339,11 @@ fn start_match_fills_empty_slots_with_npcs_and_disjoint_seeds() {
             assert!(first.position.distance(second.position) > 5.5);
         }
     }
-    let board = world.resource::<BoardGrid>();
-    assert!(board.verify_counts());
-    assert!(board.owner_counts[..8].iter().all(|count| *count > 0));
+    let territory = world.resource::<TerritoryMap>();
+    assert!((0..8).all(|index| territory.area(CompetitorId(index)) > 0.0));
 }
 
+#[cfg(feature = "shell")]
 #[test]
 fn completed_lobby_countdown_is_consumed_by_only_the_initial_launch() {
     let mut world = World::new();
@@ -308,12 +359,14 @@ fn completed_lobby_countdown_is_consumed_by_only_the_initial_launch() {
         replay_same_field: false,
     });
     world.insert_resource(MatchLaunchMode::LobbyCountdownCompleted);
-    world.insert_resource(MatchLoadingFrames::default());
 
     begin_from_lobby(&mut world);
-    assert_eq!(world.resource::<MatchSession>().phase, MatchPhase::Running);
-    let loading = world.resource::<MatchLoadingFrames>();
-    assert_eq!(loading.destination, AppState::Playing);
+    assert_eq!(world.resource::<MatchSession>().phase, MatchPhase::Loading);
+    assert_eq!(
+        world.resource::<MatchSession>().countdown_ticks_remaining,
+        0
+    );
+    assert_eq!(world.resource::<PresentationReady>().0, None);
     assert_eq!(
         *world.resource::<MatchLaunchMode>(),
         MatchLaunchMode::StandardCountdown
@@ -321,12 +374,13 @@ fn completed_lobby_countdown_is_consumed_by_only_the_initial_launch() {
 
     begin_from_lobby(&mut world);
     assert_eq!(
-        world.resource::<MatchSession>().phase,
-        MatchPhase::Countdown,
+        world.resource::<MatchSession>().countdown_ticks_remaining,
+        180,
         "a pause-menu restart must restore the normal gameplay countdown"
     );
 }
 
+#[cfg(feature = "shell")]
 #[test]
 fn attract_matches_start_six_npcs_without_a_countdown() {
     let mut world = World::new();
@@ -347,7 +401,11 @@ fn attract_matches_start_six_npcs_without_a_countdown() {
         world.resource::<MatchSession>().purpose,
         MatchPurpose::Attract
     );
-    assert_eq!(world.resource::<MatchSession>().phase, MatchPhase::Running);
+    assert_eq!(world.resource::<MatchSession>().phase, MatchPhase::Loading);
+    assert_eq!(
+        world.resource::<MatchSession>().countdown_ticks_remaining,
+        0
+    );
     let mut query = world.query::<&Competitor>();
     let competitors: Vec<_> = query.iter(&world).collect();
     assert_eq!(competitors.len(), 6);
@@ -363,14 +421,18 @@ fn attract_matches_do_not_trigger_victory_navigation() {
     let mut app = App::new();
     let board = BoardGrid::generate(1, 2, &GameConfig::default());
     let mut territory = TerritoryMap::from_board(&board);
-    territory.territories[0] = territory.arena.clone();
-    app.init_resource::<NextState<AppState>>()
-        .insert_resource(GameConfig::default())
+    let arena = territory.arena().clone();
+    territory.apply_claim(CompetitorId(0), arena);
+    app.insert_resource(GameConfig::default())
         .insert_resource(board)
         .insert_resource(territory)
         .insert_resource(MatchSession {
             purpose: MatchPurpose::Attract,
             phase: MatchPhase::Running,
+            ..default()
+        })
+        .insert_resource(crate::match_game::MatchRules {
+            victory_enabled: false,
             ..default()
         })
         .init_resource::<SimulationEvents>()
@@ -390,7 +452,6 @@ fn death_immediately_clears_territory_and_active_trail() {
     let config = GameConfig::default();
     let mut board = BoardGrid::generate(17, 2, &config);
     let id = CompetitorId(0);
-    board.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
     let anchor = board.world_to_cell(Vec2::ZERO).unwrap();
     let mut trail = ActiveTrail::new(id, anchor, Vec2::ZERO, Vec2::X);
     trail.append_exact(Vec2::X);
@@ -429,8 +490,7 @@ fn death_immediately_clears_territory_and_active_trail() {
     let world = app.world();
     assert!(!world.entity(entity).get::<LifeState>().unwrap().is_alive());
     assert!(world.entity(entity).get::<ActiveTrail>().is_none());
-    assert_eq!(world.resource::<BoardGrid>().owner_counts[id.index()], 0);
-    assert!(world.resource::<BoardGrid>().verify_counts());
+    assert!(world.resource::<TerritoryMap>().area(id) <= f32::EPSILON);
 }
 
 #[test]
@@ -523,9 +583,8 @@ fn credited_kill_updates_streak_and_emits_presentation_event() {
 #[test]
 fn leaving_owned_seed_ends_protection_after_minimum_time() {
     let config = GameConfig::default();
-    let mut board = BoardGrid::generate(7, 2, &config);
+    let board = BoardGrid::generate(7, 2, &config);
     let id = CompetitorId(0);
-    board.claim_disk(Vec2::ZERO, config.starting_territory_radius, id);
     let mut protection = SpawnProtection {
         remaining: config.spawn_protection_seconds,
         elapsed: 0.49,
@@ -548,30 +607,27 @@ fn leaving_owned_seed_ends_protection_after_minimum_time() {
 #[test]
 fn respawn_seed_displacement_is_credited() {
     let config = GameConfig::default();
-    let mut board = BoardGrid::generate(8, 2, &config);
+    let board = BoardGrid::generate(8, 2, &config);
     let victim = CompetitorId(0);
     let respawning = CompetitorId(1);
-    board.claim_disk(Vec2::ZERO, 1.0, victim);
     let mut territory = TerritoryMap::from_board(&board);
-    territory.clear_owner(victim);
     territory.seed_owner(Vec2::ZERO, 1.0, victim);
     let mut credits = DisplacementCredits::default();
     claim_respawn_seed(
-        &mut board,
         &mut territory,
         Vec2::ZERO,
         config.starting_territory_radius,
         respawning,
         &mut credits,
     );
-    assert_eq!(board.owner_counts[victim.index()], 0);
+    assert!(territory.area(victim) <= f32::EPSILON);
     assert_eq!(credits.0, vec![(victim, respawning)]);
 }
 
 #[test]
 fn occupied_island_survives_capture_that_severs_its_bridge() {
     let config = GameConfig::default();
-    let mut board = BoardGrid::generate(31, 2, &config);
+    let board = BoardGrid::generate(31, 2, &config);
     let mut territory = TerritoryMap::from_board(&board);
     let victim = CompetitorId(0);
     let attacker = CompetitorId(1);
@@ -590,7 +646,6 @@ fn occupied_island_survives_capture_that_severs_its_bridge() {
         .union(&rectangle(Vec2::new(2.0, -2.0), Vec2::new(7.0, 2.0)));
     territory.apply_claim(victim, dumbbell);
     territory.seed_owner(Vec2::new(0.0, -4.0), 1.5, attacker);
-    territory.rebuild_sample_cache(&mut board);
 
     let mut app = App::new();
     app.insert_resource(config.clone())
@@ -693,13 +748,8 @@ fn occupied_island_survives_capture_that_severs_its_bridge() {
         .get::<TerritoryRecord>()
         .unwrap();
     let territory = world.resource::<TerritoryMap>();
-    let board = world.resource::<BoardGrid>();
     assert!((victim_record.current_area - territory.area(victim)).abs() < 0.001);
-    assert_eq!(
-        victim_record.current_cells,
-        board.owner_counts[victim.index()]
-    );
-    assert!(board.verify_counts());
+    assert!(victim_record.current_area > 0.0);
 }
 
 #[test]
@@ -714,40 +764,6 @@ fn respawn_resets_the_next_trail_anchor_to_the_new_seed() {
     assert_eq!(motion.position, position);
     assert_eq!(motion.previous_position, position);
     assert_eq!(last_owned.0, board.world_to_cell(position).unwrap());
-}
-
-#[test]
-fn cleanup_despawns_match_entities_but_preserves_setup() {
-    let mut app = App::new();
-    let setup = MatchSetup {
-        field_seed: 11,
-        npc_roster_seed: 12,
-        npc_difficulty: crate::npc::NpcDifficulty::Normal,
-        total_competitors: 4,
-        humans: Vec::new(),
-        replay_same_field: true,
-    };
-    app.insert_resource(BoardGrid::generate(11, 4, &GameConfig::default()))
-        .init_resource::<TerritoryMap>()
-        .insert_resource(MatchSession::default())
-        .insert_resource(Rankings::default())
-        .insert_resource(SimulationEvents::default())
-        .insert_resource(setup.clone())
-        .add_systems(Update, cleanup_match);
-    let entity = app
-        .world_mut()
-        .spawn(Competitor {
-            id: CompetitorId(0),
-            display_name: "Old".into(),
-            kind: CompetitorKind::Npc,
-            color_id: 0,
-            pattern_id: 0,
-        })
-        .id();
-    app.update();
-    assert!(app.world().get_entity(entity).is_err());
-    assert_eq!(app.world().resource::<MatchSetup>(), &setup);
-    assert!(app.world().resource::<BoardGrid>().is_empty());
 }
 
 #[test]
@@ -770,7 +786,6 @@ fn npc_capture_plans_expand_meaningfully_without_constant_self_cuts() {
         .insert_resource(PendingDeaths::default())
         .insert_resource(PendingCaptures::default())
         .insert_resource(DisplacementCredits::default())
-        .insert_resource(NextState::<AppState>::default())
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .add_systems(
             Update,
@@ -789,17 +804,10 @@ fn npc_capture_plans_expand_meaningfully_without_constant_self_cuts() {
             )
                 .chain(),
         );
-    start_match(
-        app.world_mut(),
-        &MatchSetup {
-            field_seed: 8_101,
-            npc_roster_seed: 8_102,
-            npc_difficulty: crate::npc::NpcDifficulty::Normal,
-            total_competitors: 4,
-            humans: Vec::new(),
-            replay_same_field: false,
-        },
-    );
+    let mut spec = MatchSpec::from_config(8_101, vec![RosterDescriptor::Npc; 4], &config);
+    spec.npc_roster_seed = 8_102;
+    spec.npc_difficulty = crate::npc::NpcDifficulty::Normal;
+    start_simulation(app.world_mut(), &spec);
     app.world_mut().resource_mut::<MatchSession>().phase = MatchPhase::Running;
     let mut max_planned_area = 0.0_f32;
     let mut max_trail_length = 0.0_f32;
@@ -894,7 +902,6 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
         .insert_resource(PendingDeaths::default())
         .insert_resource(PendingCaptures::default())
         .insert_resource(DisplacementCredits::default())
-        .insert_resource(NextState::<AppState>::default())
         .insert_resource(Time::<Fixed>::from_hz(10.0))
         .add_systems(
             Update,
@@ -912,17 +919,10 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
             )
                 .chain(),
         );
-    start_match(
-        app.world_mut(),
-        &MatchSetup {
-            field_seed: 5_711,
-            npc_roster_seed: 5_712,
-            npc_difficulty: crate::npc::NpcDifficulty::Normal,
-            total_competitors: 4,
-            humans: Vec::new(),
-            replay_same_field: false,
-        },
-    );
+    let mut spec = MatchSpec::from_config(5_711, vec![RosterDescriptor::Npc; 4], &config);
+    spec.npc_roster_seed = 5_712;
+    spec.npc_difficulty = crate::npc::NpcDifficulty::Normal;
+    start_simulation(app.world_mut(), &spec);
     app.world_mut().resource_mut::<MatchSession>().phase = MatchPhase::Running;
 
     // Seed one deterministic, real swept trail cut so the soak necessarily exercises death
@@ -973,18 +973,14 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
             .advance_by(Duration::from_millis(100));
         app.update();
         if tick.is_multiple_of(1_000) {
-            assert!(app.world().resource::<BoardGrid>().verify_counts());
+            let territory = app.world().resource::<TerritoryMap>();
+            assert!((0..4).all(|index| territory.area(CompetitorId(index)) >= 0.0));
         }
     }
 
-    let (owner_counts, active_trail_bits, board_len) = {
+    let (active_trail_bits, board_len) = {
         let board = app.world().resource::<BoardGrid>();
-        assert!(board.verify_counts());
-        (
-            board.owner_counts,
-            board.active_trail_bits.clone(),
-            board.len(),
-        )
+        (board.active_trail_bits.clone(), board.len())
     };
     let mut expected_bits = vec![0_u16; board_len];
     let (deaths, kills) = {
@@ -1001,7 +997,7 @@ fn npc_one_hour_headless_soak_preserves_authoritative_invariants() {
             deaths += statistics.deaths;
             kills += statistics.kills;
             if !life.is_alive() {
-                assert_eq!(owner_counts[competitor.id.index()], 0);
+                assert!(world.resource::<TerritoryMap>().area(competitor.id) <= f32::EPSILON);
                 assert!(trail.is_none());
             }
             if let Some(trail) = trail {

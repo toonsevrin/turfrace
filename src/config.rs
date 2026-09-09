@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 /// Tunable authoritative match values. Presentation settings intentionally live elsewhere.
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GameConfig {
     pub fixed_hz: f64,
     pub player_speed: f32,

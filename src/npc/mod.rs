@@ -18,7 +18,7 @@ pub use sensing::build_decision_frame;
 
 use bevy::prelude::*;
 
-use crate::{ids::CompetitorId, input::SteeringIntent};
+use crate::{ids::CompetitorId, match_game::SteeringIntent};
 
 #[derive(Component)]
 pub struct NpcController {
@@ -118,7 +118,7 @@ impl NpcController {
         )
         .normalize_or(Vec2::Y);
         steering.magnitude = 1.0;
-        steering.source = crate::input::ControlSource::Npc;
+        steering.source = crate::match_game::ControlSource::Npc;
     }
 }
 

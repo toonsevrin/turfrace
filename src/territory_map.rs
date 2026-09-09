@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    board::BoardGrid,
+    board::{BoardGrid, Cell},
     geometry::{MultiPolygon, Point},
     ids::{CompetitorId, MAX_COMPETITORS, OwnerId},
     trail::ActiveTrail,
@@ -21,6 +21,13 @@ use spatial_index::TerritorySpatialIndex;
 
 const CIRCLE_SAMPLES: usize = 32;
 const STROKE_SAMPLES: usize = 12;
+const MAX_OWNERSHIP_CHANGES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnerFrontier {
+    pub position: Vec2,
+    pub outward: Vec2,
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorCaptureResult {
@@ -30,18 +37,298 @@ pub struct VectorCaptureResult {
     pub used_loop_fill: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct TerritorySamples {
+    width: u32,
+    height: u32,
+    cell_size: f32,
+    origin: Vec2,
+    field_mask: Vec<bool>,
+    owners: Vec<OwnerId>,
+    owner_counts: [u32; MAX_COMPETITORS],
+    owned_cells: [Vec<usize>; MAX_COMPETITORS],
+    owner_cell_slots: Vec<u32>,
+    frontier_bits: Vec<u16>,
+    revision: u64,
+    changes: Vec<OwnershipChange>,
+    changes_overflowed: bool,
+}
+
+impl Default for TerritorySamples {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            cell_size: 0.5,
+            origin: Vec2::ZERO,
+            field_mask: Vec::new(),
+            owners: Vec::new(),
+            owner_counts: [0; MAX_COMPETITORS],
+            owned_cells: std::array::from_fn(|_| Vec::new()),
+            owner_cell_slots: Vec::new(),
+            frontier_bits: Vec::new(),
+            revision: 0,
+            changes: Vec::new(),
+            changes_overflowed: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnershipChange {
+    pub index: usize,
+    pub old: OwnerId,
+    pub new: OwnerId,
+}
+
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct TerritoryMap {
-    pub arena: MultiPolygon,
-    pub territories: [MultiPolygon; MAX_COMPETITORS],
-    pub arena_area: f32,
-    pub revision: u64,
+    arena: MultiPolygon,
+    territories: [MultiPolygon; MAX_COMPETITORS],
+    arena_area: f32,
+    revision: u64,
     index: TerritorySpatialIndex,
+    samples: TerritorySamples,
 }
 
 impl Default for TerritoryMap {
     fn default() -> Self {
         Self::new(MultiPolygon::empty())
+    }
+}
+
+impl TerritorySamples {
+    fn from_board(board: &BoardGrid) -> Self {
+        let len = board.len();
+        let mut samples = Self {
+            width: board.width,
+            height: board.height,
+            cell_size: board.cell_size,
+            origin: board.world_origin,
+            field_mask: board.field_mask.clone(),
+            owners: vec![OwnerId::UNCLAIMED; len],
+            owner_counts: [0; MAX_COMPETITORS],
+            owned_cells: std::array::from_fn(|_| Vec::new()),
+            owner_cell_slots: vec![u32::MAX; len],
+            frontier_bits: vec![0; len],
+            revision: 1,
+            changes: Vec::with_capacity(8),
+            changes_overflowed: false,
+        };
+        samples.rebuild_frontiers();
+        samples
+    }
+
+    fn is_empty(&self) -> bool {
+        self.owners.is_empty()
+    }
+
+    fn index(&self, cell: Cell) -> Option<usize> {
+        (cell.x >= 0 && cell.y >= 0 && cell.x < self.width as i32 && cell.y < self.height as i32)
+            .then(|| cell.y as usize * self.width as usize + cell.x as usize)
+    }
+
+    fn cell(&self, index: usize) -> Cell {
+        Cell::new(
+            index as i32 % self.width as i32,
+            index as i32 / self.width as i32,
+        )
+    }
+
+    fn cell_center(&self, cell: Cell) -> Vec2 {
+        self.origin + Vec2::new(cell.x as f32 + 0.5, cell.y as f32 + 0.5) * self.cell_size
+    }
+
+    fn clamped_cell_bounds(&self, min: Vec2, max: Vec2) -> Option<(Cell, Cell)> {
+        if self.is_empty() {
+            return None;
+        }
+        let min_relative = (min - self.origin) / self.cell_size;
+        let max_relative = (max - self.origin) / self.cell_size;
+        Some((
+            Cell::new(
+                (min_relative.x.floor() as i32).clamp(0, self.width as i32 - 1),
+                (min_relative.y.floor() as i32).clamp(0, self.height as i32 - 1),
+            ),
+            Cell::new(
+                (max_relative.x.floor() as i32).clamp(0, self.width as i32 - 1),
+                (max_relative.y.floor() as i32).clamp(0, self.height as i32 - 1),
+            ),
+        ))
+    }
+
+    fn owner_at(&self, cell: Cell) -> OwnerId {
+        self.index(cell)
+            .filter(|&index| self.field_mask[index])
+            .map_or(OwnerId::UNCLAIMED, |index| self.owners[index])
+    }
+
+    fn nearest_owner_frontier(
+        &self,
+        position: Vec2,
+        player: CompetitorId,
+        maximum_distance: f32,
+    ) -> Option<Vec2> {
+        let (minimum, maximum) = self.clamped_cell_bounds(
+            position - Vec2::splat(maximum_distance),
+            position + Vec2::splat(maximum_distance),
+        )?;
+        let bit = 1u16 << player.index();
+        let max_distance_squared = maximum_distance * maximum_distance;
+        let mut best = None;
+        for y in minimum.y..=maximum.y {
+            for x in minimum.x..=maximum.x {
+                let cell = Cell::new(x, y);
+                let index = self.index(cell).expect("clamped frontier cell");
+                let center = self.cell_center(cell);
+                if self.frontier_bits[index] & bit != 0
+                    && center.distance_squared(position) <= max_distance_squared
+                    && best.is_none_or(|(_, distance)| center.distance_squared(position) < distance)
+                {
+                    best = Some((center, center.distance_squared(position)));
+                }
+            }
+        }
+        best.map(|(center, _)| center)
+    }
+
+    fn collect_owner_frontiers(
+        &self,
+        position: Vec2,
+        player: CompetitorId,
+        maximum_distance: f32,
+        output: &mut Vec<OwnerFrontier>,
+    ) {
+        output.clear();
+        let Some((minimum, maximum)) = self.clamped_cell_bounds(
+            position - Vec2::splat(maximum_distance),
+            position + Vec2::splat(maximum_distance),
+        ) else {
+            return;
+        };
+        let bit = 1u16 << player.index();
+        let maximum_distance_squared = maximum_distance * maximum_distance;
+        for y in minimum.y..=maximum.y {
+            for x in minimum.x..=maximum.x {
+                let cell = Cell::new(x, y);
+                let index = self.index(cell).expect("clamped frontier cell");
+                if self.frontier_bits[index] & bit == 0 {
+                    continue;
+                }
+                let center = self.cell_center(cell);
+                if center.distance_squared(position) > maximum_distance_squared {
+                    continue;
+                }
+                let mut outward = Vec2::ZERO;
+                for (neighbor, direction) in [
+                    (Cell::new(x - 1, y), -Vec2::X),
+                    (Cell::new(x + 1, y), Vec2::X),
+                    (Cell::new(x, y - 1), -Vec2::Y),
+                    (Cell::new(x, y + 1), Vec2::Y),
+                ] {
+                    if self.owner_at(neighbor) != player.owner() {
+                        outward += direction;
+                    }
+                }
+                output.push(OwnerFrontier {
+                    position: center,
+                    outward: outward.normalize_or((center - position).normalize_or(Vec2::Y)),
+                });
+            }
+        }
+    }
+
+    fn set_owner(&mut self, index: usize, owner: OwnerId) -> bool {
+        if !self.field_mask[index] || self.owners[index] == owner {
+            return false;
+        }
+        let old = self.owners[index];
+        if let Some(previous) = old.competitor() {
+            self.owner_counts[previous.index()] -= 1;
+            self.remove_owned_cell(previous, index);
+        }
+        self.owners[index] = owner;
+        if let Some(player) = owner.competitor() {
+            self.owner_counts[player.index()] += 1;
+            self.owner_cell_slots[index] = self.owned_cells[player.index()].len() as u32;
+            self.owned_cells[player.index()].push(index);
+        } else {
+            self.owner_cell_slots[index] = u32::MAX;
+        }
+        // Presentation may be absent (for example in a headless world), so
+        // this queue is a bounded hint rather than authoritative state. The
+        // sample revision and owners remain authoritative when entries drop.
+        if !self.changes_overflowed {
+            if self.changes.len() < MAX_OWNERSHIP_CHANGES {
+                self.changes.push(OwnershipChange {
+                    index,
+                    old,
+                    new: owner,
+                });
+            } else {
+                // A partial queue cannot be applied safely: the renderer
+                // falls back to a bounded diff of the authoritative samples.
+                self.changes.clear();
+                self.changes_overflowed = true;
+            }
+        }
+        self.refresh_frontier_around(index);
+        true
+    }
+
+    fn remove_owned_cell(&mut self, owner: CompetitorId, index: usize) {
+        let slot = self.owner_cell_slots[index];
+        let cells = &mut self.owned_cells[owner.index()];
+        if slot == u32::MAX || slot as usize >= cells.len() || cells[slot as usize] != index {
+            return;
+        }
+        let last = cells.pop().unwrap();
+        if last != index {
+            cells[slot as usize] = last;
+            self.owner_cell_slots[last] = slot;
+        }
+        self.owner_cell_slots[index] = u32::MAX;
+    }
+
+    fn refresh_frontier_around(&mut self, index: usize) {
+        let cell = self.cell(index);
+        for candidate in [
+            cell,
+            Cell::new(cell.x - 1, cell.y),
+            Cell::new(cell.x + 1, cell.y),
+            Cell::new(cell.x, cell.y - 1),
+            Cell::new(cell.x, cell.y + 1),
+        ] {
+            if let Some(index) = self.index(candidate) {
+                self.refresh_frontier_index(index);
+            }
+        }
+    }
+
+    fn refresh_frontier_index(&mut self, index: usize) {
+        self.frontier_bits[index] = 0;
+        let Some(owner) = self.owners[index].competitor() else {
+            return;
+        };
+        let cell = self.cell(index);
+        let frontier = [
+            Cell::new(cell.x - 1, cell.y),
+            Cell::new(cell.x + 1, cell.y),
+            Cell::new(cell.x, cell.y - 1),
+            Cell::new(cell.x, cell.y + 1),
+        ]
+        .into_iter()
+        .any(|neighbor| self.owner_at(neighbor) != owner.owner());
+        if frontier {
+            self.frontier_bits[index] = 1u16 << owner.index();
+        }
+    }
+
+    fn rebuild_frontiers(&mut self) {
+        self.frontier_bits.fill(0);
+        for index in 0..self.owners.len() {
+            self.refresh_frontier_index(index);
+        }
     }
 }
 
@@ -54,11 +341,103 @@ impl TerritoryMap {
             arena_area,
             revision: 1,
             index: TerritorySpatialIndex::default(),
+            samples: TerritorySamples::default(),
         }
     }
 
     pub fn from_board(board: &BoardGrid) -> Self {
-        Self::new(MultiPolygon::from_outer(&board.contour.points))
+        let mut map = Self::new(MultiPolygon::from_outer(&board.contour.points));
+        map.samples = TerritorySamples::from_board(board);
+        map
+    }
+
+    pub fn arena(&self) -> &MultiPolygon {
+        &self.arena
+    }
+
+    pub fn territory(&self, player: CompetitorId) -> &MultiPolygon {
+        &self.territories[player.index()]
+    }
+
+    pub fn territories(&self) -> &[MultiPolygon; MAX_COMPETITORS] {
+        &self.territories
+    }
+
+    pub fn arena_area(&self) -> f32 {
+        self.arena_area
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn sample_owners(&self) -> &[OwnerId] {
+        &self.samples.owners
+    }
+
+    pub fn sample_owner_counts(&self) -> &[u32; MAX_COMPETITORS] {
+        &self.samples.owner_counts
+    }
+
+    pub fn sample_ownership_revision(&self) -> u64 {
+        self.samples.revision
+    }
+
+    pub fn sample_dimensions(&self) -> (u32, u32, f32, Vec2) {
+        (
+            self.samples.width,
+            self.samples.height,
+            self.samples.cell_size,
+            self.samples.origin,
+        )
+    }
+
+    pub fn sample_cell_size(&self) -> f32 {
+        self.samples.cell_size
+    }
+
+    pub fn sample_owner_at(&self, cell: Cell) -> OwnerId {
+        self.samples.owner_at(cell)
+    }
+
+    pub fn sample_owner_at_world(&self, point: Vec2) -> OwnerId {
+        let relative = (point - self.samples.origin) / self.samples.cell_size;
+        self.samples.owner_at(Cell::new(
+            relative.x.floor() as i32,
+            relative.y.floor() as i32,
+        ))
+    }
+
+    pub fn nearest_owner_frontier(
+        &self,
+        position: Vec2,
+        player: CompetitorId,
+        maximum_distance: f32,
+    ) -> Option<Vec2> {
+        self.samples
+            .nearest_owner_frontier(position, player, maximum_distance)
+    }
+
+    pub fn collect_owner_frontiers(
+        &self,
+        position: Vec2,
+        player: CompetitorId,
+        maximum_distance: f32,
+        output: &mut Vec<OwnerFrontier>,
+    ) {
+        self.samples
+            .collect_owner_frontiers(position, player, maximum_distance, output);
+    }
+
+    /// Drains the compact sample invalidation queue for presentation. Simulation
+    /// never needs to consume this queue, and no mutable sample storage escapes.
+    pub fn drain_ownership_changes(&mut self, output: &mut Vec<OwnershipChange>) {
+        output.clear();
+        if self.samples.changes_overflowed {
+            self.samples.changes_overflowed = false;
+            return;
+        }
+        output.append(&mut self.samples.changes);
     }
 
     pub fn area(&self, player: CompetitorId) -> f32 {
@@ -179,8 +558,10 @@ impl TerritoryMap {
     pub fn clear_owner(&mut self, player: CompetitorId) -> f32 {
         let old = self.area(player);
         if old > 0.0 {
+            let changed = self.territories[player.index()].clone();
             self.territories[player.index()] = MultiPolygon::empty();
             self.rebuild_index();
+            self.refresh_sample_cache(&changed);
             self.revision = self.revision.wrapping_add(1);
         }
         old
@@ -251,7 +632,12 @@ impl TerritoryMap {
         claim: MultiPolygon,
     ) -> VectorCaptureResult {
         let claim = claim.intersection(&self.arena);
+        if claim.is_empty() {
+            return VectorCaptureResult::default();
+        }
         let before = self.area(player);
+        let before_areas: [i64; MAX_COMPETITORS] =
+            std::array::from_fn(|index| self.territories[index].area_scaled());
         let stolen_by_owner: Vec<_> = self
             .territories
             .iter()
@@ -268,7 +654,13 @@ impl TerritoryMap {
         self.territories[player.index()] = self.territories[player.index()].union(&claim);
         self.rebuild_index();
         let claimed_area = (self.area(player) - before).max(0.0);
-        if claimed_area > 1e-5 || !stolen_by_owner.is_empty() {
+        let geometry_changed = self
+            .territories
+            .iter()
+            .enumerate()
+            .any(|(index, territory)| territory.area_scaled() != before_areas[index]);
+        if geometry_changed {
+            self.refresh_sample_cache(&claim);
             self.revision = self.revision.wrapping_add(1);
         }
         VectorCaptureResult {
@@ -310,74 +702,30 @@ impl TerritoryMap {
         }
     }
 
-    /// Refreshes only cells covered by geometry that can have changed.
-    ///
-    /// Exact vector geometry remains authoritative. This cache exists for
-    /// rendering and broadphase queries, so a local capture must not trigger a
-    /// full-arena polygon containment pass.
-    pub fn refresh_sample_cache(&self, board: &mut BoardGrid, changed: &MultiPolygon) {
+    /// Refreshes only samples covered by the changed geometry. Exact vector
+    /// geometry remains authoritative; the cache is for rendering and NPC
+    /// broadphase queries. Claims therefore never trigger a full-arena scan.
+    fn refresh_sample_cache(&mut self, changed: &MultiPolygon) {
         let Some((min, max)) = changed.bounds() else {
             return;
         };
-        self.refresh_sample_cache_bounds(board, min.world(), max.world());
-    }
-
-    fn refresh_sample_cache_bounds(&self, board: &mut BoardGrid, min: Vec2, max: Vec2) {
-        let Some((min, max)) = board.clamped_cell_bounds(min, max) else {
+        let Some((min, max)) = self.samples.clamped_cell_bounds(min.world(), max.world()) else {
             return;
         };
+        let mut changed_sample = false;
         for y in min.y..=max.y {
             for x in min.x..=max.x {
-                let cell = crate::board::Cell::new(x, y);
-                let Some(index) = board.index(cell) else {
+                let cell = Cell::new(x, y);
+                let Some(index) = self.samples.index(cell) else {
                     continue;
                 };
-                if board.field_mask[index] {
-                    board.set_owner_index(index, self.owner_at(board.cell_center(cell)));
-                }
+                let owner = self.owner_at(self.samples.cell_center(cell));
+                changed_sample |= self.samples.set_owner(index, owner);
             }
         }
-    }
-
-    /// Rebuilds the low-resolution sample cache after a geometry commit. This
-    /// is presentation/broadphase data; no gameplay query depends on it.
-    pub fn rebuild_sample_cache(&self, board: &mut BoardGrid) {
-        let mut owner_counts = [0_u32; MAX_COMPETITORS];
-        let previous = board.owner.clone();
-        // Keep the derived invalidation queue bounded even in headless/server
-        // worlds that do not have the render sync system consuming it.
-        board.ownership_changes.clear();
-        board.owner.fill(OwnerId::UNCLAIMED);
-        for index in 0..board.len() {
-            if !board.field_mask[index] {
-                continue;
-            }
-            let owner = self.owner_at(board.cell_center(board.cell(index)));
-            board.owner[index] = owner;
-            if let Some(player) = owner.competitor() {
-                owner_counts[player.index()] += 1;
-            }
+        if changed_sample {
+            self.samples.revision = self.samples.revision.wrapping_add(1);
         }
-        board.owner_counts = owner_counts;
-        board.owned_cells = std::array::from_fn(|_| Vec::new());
-        board.owner_cell_slots.fill(u32::MAX);
-        for (index, owner) in board.owner.iter().copied().enumerate() {
-            if let Some(player) = owner.competitor() {
-                let slot = board.owned_cells[player.index()].len() as u32;
-                board.owned_cells[player.index()].push(index);
-                board.owner_cell_slots[index] = slot;
-            }
-            if previous.get(index).copied() != Some(owner) {
-                board.ownership_changes.push(crate::board::OwnershipChange {
-                    index,
-                    old: previous.get(index).copied().unwrap_or(OwnerId::UNCLAIMED),
-                    new: owner,
-                });
-            }
-        }
-        board.ownership_revision = board.ownership_revision.wrapping_add(1);
-        board.dirty_chunks.fill(true);
-        board.rebuild_owner_frontiers();
     }
 
     fn loop_candidate(&self, territory: &MultiPolygon, trail: &[Vec2]) -> Option<MultiPolygon> {
@@ -632,6 +980,33 @@ mod tests {
     }
 
     #[test]
+    fn bridge_capture_is_vector_corridor_only() {
+        let mut map = TerritoryMap::new(arena());
+        let player = CompetitorId(0);
+        map.seed_owner(Vec2::new(-6.0, 0.0), 3.0, player);
+        // Build an intentionally disconnected fixture to exercise the
+        // corridor-only geometry fallback.
+        map.territories[player.index()] =
+            map.territories[player.index()].union(&MultiPolygon::from_outer(&[
+                Vec2::new(3.0, -3.0),
+                Vec2::new(9.0, -3.0),
+                Vec2::new(9.0, 3.0),
+                Vec2::new(3.0, 3.0),
+            ]));
+        let mut trail = ActiveTrail::new(
+            player,
+            crate::board::Cell::new(0, 0),
+            Vec2::new(-3.0, 0.0),
+            Vec2::X,
+        );
+        trail.append_exact(Vec2::new(3.0, 0.0));
+        let result = map.calculate_capture(player, &trail, 0.6);
+        assert!(!result.used_loop_fill);
+        assert!(result.claimed_area > 0.0);
+        assert!(result.claim.contains_world(Vec2::ZERO));
+    }
+
+    #[test]
     fn disconnected_island_can_close_a_trail() {
         let mut map = TerritoryMap::new(arena());
         let player = CompetitorId(0);
@@ -682,7 +1057,7 @@ mod tests {
     #[test]
     fn sample_cache_and_records_follow_geometry_after_island_capture() {
         let config = crate::config::GameConfig::default();
-        let mut board = BoardGrid::generate(31, 2, &config);
+        let board = BoardGrid::generate(31, 2, &config);
         let mut map = TerritoryMap::from_board(&board);
         let player = CompetitorId(0);
         let opponent = CompetitorId(1);
@@ -694,24 +1069,98 @@ mod tests {
             opponent,
             rectangle(Vec2::new(12.0, -4.0), Vec2::new(18.0, 4.0)),
         );
-        map.rebuild_sample_cache(&mut board);
-
         let before_area = map.area(opponent);
         let claim = rectangle(Vec2::new(14.0, -1.0), Vec2::new(16.0, 1.0));
-        let result = map.apply_claim(player, claim);
-        map.refresh_sample_cache(&mut board, &result.claim);
+        map.apply_claim(player, claim);
 
         assert!(map.area(opponent) > 0.0);
         assert!(map.area(opponent) < before_area);
+        let counts = map.sample_owner_counts();
         assert_eq!(
-            board.owner_counts[player.index()],
-            board.owned_cells[player.index()].len() as u32
+            counts[player.index()],
+            map.sample_owners()
+                .iter()
+                .filter(|owner| **owner == player.owner())
+                .count() as u32
         );
         assert_eq!(
-            board.owner_counts[opponent.index()],
-            board.owned_cells[opponent.index()].len() as u32
+            counts[opponent.index()],
+            map.sample_owners()
+                .iter()
+                .filter(|owner| **owner == opponent.owner())
+                .count() as u32
         );
-        assert!(board.verify_counts());
+        assert!(map.sample_ownership_revision() > 1);
+    }
+
+    #[test]
+    fn atomic_claim_updates_samples_frontiers_and_change_revision() {
+        let config = crate::config::GameConfig::default();
+        let board = BoardGrid::generate(19, 2, &config);
+        let mut map = TerritoryMap::from_board(&board);
+        let player = CompetitorId(0);
+        map.seed_owner(Vec2::ZERO, 3.0, player);
+        let mut changes = Vec::new();
+        map.drain_ownership_changes(&mut changes);
+        let before = map.sample_ownership_revision();
+
+        map.apply_claim(
+            player,
+            rectangle(Vec2::new(-5.0, -1.0), Vec2::new(5.0, 1.0)),
+        );
+
+        assert!(map.sample_ownership_revision() > before);
+        map.drain_ownership_changes(&mut changes);
+        assert!(!changes.is_empty());
+        assert!(
+            map.nearest_owner_frontier(Vec2::ZERO, player, 8.0)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn headless_change_queue_is_bounded_and_reports_overflow_for_diffing() {
+        let config = crate::config::GameConfig::default();
+        let board = BoardGrid::generate(23, 2, &config);
+        let mut map = TerritoryMap::from_board(&board);
+        let mut changed = 0;
+        for index in 0..map.samples.owners.len() {
+            if map.samples.field_mask[index]
+                && map.samples.set_owner(index, CompetitorId(0).owner())
+            {
+                changed += 1;
+                if changed > MAX_OWNERSHIP_CHANGES {
+                    break;
+                }
+            }
+        }
+        assert_eq!(changed, MAX_OWNERSHIP_CHANGES + 1);
+        let mut changes = Vec::new();
+        map.drain_ownership_changes(&mut changes);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn atomic_noop_claim_does_not_advance_revisions_or_queue_changes() {
+        let config = crate::config::GameConfig::default();
+        let board = BoardGrid::generate(17, 2, &config);
+        let mut map = TerritoryMap::from_board(&board);
+        let player = CompetitorId(0);
+        map.seed_owner(Vec2::ZERO, 3.0, player);
+        let map_revision = map.revision();
+        let sample_revision = map.sample_ownership_revision();
+        let mut changes = Vec::new();
+        map.drain_ownership_changes(&mut changes);
+
+        map.apply_claim(
+            player,
+            rectangle(Vec2::new(-1.0, -1.0), Vec2::new(1.0, 1.0)),
+        );
+
+        assert_eq!(map.revision(), map_revision);
+        assert_eq!(map.sample_ownership_revision(), sample_revision);
+        map.drain_ownership_changes(&mut changes);
+        assert!(changes.is_empty());
     }
 
     #[test]

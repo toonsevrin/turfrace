@@ -4,38 +4,18 @@ use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::profiles::UserSettings;
+use crate::{
+    match_game::{MatchSystemSet, SimulationClock, SteeringCommand},
+    profiles::UserSettings,
+};
+
+pub use crate::match_game::{ControlSource, SteeringIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InputDeviceId {
     Gamepad(u32),
     Mouse,
     KeyboardPrimary,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ControlSource {
-    Gamepad,
-    Mouse,
-    Keyboard,
-    Npc,
-}
-
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct SteeringIntent {
-    pub desired_direction: Vec2,
-    pub magnitude: f32,
-    pub source: ControlSource,
-}
-
-impl Default for SteeringIntent {
-    fn default() -> Self {
-        Self {
-            desired_direction: Vec2::Y,
-            magnitude: 0.0,
-            source: ControlSource::Keyboard,
-        }
-    }
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +64,9 @@ pub struct ConnectedDevices {
 #[derive(Resource, Debug, Default)]
 struct GamepadMenuLatch(Vec<u32>);
 
+#[derive(Resource, Debug, Default)]
+struct InputSequence(u64);
+
 impl ConnectedDevices {
     pub fn is_connected(&self, device: InputDeviceId) -> bool {
         match device {
@@ -106,13 +89,19 @@ impl Plugin for InputPlugin {
             .init_resource::<LastActiveDevice>()
             .init_resource::<MouseAimWorld>()
             .init_resource::<GamepadMenuLatch>()
+            .init_resource::<InputSequence>()
+            .init_resource::<crate::match_game::PendingCommands>()
+            .init_resource::<SimulationClock>()
             .add_message::<MenuInput>()
             .add_message::<DeviceDisconnected>()
             .add_systems(
                 PreUpdate,
                 (track_gamepads, poll_keyboard_menu_input, poll_gamepad_menus).chain(),
             )
-            .add_systems(Update, build_human_steering_intents);
+            .add_systems(
+                FixedUpdate,
+                poll_human_commands.in_set(MatchSystemSet::PollInput),
+            );
     }
 }
 
@@ -233,14 +222,18 @@ fn poll_gamepad_menus(
     }
 }
 
-fn build_human_steering_intents(
+#[allow(clippy::too_many_arguments)]
+fn poll_human_commands(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<(Entity, &Gamepad)>,
     mouse_aim: Res<MouseAimWorld>,
     settings: Res<UserSettings>,
-    mut humans: Query<(&HumanController, &mut SteeringIntent)>,
+    clock: Res<SimulationClock>,
+    mut sequence: ResMut<InputSequence>,
+    mut commands: ResMut<crate::match_game::PendingCommands>,
+    humans: Query<(&crate::match_game::Competitor, &HumanController)>,
 ) {
-    for (controller, mut intent) in &mut humans {
+    for (competitor, controller) in &humans {
         let (raw, source) = match controller.device {
             InputDeviceId::Gamepad(id) => (
                 gamepads
@@ -267,18 +260,18 @@ fn build_human_steering_intents(
         } else {
             raw.clamp_length_max(1.0)
         };
-        let next = SteeringIntent {
-            desired_direction: if processed.length_squared() > 0.0 {
-                processed.normalize()
-            } else {
-                intent.desired_direction
-            },
-            magnitude: processed.length(),
-            source,
-        };
-        if *intent != next {
-            *intent = next;
-        }
+        let mut command = SteeringCommand::new(
+            clock.0.saturating_add(1),
+            competitor.id,
+            processed.normalize_or_zero(),
+            processed.length(),
+        );
+        command.sequence = sequence.0;
+        sequence.0 = sequence.0.wrapping_add(1);
+        // Device polling is best-effort: a disconnected device produces a
+        // neutral command, while malformed commands can only enter through
+        // the validated command queue.
+        let _ = commands.enqueue(command);
     }
 }
 
