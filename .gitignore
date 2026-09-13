@@ -3,3 +3,5 @@
 /dist
 /.playwright-cli/
 .env
+__pycache__/
+*.py[cod]
