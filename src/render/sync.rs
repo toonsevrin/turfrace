@@ -5,7 +5,8 @@ use bevy::prelude::*;
 use crate::{
     board::BoardGrid,
     match_game::{
-        Competitor, CompetitorKind, LifeState, MatchStatistics, Rankings, SpawnProtection,
+        Competitor, CompetitorKind, LifeState, MatchStatistics, Rankings, RespawnPlan,
+        SpawnProtection,
     },
     movement::CompetitorMotion,
     territory_map::TerritoryMap,
@@ -129,6 +130,7 @@ pub(super) fn sync_competitor_snapshots(
         Option<&SpawnProtection>,
         Option<&MatchStatistics>,
         Option<&ActiveTrail>,
+        Option<&RespawnPlan>,
         Option<&CompetitorVisual>,
         Option<&TrailVisual>,
     )>,
@@ -144,8 +146,18 @@ pub(super) fn sync_competitor_snapshots(
         }
     }
     let leader = rankings.as_ref().and_then(|rankings| rankings.leader());
-    for (entity, competitor, motion, life, protection, stats, trail, current, current_trail) in
-        &competitors
+    for (
+        entity,
+        competitor,
+        motion,
+        life,
+        protection,
+        stats,
+        trail,
+        respawn_plan,
+        current,
+        current_trail,
+    ) in &competitors
     {
         let pattern_slot = competitor.id.index();
         if territory.pattern_ids[pattern_slot] != competitor.pattern_id
@@ -185,6 +197,10 @@ pub(super) fn sync_competitor_snapshots(
             spawn_protection: protection.map_or(0.0, |protection| protection.remaining),
             is_leader: leader == Some(competitor.id),
             awareness,
+            respawn_target: (!life.is_alive() && life.respawn_remaining > 0.0)
+                .then(|| respawn_plan.map(|plan| plan.position))
+                .flatten(),
+            respawn_remaining: life.respawn_remaining.max(0.0),
             kills: stats.map_or(0, |stats| stats.kills),
             kill_streak: stats.map_or(0, |stats| stats.kill_streak),
         };
@@ -197,6 +213,8 @@ pub(super) fn sync_competitor_snapshots(
                 || old.is_leader != next.is_leader
                 || old.kills != next.kills
                 || old.kill_streak != next.kill_streak
+                || old.respawn_target != next.respawn_target
+                || (old.respawn_remaining - next.respawn_remaining).abs() > 0.01
                 || old.human_slot != next.human_slot
                 || old.color_id != next.color_id
         });

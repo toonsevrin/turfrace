@@ -93,6 +93,8 @@ impl MatchSpec {
             c.spawn_protection_seconds,
             c.spawn_protection_minimum_seconds,
             c.respawn_base_seconds,
+            c.respawn_warning_seconds,
+            c.respawn_retry_seconds,
             c.self_trail_exclusion_distance,
             c.trail_sample_distance,
             c.trail_sample_angle_radians,
@@ -144,6 +146,9 @@ impl MatchSpec {
             || c.spawn_cube_clearance < 0.0
             || c.spawn_trail_clearance < 0.0
             || c.spawn_boundary_clearance < 0.0
+            || c.respawn_warning_seconds < 0.0
+            || !(0.5..=1.0).contains(&c.respawn_retry_seconds)
+            || !(1..=100_000).contains(&c.respawn_candidate_batch)
         {
             return Err(SpecValidationError::InvalidConfig(
                 "config has an out-of-range tuning value",
@@ -153,6 +158,7 @@ impl MatchSpec {
             .is_some_and(|cap| !(0.0..=3_600.0).contains(&cap))
             || !(0.0..=3_600.0).contains(&c.respawn_base_seconds)
             || !(0.0..=3_600.0).contains(&c.spawn_protection_seconds)
+            || !(0.0..=3_600.0).contains(&c.respawn_warning_seconds)
             || !(0.0..=3_600.0).contains(&c.spawn_protection_minimum_seconds)
             || c.spawn_protection_minimum_seconds > c.spawn_protection_seconds
             || !(1..=100).contains(&c.victory_territory_percent)
@@ -267,6 +273,26 @@ impl SteeringCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn respawn_tunables_reject_nonfinite_and_unbounded_work() {
+        for warning in [-1.0, f32::NAN, f32::INFINITY, 3_601.0] {
+            let mut spec = MatchSpec::default();
+            spec.config.respawn_warning_seconds = warning;
+            assert!(spec.validate().is_err());
+        }
+        for retry in [0.0, 0.49, 1.01, f32::NAN, f32::INFINITY] {
+            let mut spec = MatchSpec::default();
+            spec.config.respawn_retry_seconds = retry;
+            assert!(spec.validate().is_err());
+        }
+        for batch in [0, 100_001, usize::MAX] {
+            let mut spec = MatchSpec::default();
+            spec.config.respawn_candidate_batch = batch;
+            assert!(spec.validate().is_err());
+        }
+        assert!(MatchSpec::default().validate().is_ok());
+    }
 
     #[test]
     fn spec_validation_rejects_bad_rosters_and_unbounded_tunables() {

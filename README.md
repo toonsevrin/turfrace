@@ -7,7 +7,10 @@ The v0.1 implementation is a static Rust/Bevy 0.19 WebAssembly application. It h
 Territory is exact fixed-point vector geometry with a bounded render/broadphase cache. Every
 competitor keeps every island they have claimed: cutting a bridge steals the bridge, not the
 land beyond it, and never kills a racer on that island. Only exposed trail collisions or losing
-all remaining turf eliminate a racer. Respawns take 2 seconds, then 4, capped at 5 seconds.
+all remaining turf eliminate a racer. Humans and NPCs give at least five seconds of visible warning
+at a safe, unclaimed respawn site. Respawns never steal turf or force players into crowded pockets:
+if a site becomes unsafe, its warning is canceled and a replacement gets the full warning again.
+The camera follows the planned site, and the HUD clearly indicates when safe space is unavailable.
 
 ## Run it
 

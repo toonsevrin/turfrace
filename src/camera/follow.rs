@@ -14,6 +14,10 @@ pub struct ViewportSubject {
     pub kill_count: u32,
     pub kill_streak: u32,
     pub alive: bool,
+    /// Fixed safe-space destination reserved by the simulation while dead.
+    /// `None` deliberately means that no countdown is scheduled yet.
+    pub respawn_target: Option<Vec2>,
+    pub respawn_remaining: f32,
 }
 
 /// Identifies a camera belonging to one local human.
@@ -80,22 +84,24 @@ pub(super) struct ViewportDecoration(Entity);
 pub(super) fn reconcile_player_cameras(
     mut commands: Commands,
     subjects: Query<(Entity, &ViewportSubject)>,
-    cameras: Query<(Entity, &PlayerCamera)>,
+    mut cameras: Query<(Entity, &PlayerCamera, &mut Camera)>,
     decorations: Query<(Entity, &ViewportDecoration)>,
     tuning: Res<CameraTuning>,
     presentation: Res<crate::render::PresentationSettings>,
 ) {
     // There are at most eight local players. Linear scans over those tiny
     // queries avoid allocating three hash collections every render frame.
-    for (camera_entity, marker) in &cameras {
+    let first_slot = subjects.iter().map(|(_, subject)| subject.slot).min();
+    for (camera_entity, marker, mut camera) in &mut cameras {
         if !subjects.iter().any(|(entity, _)| entity == marker.subject) {
             commands.entity(camera_entity).despawn();
         }
+        camera.clear_color = viewport_clear_color(Some(marker.slot) == first_slot);
     }
     for (entity, decoration) in &decorations {
         if !cameras
             .iter()
-            .any(|(camera_entity, _)| camera_entity == decoration.0)
+            .any(|(camera_entity, _, _)| camera_entity == decoration.0)
         {
             commands.entity(entity).despawn();
         }
@@ -105,7 +111,7 @@ pub(super) fn reconcile_player_cameras(
     for (subject_entity, subject) in &subjects {
         if cameras
             .iter()
-            .any(|(_, marker)| marker.subject == subject_entity)
+            .any(|(_, marker, _)| marker.subject == subject_entity)
         {
             continue;
         }
@@ -122,7 +128,7 @@ pub(super) fn reconcile_player_cameras(
                 }),
                 Camera {
                     order: subject.slot as isize,
-                    clear_color: ClearColorConfig::Custom(SKY_COLOR),
+                    clear_color: viewport_clear_color(Some(subject.slot) == first_slot),
                     ..default()
                 },
                 Transform::from_translation(
@@ -155,6 +161,16 @@ pub(super) fn reconcile_player_cameras(
     }
 }
 
+fn viewport_clear_color(first: bool) -> ClearColorConfig {
+    // Viewports share an intermediate texture with the full-window UI camera.
+    // Clearing it again erases earlier views before that UI camera composites.
+    if first {
+        ClearColorConfig::Custom(SKY_COLOR)
+    } else {
+        ClearColorConfig::None
+    }
+}
+
 fn viewport_accent(color_id: u8) -> Color {
     crate::palette::palette_color(color_id).with_alpha(0.92)
 }
@@ -181,10 +197,23 @@ pub(super) fn follow_subjects(
             continue;
         };
         let heading = subject.heading.normalize_or(Vec2::NEG_Y);
+        let focus_position = respawn_focus(subject);
+        // Center a dead player's view on the warning, without stale heading
+        // look-ahead. Keep the usual camera orientation through respawning.
         let desired_focus = Vec3::new(
-            subject.position.x + heading.x * tuning.look_ahead,
+            focus_position.x
+                + if subject.alive {
+                    heading.x * tuning.look_ahead
+                } else {
+                    0.0
+                },
             0.0,
-            subject.position.y + heading.y * tuning.look_ahead,
+            focus_position.y
+                + if subject.alive {
+                    heading.y * tuning.look_ahead
+                } else {
+                    0.0
+                },
         );
         rig.focus = rig.focus.lerp(desired_focus, follow_alpha);
 
@@ -230,6 +259,13 @@ pub(super) fn follow_subjects(
     }
 }
 
+fn respawn_focus(subject: &ViewportSubject) -> Vec2 {
+    subject
+        .respawn_target
+        .filter(|_| !subject.alive && subject.respawn_remaining > 0.0)
+        .unwrap_or(subject.position)
+}
+
 fn framing_compensation(aspect: f32) -> f32 {
     ((16.0 / 9.0) / aspect.max(0.01)).max(1.0).powf(0.44)
 }
@@ -265,5 +301,125 @@ mod tests {
         let many_kills = kill_fov_bonus(100, &tuning);
         assert!(one_kill > 0.0);
         assert_eq!(many_kills, tuning.maximum_kill_fov_bonus_radians);
+    }
+
+    #[test]
+    fn split_screen_only_clears_the_first_camera_even_after_removal() {
+        let mut app = App::new();
+        app.init_resource::<CameraTuning>()
+            .init_resource::<crate::render::PresentationSettings>()
+            .add_systems(Update, reconcile_player_cameras);
+        let mut subjects = Vec::new();
+        for slot in [0, 1] {
+            subjects.push(
+                app.world_mut()
+                    .spawn(ViewportSubject {
+                        slot,
+                        color_id: slot,
+                        position: Vec2::ZERO,
+                        heading: Vec2::Y,
+                        trail_length: 0.0,
+                        awareness: 0.0,
+                        kill_count: 0,
+                        kill_streak: 0,
+                        alive: slot != 0,
+                        respawn_target: Some(Vec2::ZERO),
+                        respawn_remaining: 5.0,
+                    })
+                    .id(),
+            );
+        }
+        app.update();
+        let world = app.world_mut();
+        for (marker, camera) in world.query::<(&PlayerCamera, &Camera)>().iter(world) {
+            assert_eq!(
+                matches!(camera.clear_color, ClearColorConfig::None),
+                marker.slot != 0
+            );
+        }
+        world.despawn(subjects[0]);
+        app.update();
+        let world = app.world_mut();
+        let (marker, camera) = world
+            .query::<(&PlayerCamera, &Camera)>()
+            .single(world)
+            .unwrap();
+        assert_eq!(marker.slot, 1);
+        assert!(matches!(camera.clear_color, ClearColorConfig::Custom(_)));
+    }
+
+    #[test]
+    fn dead_respawn_camera_centers_the_warning_without_heading_lookahead() {
+        let mut app = App::new();
+        let subject = app
+            .world_mut()
+            .spawn(ViewportSubject {
+                slot: 0,
+                color_id: 0,
+                position: Vec2::new(-16.0, -50.0),
+                heading: Vec2::NEG_Y,
+                trail_length: 0.0,
+                awareness: 0.0,
+                kill_count: 0,
+                kill_streak: 0,
+                alive: false,
+                respawn_target: Some(Vec2::new(-16.0, -50.0)),
+                respawn_remaining: 5.0,
+            })
+            .id();
+        let camera = app
+            .world_mut()
+            .spawn((
+                PlayerCamera { subject, slot: 0 },
+                Camera::default(),
+                Projection::Perspective(default()),
+                Transform::default(),
+                CameraRigState {
+                    focus: Vec3::new(-16.0, 0.0, -50.0),
+                    zoom: 0.0,
+                },
+            ))
+            .id();
+        app.init_resource::<Time>()
+            .insert_resource(CameraTuning::default())
+            .add_systems(Update, follow_subjects);
+        app.update();
+
+        let transform = app.world().entity(camera).get::<Transform>().unwrap();
+        let site = Vec3::new(-16.0, 0.0, -50.0);
+        assert!(
+            transform
+                .forward()
+                .as_vec3()
+                .dot((site - transform.translation).normalize())
+                > 0.9999
+        );
+        assert_eq!(transform.translation.x, site.x);
+    }
+
+    #[test]
+    fn reserved_respawn_target_takes_over_only_during_a_real_countdown() {
+        let subject = ViewportSubject {
+            slot: 0,
+            color_id: 0,
+            position: Vec2::new(-4.0, 2.0),
+            heading: Vec2::NEG_Y,
+            trail_length: 0.0,
+            awareness: 0.0,
+            kill_count: 0,
+            kill_streak: 0,
+            alive: false,
+            respawn_target: Some(Vec2::new(7.0, -3.0)),
+            respawn_remaining: 5.0,
+        };
+        let target = respawn_focus(&subject);
+        assert_eq!(target, Vec2::new(7.0, -3.0));
+
+        let searching = ViewportSubject {
+            respawn_remaining: 0.0,
+            ..subject
+        };
+        let target = respawn_focus(&searching);
+        assert_eq!(target, searching.position);
     }
 }

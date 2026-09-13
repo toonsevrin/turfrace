@@ -27,6 +27,8 @@ pub struct CompetitorVisual {
     pub awareness: f32,
     pub kills: u32,
     pub kill_streak: u32,
+    pub respawn_target: Option<Vec2>,
+    pub respawn_remaining: f32,
 }
 
 impl Default for CompetitorVisual {
@@ -45,6 +47,8 @@ impl Default for CompetitorVisual {
             awareness: 0.0,
             kills: 0,
             kill_streak: 0,
+            respawn_target: None,
+            respawn_remaining: 0.0,
         }
     }
 }
@@ -184,6 +188,8 @@ pub(super) fn sync_competitor_visuals(
                 kill_count: visual.kills,
                 kill_streak: visual.kill_streak,
                 alive: visual.alive,
+                respawn_target: visual.respawn_target,
+                respawn_remaining: visual.respawn_remaining,
             }
         } else {
             // NPC entities do not retain stale local viewport ownership.
@@ -197,6 +203,8 @@ pub(super) fn sync_competitor_visuals(
                 kill_count: 0,
                 kill_streak: 0,
                 alive: false,
+                respawn_target: None,
+                respawn_remaining: 0.0,
             }
         };
         if let Ok(mut subject) = subjects.get_mut(proxy.source) {
@@ -236,6 +244,8 @@ pub(super) fn sync_competitor_visuals(
                 kill_count: visual.kills,
                 kill_streak: visual.kill_streak,
                 alive: visual.alive,
+                respawn_target: visual.respawn_target,
+                respawn_remaining: visual.respawn_remaining,
             });
         }
     }

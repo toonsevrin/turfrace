@@ -19,6 +19,7 @@ use crate::{
 };
 
 use super::replay::{MatchReplay, PendingCommands};
+use super::respawn::RespawnScheduler;
 use super::{
     Competitor, CompetitorKind, DisplacementCredits, EliminationFeed, LastOwnedCell, LifeState,
     MatchGeneration, MatchPhase, MatchSession, MatchSpec, MatchStatistics, PendingCaptures,
@@ -53,6 +54,9 @@ pub fn start_simulation(world: &mut World, spec: &MatchSpec) {
     }
     if !world.contains_resource::<DisplacementCredits>() {
         world.insert_resource(DisplacementCredits::default());
+    }
+    if !world.contains_resource::<RespawnScheduler>() {
+        world.insert_resource(RespawnScheduler::default());
     }
     if !world.contains_resource::<SimulationClock>() {
         world.insert_resource(SimulationClock::default());
@@ -181,6 +185,9 @@ fn reset_transient_resources(world: &mut World) {
     }
     if let Some(mut credits) = world.get_resource_mut::<DisplacementCredits>() {
         credits.0.clear();
+    }
+    if let Some(mut scheduler) = world.get_resource_mut::<RespawnScheduler>() {
+        *scheduler = RespawnScheduler::default();
     }
     if let Some(mut clock) = world.get_resource_mut::<SimulationClock>() {
         clock.0 = 0;

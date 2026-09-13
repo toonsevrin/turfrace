@@ -17,7 +17,7 @@ use super::lifecycle::advance_countdown;
 use super::model::*;
 use super::npc_systems::npc_think;
 use super::replay::PendingCommands;
-use super::respawn::advance_respawns;
+use super::respawn::{RespawnScheduler, advance_respawns, cleanup_terminal_respawns};
 #[cfg(test)]
 use super::respawn::{claim_respawn_seed, reset_respawn_anchor};
 
@@ -86,6 +86,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<PendingDeaths>()
             .init_resource::<PendingCaptures>()
             .init_resource::<DisplacementCredits>()
+            .init_resource::<RespawnScheduler>()
             .init_resource::<MatchGeneration>()
             .init_resource::<PresentationReady>()
             .init_resource::<SimulationPaused>()
@@ -121,6 +122,10 @@ impl Plugin for SimulationPlugin {
                     deliver_npc_events.after(MatchSystemSet::UpdateRankings),
                 )
                     .run_if(match_is_running),
+            )
+            .add_systems(
+                FixedUpdate,
+                cleanup_terminal_respawns.after(MatchSystemSet::CheckVictory),
             );
     }
 }

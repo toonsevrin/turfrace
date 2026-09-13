@@ -19,7 +19,8 @@ use turfrace::{
     input::InputDeviceId,
     lobby::{HumanSetup, LastLobbySettings, Lobby, LobbyPlayer, MatchSetup},
     match_game::{
-        MatchGeneration, MatchPhase, MatchPlugin, MatchSession, PresentationReady, start_match,
+        MatchGeneration, MatchPhase, MatchPlugin, MatchSession, PresentationReady, RespawnPlan,
+        start_match,
     },
     presentation::PresentationPlugin,
     ui::{MatchResults, ResultRow},
@@ -98,6 +99,7 @@ struct Harness {
     frame: u32,
     configured: bool,
     capture_triggered: bool,
+    respawn_triggered: bool,
     screenshot: Option<Entity>,
 }
 
@@ -119,6 +121,7 @@ fn main() {
             frame: 0,
             configured: false,
             capture_triggered: false,
+            respawn_triggered: false,
             screenshot: None,
         })
         .add_plugins(
@@ -575,17 +578,34 @@ fn scenario_is_visible(world: &mut World) -> bool {
                 .set(AppState::Paused);
         }
     }
-    if scenario == Scenario::Respawn && state == AppState::Playing {
+    if scenario == Scenario::Respawn
+        && state == AppState::Playing
+        && !world.resource::<Harness>().respawn_triggered
+    {
         let subject = world
             .query::<(&turfrace::match_game::Competitor, Entity)>()
             .iter(world)
             .find(|(competitor, _)| competitor.kind == turfrace::match_game::CompetitorKind::Human)
             .map(|(_, entity)| entity);
-        if let Some(entity) = subject
-            && let Some(mut life) = world.get_mut::<turfrace::match_game::LifeState>(entity)
-        {
-            life.status = turfrace::match_game::LifeStatus::Respawning;
-            life.respawn_remaining = 4.2;
+        if let Some(entity) = subject {
+            let competitor_id = world
+                .get::<turfrace::match_game::Competitor>(entity)
+                .map(|competitor| competitor.id);
+            if let Some(competitor_id) = competitor_id {
+                // Reproduce the post-elimination state, not a synthetic plan:
+                // the real scheduler must find and reserve a safe site.
+                world
+                    .resource_mut::<turfrace::territory_map::TerritoryMap>()
+                    .clear_owner(competitor_id);
+                world
+                    .entity_mut(entity)
+                    .remove::<turfrace::trail::ActiveTrail>();
+                if let Some(mut life) = world.get_mut::<turfrace::match_game::LifeState>(entity) {
+                    life.status = turfrace::match_game::LifeStatus::Respawning;
+                    life.respawn_remaining = 0.0;
+                }
+                world.resource_mut::<Harness>().respawn_triggered = true;
+            }
         }
     }
     match scenario {
@@ -619,7 +639,18 @@ fn scenario_is_visible(world: &mut World) -> bool {
                     .count()
                     == 2
         }
-        Scenario::Respawn => state == AppState::Playing,
+        Scenario::Respawn => {
+            // Once the warning starts, keep the capture clock running through
+            // cancellation and materialization, even when no plan remains.
+            state == AppState::Playing
+                && (world.resource::<Harness>().frame > 0
+                    || world
+                        .query::<(&turfrace::match_game::Competitor, &RespawnPlan)>()
+                        .iter(world)
+                        .any(|(competitor, _)| {
+                            competitor.kind == turfrace::match_game::CompetitorKind::Human
+                        }))
+        }
         Scenario::Pause => state == AppState::Paused,
         Scenario::Disconnect => state == AppState::Paused,
         Scenario::GameOver => state == AppState::GameOver,

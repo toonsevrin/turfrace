@@ -103,6 +103,12 @@ pub(super) fn sync_trail_visuals(
             commands.entity(entity).despawn();
             continue;
         };
+        if !trail_has_ribbon_geometry(trail) {
+            // Empty uploads trigger Bevy 0.19's slab allocator error. Remove
+            // the old ribbon instead; a later live trail creates a fresh one.
+            commands.entity(entity).despawn();
+            continue;
+        }
         rendered[visual.id as usize] = true;
         if proxy.revision != trail.revision {
             if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
@@ -131,7 +137,13 @@ pub(super) fn sync_trail_visuals(
 }
 
 fn trail_has_ribbon_geometry(trail: &TrailVisual) -> bool {
-    trail.points.len() >= 2
+    trail.points.first().is_some_and(|first| {
+        trail
+            .points
+            .iter()
+            .skip(1)
+            .any(|point| first.distance_squared(*point) > POINT_EPSILON_SQUARED)
+    })
 }
 
 fn ribbon_mesh(points: &[Vec2], width: f32) -> Mesh {
@@ -365,6 +377,49 @@ fn append_round_cap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cleared_or_duplicate_trails_remove_the_proxy_without_empty_uploads() {
+        use super::super::materials::{FlatMaterial, PaperMaterial, setup_render_assets};
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<FlatMaterial>>()
+            .init_resource::<Assets<PaperMaterial>>()
+            .add_systems(Startup, setup_render_assets)
+            .add_systems(Update, sync_trail_visuals);
+        let source = app
+            .world_mut()
+            .spawn((
+                CompetitorVisual::default(),
+                TrailVisual {
+                    points: vec![Vec2::ZERO, Vec2::X],
+                    ..default()
+                },
+            ))
+            .id();
+        for points in [vec![], vec![Vec2::ZERO, Vec2::ZERO]] {
+            app.update();
+            let world = app.world_mut();
+            assert_eq!(world.query::<&TrailProxy>().iter(world).count(), 1);
+            {
+                let mut trail = world.get_mut::<TrailVisual>(source).unwrap();
+                trail.points = points;
+                trail.revision += 1;
+            }
+            app.update();
+            let world = app.world_mut();
+            assert_eq!(world.query::<&TrailProxy>().iter(world).count(), 0);
+            assert!(
+                world
+                    .resource::<Assets<Mesh>>()
+                    .iter()
+                    .all(|(_, mesh)| mesh.count_vertices() > 0)
+            );
+            let mut trail = world.get_mut::<TrailVisual>(source).unwrap();
+            trail.points = vec![Vec2::ZERO, Vec2::X];
+            trail.revision += 1;
+        }
+    }
+
     #[test]
     fn ribbon_has_one_quad_per_segment() {
         let mesh = ribbon_mesh(&[Vec2::ZERO, Vec2::X, Vec2::new(1.0, 1.0)], 0.65);

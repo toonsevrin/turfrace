@@ -609,7 +609,7 @@ fn leaving_owned_seed_ends_protection_after_minimum_time() {
 }
 
 #[test]
-fn respawn_seed_displacement_is_credited() {
+fn respawn_seed_cannot_displace_existing_territory() {
     let config = GameConfig::default();
     let board = BoardGrid::generate(8, 2, &config);
     let victim = CompetitorId(0);
@@ -617,15 +617,15 @@ fn respawn_seed_displacement_is_credited() {
     let mut territory = TerritoryMap::from_board(&board);
     territory.seed_owner(Vec2::ZERO, 1.0, victim);
     let mut credits = DisplacementCredits::default();
-    claim_respawn_seed(
+    assert!(!claim_respawn_seed(
         &mut territory,
         Vec2::ZERO,
         config.starting_territory_radius,
         respawning,
         &mut credits,
-    );
-    assert!(territory.area(victim) <= f32::EPSILON);
-    assert_eq!(credits.0, vec![(victim, respawning)]);
+    ));
+    assert!(territory.area(victim) > 0.0);
+    assert!(credits.0.is_empty());
 }
 
 #[test]

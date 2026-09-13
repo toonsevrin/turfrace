@@ -117,7 +117,15 @@ fn npc_phase_name(phase: crate::npc::TacticPhase) -> &'static str {
     }
 }
 
-type CompetitorHudQuery<'w, 's> = Query<'w, 's, (&'static Competitor, &'static LifeState)>;
+type CompetitorHudQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Competitor,
+        &'static LifeState,
+        Option<&'static RespawnPlan>,
+    ),
+>;
 
 #[derive(SystemParam)]
 pub(super) struct HudData<'w, 's> {
@@ -623,10 +631,10 @@ pub(super) fn update_gameplay_hud(
         } else if kill_feed.is_some() {
             update_text(&mut text, &elimination_text);
         } else if let Some(marker) = respawn {
-            let Ok((_, life)) = competitors.get(marker.0) else {
+            let Ok((_, life, plan)) = competitors.get(marker.0) else {
                 continue;
             };
-            write_respawn_status(&mut respawn_text, *life);
+            write_respawn_status(&mut respawn_text, *life, plan);
             update_text(&mut text, &respawn_text);
             if let Some(mut text_color) = text_color {
                 set_text_color_if_changed(
@@ -735,10 +743,17 @@ fn kill_feed_transform(age: f32, reduced_motion: bool) -> (f32, f32) {
     (30.0 * (1.0 - eased), 0.94 + eased * 0.06 + bounce)
 }
 
-fn write_respawn_status(target: &mut String, life: LifeState) {
+fn write_respawn_status(target: &mut String, life: LifeState, plan: Option<&RespawnPlan>) {
     target.clear();
-    if !life.is_alive() {
-        let _ = write!(target, "RESPAWN\n{:.1}", life.respawn_remaining.max(0.0));
+    if life.is_alive() {
+        return;
+    }
+    if life.status == LifeStatus::Eliminated {
+        target.push_str("ELIMINATED");
+    } else if life.respawn_remaining > 0.0 && plan.is_some_and(|plan| plan.duration > 0.0) {
+        let _ = write!(target, "RESPAWN\n{:.1}", life.respawn_remaining);
+    } else {
+        target.push_str("WAITING FOR\nSAFE SPACE");
     }
 }
 
@@ -908,21 +923,61 @@ mod tests {
     #[test]
     fn living_players_have_no_spawn_protection_countdown_text() {
         let mut text = "stale shield text".to_owned();
-        write_respawn_status(&mut text, LifeState::alive());
+        write_respawn_status(&mut text, LifeState::alive(), None);
         assert!(text.is_empty());
     }
 
     #[test]
     fn dead_players_keep_the_respawn_countdown() {
         let mut text = String::new();
+        let plan = crate::match_game::RespawnPlan {
+            position: Vec2::ZERO,
+            duration: 5.0,
+        };
         write_respawn_status(
             &mut text,
             LifeState {
                 status: LifeStatus::Respawning,
                 respawn_remaining: 2.34,
             },
+            Some(&plan),
         );
         assert_eq!(text, "RESPAWN\n2.3");
+    }
+
+    #[test]
+    fn unscheduled_or_searching_players_are_told_not_to_approach_a_site() {
+        let mut text = String::new();
+        let life = LifeState {
+            status: LifeStatus::Respawning,
+            respawn_remaining: 0.0,
+        };
+        write_respawn_status(&mut text, life, None);
+        assert_eq!(text, "WAITING FOR\nSAFE SPACE");
+
+        let plan = crate::match_game::RespawnPlan {
+            position: Vec2::ZERO,
+            duration: 5.0,
+        };
+        write_respawn_status(
+            &mut text,
+            LifeState {
+                respawn_remaining: 0.0,
+                ..life
+            },
+            Some(&plan),
+        );
+        assert_eq!(text, "WAITING FOR\nSAFE SPACE");
+
+        write_respawn_status(
+            &mut text,
+            LifeState {
+                status: LifeStatus::Eliminated,
+                respawn_remaining: 0.0,
+            },
+            None,
+        );
+        assert_eq!(text, "ELIMINATED");
     }
 
     #[test]

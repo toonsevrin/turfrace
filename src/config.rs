@@ -18,6 +18,13 @@ pub struct GameConfig {
     pub spawn_protection_minimum_seconds: f32,
     pub respawn_base_seconds: f32,
     pub respawn_cap_seconds: Option<f32>,
+    /// Reserved sites show this warning before their owner may spawn.
+    /// Gameplay enforces a five-second minimum.
+    pub respawn_warning_seconds: f32,
+    /// Maximum candidate work for one waiter on a retry pass.
+    pub respawn_candidate_batch: usize,
+    /// Time between bounded candidate retry passes.
+    pub respawn_retry_seconds: f32,
     /// Whole-arena territory share required to win. The comparison is made
     /// against authoritative fixed-point polygon area, not displayed text.
     pub victory_territory_percent: u8,
@@ -48,6 +55,9 @@ impl Default for GameConfig {
             // Keep a cut costly without turning a local party game into spectating.
             respawn_base_seconds: 2.0,
             respawn_cap_seconds: Some(5.0),
+            respawn_warning_seconds: 5.0,
+            respawn_candidate_batch: 64,
+            respawn_retry_seconds: 0.5,
             victory_territory_percent: 95,
             self_trail_exclusion_distance: 1.5,
             trail_sample_distance: 0.2,

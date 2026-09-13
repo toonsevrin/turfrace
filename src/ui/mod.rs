@@ -25,8 +25,8 @@ use crate::{
     input::{InputDeviceId, MenuAction, MenuInput},
     lobby::{Lobby, LobbyCommand, LobbyCommandMessage, MatchDisconnectNotice, MatchSetup},
     match_game::{
-        Competitor, CompetitorKind, DeathCause, EliminationFeed, LifeState, MatchSession,
-        MatchStatistics as SimulationMatchStatistics, Rankings,
+        Competitor, CompetitorKind, DeathCause, EliminationFeed, LifeState, LifeStatus,
+        MatchSession, MatchStatistics as SimulationMatchStatistics, Rankings, RespawnPlan,
     },
     palette::palette_color,
     profiles::{

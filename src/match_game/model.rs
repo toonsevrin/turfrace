@@ -22,6 +22,15 @@ pub struct LifeState {
     pub status: LifeStatus,
     pub respawn_remaining: f32,
 }
+/// The exact site reserved for a respawn warning. The position is stable for
+/// the entire warning; presentation can render this component without
+/// participating in scheduling.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct RespawnPlan {
+    pub position: Vec2,
+    pub duration: f32,
+}
+
 impl LifeState {
     pub fn alive() -> Self {
         Self {

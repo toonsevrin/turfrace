@@ -47,7 +47,7 @@ The initial version includes:
 * Dynamically generated field contours.
 * Territory capture and stealing.
 * Trail cutting and self-trail collisions.
-* Short, capped respawn times.
+* Safe, warning-led respawns with bounded retries.
 * Split-screen cameras.
 * Home, lobby, leaderboard, settings, pause, and results screens.
 * Browser-local profiles and statistics.
@@ -99,9 +99,7 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | Ownership grid cell size            |                          0.50 units |
 | Starting territory radius           |                          2.75 units |
 | Spawn protection                    |                        1.25 seconds |
-| First respawn delay                 |                           2 seconds |
-| Respawn increase per death          |                           2 seconds |
-| Maximum respawn delay               |                           5 seconds |
+| Minimum respawn-site warning        |                 At least 5 seconds |
 | Victory territory threshold         |                                 95% |
 | Leaderboard rows                    |                               Top 3 |
 | Camera downward angle               |  Approximately 68° below horizontal |
@@ -110,14 +108,13 @@ A deterministic developer replay log is recommended for debugging, but it does n
 | Mouse deadzone                      |                    24 screen pixels |
 | Standard NPC think frequency        |                                8 Hz |
 
-Respawns keep local players in the action rather than imposing escalating spectator time:
-
-```text
-respawn_delay_seconds = min(2 × number_of_deaths_this_match, 5)
-```
-
-The first death costs 2 seconds, the second 4 seconds, and every subsequent death 5 seconds.
-Humans and NPCs use exactly the same formula. Base delay and cap remain configurable.
+Respawns use a shared, warning-led process for humans and NPCs. A reserved site is shown in the
+world for at least five seconds before its starting seed materializes. This warning may overlap
+post-death recovery rather than being added to it. If no legal site is available, the competitor
+waits while bounded retries continue; a crowded site is never forced. The default site warning is
+five seconds, configurable upward through `GameConfig`. The existing post-death recovery of
+2, 4, then 5 seconds overlaps this warning: materialization waits for both, not their sum.
+Candidate searches use configurable bounded batches and retry intervals.
 
 ---
 
@@ -332,7 +329,7 @@ If a player’s territory count reaches zero:
 * The player dies with cause `Displaced`.
 * Their active trail is removed.
 * The competitor responsible for the final territory removal receives kill credit.
-* Their normal capped respawn begins.
+* Their normal respawn process begins.
 
 Capturing territory around another player’s cube does not otherwise kill that player.
 
@@ -396,7 +393,7 @@ On death, gameplay state changes immediately:
 * Every territory cell belonging to that player becomes unclaimed.
 * Territory count becomes zero.
 * Death count increments.
-* The respawn timer is set.
+* Respawn recovery begins; site reservation and its warning may proceed concurrently.
 * Input no longer affects movement.
 
 Visual disappearance MAY take 0.3–0.5 seconds using non-authoritative fade or dissolve effects. Other players must be able to claim the newly unclaimed cells immediately even while the visual fade is finishing.
@@ -445,51 +442,44 @@ This prevents spawn camping without providing a long offensive advantage.
 
 # 8. Respawning
 
+These post-death rules are shared by humans and NPCs. Initial match placement is unchanged: all
+competitors still receive their starting territories simultaneously and use the shared
+`3 – 2 – 1 – GO` countdown.
+
 ## 8.1 Respawn sequence
 
 While dead:
 
-* The player’s viewport remains present.
-* A centered countdown displays tenths of a second below five seconds.
-* The camera initially remains near the death location.
-* It gradually zooms out during longer respawns.
-* Shortly before spawning, it transitions to the new spawn point.
+* The player’s viewport remains present and shows the respawn status.
+* Once a legal site is reserved, its warning is visible in the world for at least five seconds
+  before the complete starting seed materializes.
+* The warning countdown may overlap post-death recovery; it is not necessarily additive.
+* The camera moves to and follows the warning site. If no site is available, the HUD explicitly
+  shows that the competitor is waiting.
+* Immediately before materialization, the complete seed and its safety are revalidated. A failed
+  revalidation cancels the site and requires a replacement with a fresh full warning.
 
-NPCs use the same respawn system but have no viewport.
+NPCs use the same reservation, warning, waiting, and safety rules but have no viewport.
 
 ## 8.2 Respawn location selection
 
-At the moment of respawn, generate candidate positions inside the field.
+Select and persist a pending site before materialization. A candidate is legal only when the
+complete starting seed is a strictly unclaimed exact vector area and has all required hard
+clearances from the field boundary, living competitor bodies, and active trails. It must also
+remain spatially separated from every other persistent respawn reservation.
 
-A valid preferred candidate must:
+The reservation is a warning only, not ownership. Captures remain allowed at a pending site and
+may invalidate it. When a site is invalidated, cancel it and select a replacement; the replacement
+always receives a fresh full warning. Revalidate the complete unclaimed seed and the same safety
+conditions immediately before materialization.
 
-* Have enough boundary distance for the complete starting territory.
-* Be at least 12 units from any living cube.
-* Be at least 6 units from any active trail.
-* Not overlap another respawning player’s seed area in the same update.
-* Prefer unclaimed territory.
-* Prefer locations far from the current leader.
-
-Recommended algorithm:
-
-1. Sample 256 valid field cells using the deterministic match RNG.
-2. Reject cells that violate hard safety distances.
-3. For each candidate, calculate:
-
-   * Percentage of the proposed seed disk that is unclaimed.
-   * Minimum distance to living cubes.
-   * Minimum distance to active trails.
-   * Distance from the current leader.
-   * Distance from the field edge.
-4. Choose the highest-scoring candidate.
-5. If none exists, relax cube and trail distances in two stages.
-6. As a final fallback, choose the safest valid interior cell.
-
-The new seed territory may overwrite a small number of claimed cells if no unclaimed spawn region remains. This acts as a limited comeback mechanism.
+Use deterministic, bounded candidate searches. If no legal site exists, keep the competitor in a
+distinct waiting state and retry boundedly. Never steal claimed territory, relax a hard clearance,
+shrink the starting seed, or force a crowded respawn.
 
 ## 8.3 Respawn ordering and victory
 
-Victory is checked before expired respawn timers create new territory.
+Victory is checked before a respawn materializes new territory.
 
 If a competitor reaches the victory threshold during the same update in which another player is due to respawn:
 
@@ -840,8 +830,9 @@ Systems must be grouped into explicit ordered sets:
 
 12. **AdvanceRespawns**
 
-    * Tick timers.
-    * Spawn eligible competitors only if the match has not ended.
+    * Advance pending warnings and boundedly retry competitors waiting for a legal site.
+    * Revalidate safety immediately before materialization.
+    * Materialize eligible competitors only if the match has not ended.
 
 13. **UpdateRankings**
 
@@ -1028,9 +1019,10 @@ All human players use equivalent world coverage after compensating for viewport 
 On death:
 
 * Hold near the death location for the initial effect.
-* Ease outward to show more of the field.
-* Keep the respawn countdown centered.
-* Transition rapidly but smoothly to the respawn location when spawning.
+* Ease outward to show more of the field while recovery or site search is pending.
+* Move smoothly to a reserved warning site and keep that site visible during its warning.
+* Keep the warning countdown centered; show a distinct waiting state when no legal site is reserved.
+* Transition smoothly to the materialized cube.
 
 No automatic spectating of another player is required.
 
@@ -1207,7 +1199,8 @@ remain legible at narrow viewports and require no title or panel.
 Each human viewport contains:
 
 * Player names projected above each world cube in that player's color.
-* Respawn countdown when dead.
+* Respawn warning countdown when a site is pending.
+* A distinct waiting-for-site status when no legal site is available.
 * Small spawn-protection timer or shield.
 * Movement, trail, camera, and effect cues instead of duplicated numeric telemetry.
 
@@ -1907,9 +1900,7 @@ enum LifeState {
     Alive {
         spawn_protection_remaining: f32,
     },
-    Respawning {
-        remaining: f32,
-    },
+    Respawning, // pending warning or waiting for a legal site
 }
 
 #[derive(Component)]
@@ -2159,7 +2150,7 @@ Required tests include:
 * Territory stealing.
 * Territory-count updates.
 * Displaced death.
-* Respawn-delay sequence.
+* Respawn site reservation, warning, invalidation, and safety revalidation.
 * Ranking tie-breaks.
 * Exact fixed-point 95% victory threshold.
 
@@ -2192,7 +2183,12 @@ For randomized field seeds and capture shapes:
 * Window resizing recalculates all viewports.
 * Browser focus loss pauses.
 * Death clears all territory.
-* First three deaths respawn after 2, 4, and 5 seconds; later delays remain capped at 5.
+* Respawn sites require a strictly unclaimed exact-vector starting seed with hard boundary, body,
+  trail, and reservation-spacing clearances.
+* Humans and NPCs share reservation, warning, waiting, invalidation, and revalidation behavior.
+* Captures may claim a pending warning site, which is not ownership, and force a fresh replacement
+  warning when it is invalidated.
+* No legal site leaves the competitor waiting; it never forces a crowded respawn.
 * NPCs can complete captures and cut trails.
 * Severing an occupied island preserves the island and does not kill its occupant.
 * NPC soak test runs for at least one simulated hour without invalid state.
@@ -2241,8 +2237,10 @@ The initial version is complete when all of the following are true:
 10. Touching an opponent’s active trail kills its owner.
 11. Touching an old section of one’s own trail causes self-death.
 12. Death removes all territory and active trail immediately.
-13. Respawn delays follow 2, 4, 5 seconds, capped at 5 for humans and NPCs.
-14. Respawn positions are safe and grant a small starting territory.
+13. Humans and NPCs use the same warning-led respawn process, with at least five seconds of visible
+    world warning before materialization.
+14. Respawn sites are strictly unclaimed exact-vector starting seeds with hard safety clearances;
+    invalidated sites are replaced only after a fresh full warning, and crowded spawns are never forced.
 15. All human players receive correctly sized split-screen cameras.
 16. The global top-right leaderboard shows the top three competitors including NPCs.
 17. Local profiles can be created, selected, and persisted.
@@ -2347,9 +2345,14 @@ Add:
 
 These decisions remove ambiguity for implementation:
 
-* The respawn sequence is 2, 4, 5 seconds, capped at 5 thereafter.
+* Respawns use one shared warning-led process for humans and NPCs.
+* A complete starting seed must be a strictly unclaimed exact-vector area with hard boundary, body,
+  and trail clearances.
+* Respawn reservations persist with required spacing; they are warnings, not ownership, and captures
+  may invalidate them.
+* Invalidated sites are canceled and replaced with a fresh full warning. No stealing, relaxation,
+  shrinking, or forced crowded respawn is allowed.
 * Severed territory islands remain owned and safe; spawn location has no connectivity privilege.
-* The sequence is identical for humans and NPCs.
 * The boundary is solid and non-lethal.
 * Cubes do not physically collide with one another.
 * Touching one’s own established trail is fatal.
@@ -2365,7 +2368,7 @@ These decisions remove ambiguity for implementation:
 * The top-right leaderboard shows the top three overall.
 * Human viewport count is based on human players, not total competitors.
 * Victory uses the exact fixed-point 95% area threshold, not a rounded percentage.
-* Victory is checked before respawns.
+* Victory is checked before respawn materialization.
 * The initial release is entirely local and static, with no backend.
 * WebGL2 is the compatibility baseline.
 

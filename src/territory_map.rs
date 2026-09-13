@@ -392,6 +392,31 @@ impl TerritoryMap {
         self.arena_area
     }
 
+    /// Returns the exact fixed-point footprint used by a seed claim. Keeping
+    /// this constructor next to `seed_owner` prevents respawn validation from
+    /// drifting from the geometry that is eventually committed.
+    pub fn seed_footprint(center: Vec2, radius: f32) -> MultiPolygon {
+        circle(center, radius, CIRCLE_SAMPLES)
+    }
+
+    /// Tests a complete seed site against authoritative vector geometry.
+    ///
+    /// This deliberately does not consult the sample cache: even a very thin
+    /// positive overlap with turf rejects the site, as does any portion of the
+    /// disk outside the arena.
+    pub fn is_neutral_seed_site(&self, center: Vec2, radius: f32) -> bool {
+        if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return false;
+        }
+        let disk = Self::seed_footprint(center, radius);
+        if disk.is_empty() || !disk.difference(&self.arena).is_empty() {
+            return false;
+        }
+        self.territories
+            .iter()
+            .all(|territory| disk.intersection(territory).is_empty())
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -572,7 +597,7 @@ impl TerritoryMap {
             self.territories[player.index()].is_empty(),
             "cannot seed an owner that still has territory"
         );
-        let disk = circle(center, radius, CIRCLE_SAMPLES);
+        let disk = Self::seed_footprint(center, radius);
         self.apply_claim(player, disk)
     }
 
@@ -1464,6 +1489,19 @@ mod tests {
             Vec2::new(20.0, 20.0),
             Vec2::new(-20.0, 20.0),
         ])
+    }
+
+    #[test]
+    fn neutral_seed_validation_rejects_thin_exact_slivers_and_boundary_escape() {
+        let mut map = TerritoryMap::new(arena());
+        let sliver_owner = CompetitorId(0);
+        map.apply_claim(
+            sliver_owner,
+            rectangle(Vec2::new(2.9, -0.01), Vec2::new(3.2, 0.01)),
+        );
+        assert!(!map.is_neutral_seed_site(Vec2::ZERO, 3.0));
+        assert!(!map.is_neutral_seed_site(Vec2::new(18.0, 0.0), 3.0));
+        assert!(map.is_neutral_seed_site(Vec2::new(-10.0, 0.0), 3.0));
     }
 
     #[test]

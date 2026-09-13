@@ -1,5 +1,7 @@
 //! Cosmetic event presentation. Effects are deliberately non-authoritative.
 
+mod respawn_telegraph;
+
 use bevy::prelude::*;
 
 use crate::{
@@ -8,6 +10,7 @@ use crate::{
     palette::PLAYER_COLORS,
     render::{FlatMaterial, PresentationSettings},
 };
+use respawn_telegraph::RespawnTelegraphPlugin;
 
 #[derive(Message, Debug, Clone)]
 pub enum VisualEffect {
@@ -52,6 +55,7 @@ pub struct EffectsPlugin;
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<VisualEffect>()
+            .add_plugins(RespawnTelegraphPlugin)
             .add_systems(Startup, setup_effect_assets)
             .add_systems(
                 Update,
@@ -89,7 +93,7 @@ fn setup_effect_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FlatMaterial>>,
 ) {
-    let materials = PLAYER_COLORS
+    let player_materials: Vec<Handle<FlatMaterial>> = PLAYER_COLORS
         .iter()
         .map(|color| materials.add(FlatMaterial::new(Color::Srgba(*color), 0.12)))
         .collect();
@@ -99,7 +103,7 @@ fn setup_effect_assets(
         // The old lit 3D torus looked like a dark crater when viewed at the
         // gameplay camera angle.
         ring: meshes.add(Annulus::new(0.64, 0.76).mesh().resolution(32)),
-        materials,
+        materials: player_materials,
     });
 }
 
