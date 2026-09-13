@@ -404,12 +404,12 @@ fn deliver_npc_events(
     mut queue: ResMut<NpcEventQueue>,
     mut controllers: Query<(&Competitor, &mut NpcController)>,
 ) {
-    for (recipient, event) in queue.0.drain(..) {
+    for message in queue.0.drain(..) {
         if let Some((_, mut controller)) = controllers
             .iter_mut()
-            .find(|(competitor, _)| competitor.id == recipient)
+            .find(|(competitor, _)| competitor.id == message.recipient)
         {
-            controller.on_event(event);
+            controller.on_event(message.event, message.tick);
         }
     }
 }

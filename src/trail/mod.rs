@@ -19,6 +19,17 @@ pub struct ActiveTrail {
     pub rasterized_head: Vec2,
 }
 
+/// Read-only access to a trail's logical segments.
+///
+/// Implementations retain the segment indices used by the trail raster index,
+/// including zero-length sampled segments. Keeping this accessor generic lets
+/// collision code operate on a live trail and on forecast-only tails without
+/// copying either one.
+pub trait TrailSegmentAccessor {
+    fn segment_count(&self) -> usize;
+    fn segment(&self, index: usize) -> Option<(Vec2, Vec2)>;
+}
+
 impl ActiveTrail {
     pub fn new(owner: CompetitorId, start_owned_cell: Cell, boundary: Vec2, heading: Vec2) -> Self {
         Self {
@@ -114,6 +125,26 @@ impl ActiveTrail {
                 }
             })
             .collect()
+    }
+}
+
+impl TrailSegmentAccessor for ActiveTrail {
+    fn segment_count(&self) -> usize {
+        ActiveTrail::segment_count(self)
+    }
+
+    fn segment(&self, index: usize) -> Option<(Vec2, Vec2)> {
+        ActiveTrail::segment(self, index)
+    }
+}
+
+impl TrailSegmentAccessor for [Vec2] {
+    fn segment_count(&self) -> usize {
+        self.len().saturating_sub(1)
+    }
+
+    fn segment(&self, index: usize) -> Option<(Vec2, Vec2)> {
+        (index + 1 < self.len()).then(|| (self[index], self[index + 1]))
     }
 }
 
@@ -235,11 +266,11 @@ pub fn swept_trail_impact(
         .min_by(f32::total_cmp)
 }
 
-pub fn swept_active_trail_impact(
+pub fn swept_active_trail_impact<T: TrailSegmentAccessor + ?Sized>(
     previous: Vec2,
     current: Vec2,
     radius: f32,
-    trail: &ActiveTrail,
+    trail: &T,
     candidates: &[usize],
 ) -> Option<f32> {
     candidates
@@ -252,18 +283,22 @@ pub fn swept_active_trail_impact(
         .min_by(f32::total_cmp)
 }
 
-pub fn swept_self_active_trail_impact(
+/// Find the earliest impact against the part of a trail before its recent
+/// exclusion cutoff. `candidates` may be the complete logical index range or
+/// a spatially indexed subset of that range.
+fn swept_self_segment_impact<T, I>(
     previous: Vec2,
     current: Vec2,
     radius: f32,
-    trail: &ActiveTrail,
+    trail: &T,
     excluded_distance: f32,
-    candidates: &[usize],
-) -> Option<f32> {
+    candidates: I,
+) -> Option<f32>
+where
+    T: TrailSegmentAccessor + ?Sized,
+    I: IntoIterator<Item = usize>,
+{
     let count = trail.segment_count();
-    if count == 0 || candidates.is_empty() {
-        return None;
-    }
     let mut excluded = excluded_distance;
     let mut cutoff_segment = None;
     let mut cutoff = Vec2::ZERO;
@@ -282,8 +317,8 @@ pub fn swept_self_active_trail_impact(
     }
     let cutoff_segment = cutoff_segment?;
     candidates
-        .iter()
-        .filter_map(|&index| {
+        .into_iter()
+        .filter_map(|index| {
             if index >= count {
                 return None;
             }
@@ -302,6 +337,27 @@ pub fn swept_self_active_trail_impact(
         .min_by(f32::total_cmp)
 }
 
+pub fn swept_self_active_trail_impact<T: TrailSegmentAccessor + ?Sized>(
+    previous: Vec2,
+    current: Vec2,
+    radius: f32,
+    trail: &T,
+    excluded_distance: f32,
+    candidates: &[usize],
+) -> Option<f32> {
+    if trail.segment_count() == 0 || candidates.is_empty() {
+        return None;
+    }
+    swept_self_segment_impact(
+        previous,
+        current,
+        radius,
+        trail,
+        excluded_distance,
+        candidates.iter().copied(),
+    )
+}
+
 /// Self collision ignores the newest `excluded_distance` world units, including a partial segment.
 pub fn swept_self_trail_impact(
     previous: Vec2,
@@ -313,37 +369,158 @@ pub fn swept_self_trail_impact(
     if trail.len() < 2 {
         return None;
     }
-    let mut remaining = excluded_distance;
-    let mut end_index = trail.len() - 1;
-    let mut cutoff = trail[end_index];
-    while end_index > 0 {
-        let start = trail[end_index - 1];
-        let len = start.distance(cutoff);
-        if remaining < len {
-            cutoff = cutoff.lerp(start, remaining / len);
-            break;
-        }
-        remaining -= len;
-        end_index -= 1;
-        cutoff = start;
-    }
-    let mut best: Option<f32> = None;
-    for segment in trail[..end_index].windows(2) {
-        if let Some(t) = swept_point_capsule_t(previous, current, segment[0], segment[1], radius) {
-            best = Some(best.map_or(t, |old| old.min(t)));
-        }
-    }
-    if end_index > 0
-        && cutoff.distance_squared(trail[end_index - 1]) > 1e-8
-        && let Some(t) =
-            swept_point_capsule_t(previous, current, trail[end_index - 1], cutoff, radius)
-    {
-        best = Some(best.map_or(t, |old| old.min(t)));
-    }
-    best
+    swept_self_segment_impact(
+        previous,
+        current,
+        radius,
+        trail,
+        excluded_distance,
+        0..trail.segment_count(),
+    )
 }
 
 fn swept_point_capsule_t(p0: Vec2, p1: Vec2, a: Vec2, b: Vec2, radius: f32) -> Option<f32> {
+    // Most forecast segments are nowhere near this movement step. Reject only
+    // disjoint swept bounds before the iterative narrow phase; touching bounds
+    // still need the exact test. Pad for floating-point interpolation roundoff.
+    if p0.is_finite()
+        && p1.is_finite()
+        && a.is_finite()
+        && b.is_finite()
+        && radius.is_finite()
+        && radius >= 0.0
+    {
+        let scale = p0
+            .abs()
+            .max(p1.abs())
+            .max(a.abs())
+            .max(b.abs())
+            .max_element()
+            .max(1.0);
+        let padding = Vec2::splat(radius + scale * f32::EPSILON * 8.0);
+        let trail_min = a.min(b) - padding;
+        let trail_max = a.max(b) + padding;
+        if p0.min(p1).cmpgt(trail_max).any() || p0.max(p1).cmplt(trail_min).any() {
+            return None;
+        }
+        // The AABB test above is intentionally unchanged. This second bound
+        // is only an additional rejection; the iterative test remains the
+        // authority for every query which reaches it.
+        if swept_segments_definitely_separated(p0, p1, a, b, radius) {
+            return None;
+        }
+    }
+    swept_point_capsule_narrowphase(p0, p1, a, b, radius)
+}
+
+/// Returns true only when a finite f64 segment distance is safely outside the
+/// capsule. Near-parallel/intersecting and numerically uncertain cases opt out.
+fn swept_segments_definitely_separated(p0: Vec2, p1: Vec2, a: Vec2, b: Vec2, radius: f32) -> bool {
+    if !p0.is_finite() || !p1.is_finite() || !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    // Match the f32 operations used by the authoritative distance function:
+    // underflow, overflow, or an invalid endpoint delta is not certifiable.
+    let deltas = [p1 - p0, b - a, p0 - a, p0 - b, p1 - a, p1 - b];
+    if deltas.iter().any(|delta| {
+        !delta.is_finite() || !delta.length_squared().is_finite() || delta.length_squared() <= 0.0
+    }) {
+        return false;
+    }
+    let trail_delta = b - a;
+    if [(p0 - a).dot(trail_delta), (p1 - a).dot(trail_delta)]
+        .iter()
+        .any(|dot| !dot.is_finite())
+    {
+        return false;
+    }
+    let scale = p0
+        .abs()
+        .max(p1.abs())
+        .max(a.abs())
+        .max(b.abs())
+        .max_element()
+        .max(1.0) as f64;
+    let limit = f64::from(radius) + scale * f64::from(f32::EPSILON) * 8.0;
+    if !scale.is_finite() || !limit.is_finite() {
+        return false;
+    }
+    let Some(distance_squared) = segment_segment_distance_squared_f64(p0, p1, a, b, scale) else {
+        return false;
+    };
+    let limit_squared = limit * limit;
+    distance_squared.is_finite() && limit_squared.is_finite() && distance_squared > limit_squared
+}
+
+fn segment_segment_distance_squared_f64(
+    p0: Vec2,
+    p1: Vec2,
+    a: Vec2,
+    b: Vec2,
+    scale: f64,
+) -> Option<f64> {
+    let cross = |u: (f64, f64), v: (f64, f64)| u.0 * v.1 - u.1 * v.0;
+    let point = |p: Vec2| (f64::from(p.x), f64::from(p.y));
+    let p0 = point(p0);
+    let p1 = point(p1);
+    let a = point(a);
+    let b = point(b);
+    let direction = (p1.0 - p0.0, p1.1 - p0.1);
+    let trail = (b.0 - a.0, b.1 - a.1);
+    let epsilon = scale * scale * f64::EPSILON * 64.0;
+    if !epsilon.is_finite() {
+        return None;
+    }
+    let orientations = [
+        cross(direction, (a.0 - p0.0, a.1 - p0.1)),
+        cross(direction, (b.0 - p0.0, b.1 - p0.1)),
+        cross(trail, (p0.0 - a.0, p0.1 - a.1)),
+        cross(trail, (p1.0 - a.0, p1.1 - a.1)),
+    ];
+    if orientations
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() <= epsilon)
+    {
+        return None;
+    }
+    let opposite = |first: f64, second: f64| (first > 0.0) != (second > 0.0);
+    if opposite(orientations[0], orientations[1]) && opposite(orientations[2], orientations[3]) {
+        return Some(0.0);
+    }
+    let distance = |p: (f64, f64), start: (f64, f64), end: (f64, f64)| {
+        let segment = (end.0 - start.0, end.1 - start.1);
+        let length_squared = segment.0 * segment.0 + segment.1 * segment.1;
+        let offset = (p.0 - start.0, p.1 - start.1);
+        let dot = offset.0 * segment.0 + offset.1 * segment.1;
+        if !length_squared.is_finite() || length_squared == 0.0 || !dot.is_finite() {
+            return None;
+        }
+        let t = (dot / length_squared).clamp(0.0, 1.0);
+        let delta = (
+            p.0 - (start.0 + segment.0 * t),
+            p.1 - (start.1 + segment.1 * t),
+        );
+        let squared = delta.0 * delta.0 + delta.1 * delta.1;
+        squared.is_finite().then_some(squared)
+    };
+    [
+        distance(p0, a, b),
+        distance(p1, a, b),
+        distance(a, p0, p1),
+        distance(b, p0, p1),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(f64::min)
+}
+
+fn swept_point_capsule_narrowphase(
+    p0: Vec2,
+    p1: Vec2,
+    a: Vec2,
+    b: Vec2,
+    radius: f32,
+) -> Option<f32> {
     let distance = |t: f32| point_segment_distance(p0.lerp(p1, t), a, b);
     if distance(0.0) <= radius {
         return Some(0.0);
@@ -380,6 +557,121 @@ fn swept_point_capsule_t(p0: Vec2, p1: Vec2, a: Vec2, b: Vec2, radius: f32) -> O
 mod tests {
     use super::*;
     use crate::config::GameConfig;
+    #[test]
+    fn swept_broadphase_preserves_narrowphase_results() {
+        // Translated scales, degenerate segments, touching, initial overlap,
+        // crossing and disjoint bounds all retain the old impact time exactly.
+        for scale in [0.01, 1.0, 1000.0] {
+            for offset in [Vec2::ZERO, Vec2::new(100.0, -200.0)] {
+                for x in -4..=4 {
+                    for y in -4..=4 {
+                        let p0 = offset + Vec2::new(x as f32, y as f32) * scale;
+                        for direction in [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE, -Vec2::ONE] {
+                            let p1 = p0 + direction * scale * 3.0;
+                            for end in [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE] {
+                                let b = offset + end * scale;
+                                for radius in [0.0, 0.5 * scale, scale] {
+                                    assert_eq!(
+                                        swept_point_capsule_t(p0, p1, offset, b, radius),
+                                        swept_point_capsule_narrowphase(p0, p1, offset, b, radius),
+                                        "{p0:?} {p1:?} {b:?} radius={radius}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segment_bound_rejects_separated_diagonals_with_overlapping_aabbs() {
+        let p0 = Vec2::new(0.0, 0.0);
+        let p1 = Vec2::new(10.0, 10.0);
+        let a = Vec2::new(0.0, 1.0);
+        let b = Vec2::new(10.0, 11.0);
+        let radius = 0.1;
+        let padding = Vec2::splat(radius + f32::EPSILON * 8.0);
+        assert!(
+            !(p0.min(p1).cmpgt(b.max(a) + padding).any()
+                || p0.max(p1).cmplt(a.min(b) - padding).any())
+        );
+        assert!(swept_segments_definitely_separated(p0, p1, a, b, radius));
+        assert!(swept_point_capsule_narrowphase(p0, p1, a, b, radius).is_none());
+        assert!(swept_point_capsule_t(p0, p1, a, b, radius).is_none());
+    }
+
+    #[test]
+    fn swept_bound_matches_narrowphase_for_adversarial_and_random_geometry() {
+        let adversarial = [
+            (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, 0.0),
+            (Vec2::X, Vec2::X, Vec2::ZERO, Vec2::Y, 0.0),
+            (
+                Vec2::new(-1.0, 1.0),
+                Vec2::new(1.0, -1.0),
+                Vec2::X,
+                -Vec2::X,
+                0.01,
+            ),
+            (
+                Vec2::new(1e-20, 0.0),
+                Vec2::new(2e-20, 0.0),
+                Vec2::ZERO,
+                Vec2::Y,
+                1e-25,
+            ),
+            (
+                Vec2::new(1e30, -1e30),
+                Vec2::new(1e30, -1e30),
+                Vec2::ZERO,
+                Vec2::ONE,
+                1.0,
+            ),
+            (
+                Vec2::new(f32::NAN, 0.0),
+                Vec2::ZERO,
+                Vec2::ZERO,
+                Vec2::ONE,
+                0.0,
+            ),
+            (
+                Vec2::new(f32::INFINITY, 0.0),
+                Vec2::ZERO,
+                Vec2::ZERO,
+                Vec2::ONE,
+                0.0,
+            ),
+            (Vec2::ZERO, Vec2::ONE, Vec2::ZERO, Vec2::ONE, -1.0),
+        ];
+        for (p0, p1, a, b, radius) in adversarial {
+            assert_eq!(
+                swept_point_capsule_t(p0, p1, a, b, radius),
+                swept_point_capsule_narrowphase(p0, p1, a, b, radius),
+                "adversarial {p0:?} {p1:?} {a:?} {b:?} radius={radius}"
+            );
+        }
+
+        let mut seed = 0x5eed_u64;
+        let random = |seed: &mut u64| {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let value = (*seed >> 32) as u32;
+            value as f32 / u32::MAX as f32 * 2.0 - 1.0
+        };
+        for _ in 0..2_000 {
+            let p0 = Vec2::new(random(&mut seed), random(&mut seed)) * 100.0;
+            let p1 = p0 + Vec2::new(random(&mut seed), random(&mut seed)) * 100.0;
+            let a = Vec2::new(random(&mut seed), random(&mut seed)) * 100.0;
+            let b = a + Vec2::new(random(&mut seed), random(&mut seed)) * 100.0;
+            let radius = (random(&mut seed) + 1.0) * 5.0;
+            assert_eq!(
+                swept_point_capsule_t(p0, p1, a, b, radius),
+                swept_point_capsule_narrowphase(p0, p1, a, b, radius),
+                "random {p0:?} {p1:?} {a:?} {b:?} radius={radius}"
+            );
+        }
+    }
+
     #[test]
     fn rasterization_is_connected_across_diagonals() {
         let b = BoardGrid::generate(1, 2, &GameConfig::default());

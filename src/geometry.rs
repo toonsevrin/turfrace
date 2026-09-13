@@ -178,7 +178,7 @@ impl MultiPolygon {
                     continue;
                 }
                 for index in 0..contour.len() {
-                    nearest = nearest.min(point_segment_distance(
+                    nearest = nearest.min(point_segment_distance_squared(
                         point,
                         contour[index].world(),
                         contour[(index + 1) % contour.len()].world(),
@@ -186,7 +186,9 @@ impl MultiPolygon {
                 }
             }
         }
-        nearest
+        // Square root is monotone: select the nearest edge in squared units
+        // and take it once, rather than once per polygon edge per query.
+        nearest.sqrt()
     }
 
     pub fn bounds(&self) -> Option<(Point, Point)> {
@@ -334,6 +336,68 @@ fn bounds<'a>(points: impl Iterator<Item = &'a Point>) -> Option<(Point, Point)>
     Some((min, max))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Containment {
+    Outside,
+    Boundary,
+    Inside,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Edge {
+    pub(crate) start: Point,
+    pub(crate) end: Point,
+}
+
+impl Edge {
+    pub(crate) const fn new(start: Point, end: Point) -> Self {
+        Self { start, end }
+    }
+}
+
+/// Classifies one edge using the exact fixed-point ray-crossing arithmetic.
+/// `Inside` means that this edge toggles the contour's parity; `Outside`
+/// means that it does not.
+pub(crate) fn classify_edge(point: Point, edge: Edge) -> Containment {
+    // An edge strictly above or below the query cannot contain it or cross its
+    // horizontal ray. Keep this rejection before all other edge arithmetic.
+    if (point.y < edge.start.y && point.y < edge.end.y)
+        || (point.y > edge.start.y && point.y > edge.end.y)
+    {
+        return Containment::Outside;
+    }
+    if point_on_segment(point, edge.start, edge.end) {
+        return Containment::Boundary;
+    }
+    if (edge.end.y > point.y) != (edge.start.y > point.y) {
+        // This is intentionally the existing integer-division expression,
+        // including its truncation direction and operand order.
+        let left = i64::from(edge.start.x - edge.end.x) * i64::from(point.y - edge.end.y)
+            / i64::from(edge.start.y - edge.end.y)
+            + i64::from(edge.end.x);
+        if i64::from(point.x) < left {
+            return Containment::Inside;
+        }
+    }
+    Containment::Outside
+}
+
+pub(crate) fn classify_edges(point: Point, edges: impl IntoIterator<Item = Edge>) -> Containment {
+    let mut inside = false;
+    for edge in edges {
+        match classify_edge(point, edge) {
+            Containment::Boundary => return Containment::Boundary,
+            Containment::Inside => inside = !inside,
+            Containment::Outside => {}
+        }
+    }
+    if inside {
+        Containment::Inside
+    } else {
+        Containment::Outside
+    }
+}
+
 trait PointContainment {
     fn contains_point(&self, point: Point) -> bool;
     fn contains_interior(&self, point: Point) -> bool;
@@ -344,29 +408,26 @@ impl PointContainment for [Point] {
         if self.len() < 3 {
             return false;
         }
-        let mut inside = false;
-        let mut previous = self[self.len() - 1];
-        for &current in self {
-            if point_on_segment(point, previous, current) {
-                return true;
-            }
-            if (current.y > point.y) != (previous.y > point.y) {
-                let left = i64::from(previous.x - current.x) * i64::from(point.y - current.y)
-                    / i64::from(previous.y - current.y)
-                    + i64::from(current.x);
-                if i64::from(point.x) < left {
-                    inside = !inside;
-                }
-            }
-            previous = current;
-        }
-        inside
+        classify_edges(
+            point,
+            self.iter()
+                .copied()
+                .zip(self.iter().copied().cycle().skip(1))
+                .take(self.len())
+                .map(|(start, end)| Edge::new(start, end)),
+        ) != Containment::Outside
     }
 
     fn contains_interior(&self, point: Point) -> bool {
-        self.contains_point(point)
-            && (0..self.len())
-                .all(|index| !point_on_segment(point, self[index], self[(index + 1) % self.len()]))
+        self.len() >= 3
+            && classify_edges(
+                point,
+                self.iter()
+                    .copied()
+                    .zip(self.iter().copied().cycle().skip(1))
+                    .take(self.len())
+                    .map(|(start, end)| Edge::new(start, end)),
+            ) == Containment::Inside
     }
 }
 
@@ -383,19 +444,56 @@ fn point_on_segment(point: Point, start: Point, end: Point) -> bool {
     point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y
 }
 
-fn point_segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+pub(crate) fn point_segment_distance_squared(point: Vec2, start: Vec2, end: Vec2) -> f32 {
     let direction = end - start;
     let t = if direction.length_squared() > f32::EPSILON {
         ((point - start).dot(direction) / direction.length_squared()).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    point.distance(start + direction * t)
+    point.distance_squared(start + direction * t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_distance_matches_per_edge_square_root_reference() {
+        let shapes = [
+            MultiPolygon::default(),
+            rectangle(Vec2::splat(-5.0), Vec2::new(3.0, 7.0)),
+            MultiPolygon::from_outer(&[Vec2::ZERO, Vec2::ZERO, Vec2::X * 8.0, Vec2::Y * 6.0]),
+        ];
+        for shape in shapes {
+            for x in -40..=40 {
+                for y in -40..=40 {
+                    let point = Vec2::new(x as f32 * 0.25, y as f32 * 0.25);
+                    let mut expected = f32::INFINITY;
+                    for polygon in &shape.polygons {
+                        for contour in std::iter::once(&polygon.outer).chain(polygon.holes.iter()) {
+                            if contour.len() < 2 {
+                                continue;
+                            }
+                            for index in 0..contour.len() {
+                                let start = contour[index].world();
+                                let direction =
+                                    contour[(index + 1) % contour.len()].world() - start;
+                                let t = if direction.length_squared() > f32::EPSILON {
+                                    ((point - start).dot(direction) / direction.length_squared())
+                                        .clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+                                expected = expected.min(point.distance(start + direction * t));
+                            }
+                        }
+                    }
+                    assert_eq!(shape.boundary_distance(point), expected);
+                }
+            }
+        }
+    }
 
     fn rectangle(min: Vec2, max: Vec2) -> MultiPolygon {
         MultiPolygon::from_outer(&[
@@ -450,6 +548,64 @@ mod tests {
         assert!(ring.contains_world(Vec2::new(1.0, 1.0)));
         assert!(!ring.contains_world(Vec2::new(5.0, 5.0)));
         assert!(ring.contains_world(Vec2::new(2.0, 5.0)));
+    }
+
+    #[test]
+    fn containment_y_rejection_matches_full_edge_scan() {
+        fn reference(contour: &[Point], point: Point) -> bool {
+            if contour.len() < 3 {
+                return false;
+            }
+            let mut inside = false;
+            let mut previous = contour[contour.len() - 1];
+            for &current in contour {
+                if point_on_segment(point, previous, current) {
+                    return true;
+                }
+                if (current.y > point.y) != (previous.y > point.y) {
+                    let left = i64::from(previous.x - current.x) * i64::from(point.y - current.y)
+                        / i64::from(previous.y - current.y)
+                        + i64::from(current.x);
+                    if i64::from(point.x) < left {
+                        inside = !inside;
+                    }
+                }
+                previous = current;
+            }
+            inside
+        }
+        let contours = [
+            vec![
+                Point::new(-8, -7),
+                Point::new(8, -7),
+                Point::new(8, 7),
+                Point::new(-8, 7),
+            ],
+            vec![
+                Point::new(-9, 0),
+                Point::new(0, -9),
+                Point::new(9, 0),
+                Point::new(2, 1),
+                Point::new(0, 9),
+            ],
+            vec![
+                Point::new(0, 0),
+                Point::new(0, 0),
+                Point::new(7, 3),
+                Point::new(0, 9),
+            ],
+        ];
+        for mut contour in contours {
+            for _ in 0..2 {
+                for y in -12..=12 {
+                    for x in -12..=12 {
+                        let point = Point::new(x, y);
+                        assert_eq!(contour.contains_point(point), reference(&contour, point));
+                    }
+                }
+                contour.reverse();
+            }
+        }
     }
 
     #[test]

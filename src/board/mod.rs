@@ -324,6 +324,19 @@ impl BoardGrid {
         output: &mut Vec<TrailSegmentRef>,
     ) {
         output.clear();
+        self.visit_nearby_trail_segments(position, radius, |reference| output.push(reference));
+        output.sort_unstable_by_key(|reference| (reference.owner.0, reference.segment));
+        output.dedup();
+    }
+
+    /// Visit raw bucket references in canonical cell order, allowing bounded
+    /// selectors to filter before allocating. References may repeat across cells.
+    pub(crate) fn visit_nearby_trail_segments(
+        &self,
+        position: Vec2,
+        radius: f32,
+        mut visit: impl FnMut(TrailSegmentRef),
+    ) {
         let Some((minimum, maximum)) = self.clamped_cell_bounds(
             position - Vec2::splat(radius),
             position + Vec2::splat(radius),
@@ -335,11 +348,11 @@ impl BoardGrid {
                 let Some(index) = self.index(Cell::new(x, y)) else {
                     continue;
                 };
-                output.extend(self.trail_segment_buckets[index].iter().copied());
+                for &reference in &self.trail_segment_buckets[index] {
+                    visit(reference);
+                }
             }
         }
-        output.sort_unstable_by_key(|reference| (reference.owner.0, reference.segment));
-        output.dedup();
     }
     pub fn connected_playable(&self) -> bool {
         let Some(start) = self.field_mask.iter().position(|inside| *inside) else {

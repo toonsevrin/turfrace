@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Serve an existing release bundle and persist browser diagnostic windows."""
+import argparse
+import functools
+import http.server
+import json
+import pathlib
+import socketserver
+from urllib.parse import parse_qs, unquote, urlsplit
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+MAX_RECORD_BYTES = 16_384
+AUTOSTART_SCRIPT = b"<script type=\"module\" src='./__performance/autostart.mjs'></script>"
+
+
+def origin_parts(origin):
+    """Return a strict (origin, authority) pair for a configured web origin."""
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("--allowed-origin must be an http(s) origin")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ValueError("--allowed-origin has an invalid port") from error
+    if parsed.username is not None or parsed.password is not None or parsed.path not in {"", "/"} \
+            or parsed.query or parsed.fragment:
+        raise ValueError("--allowed-origin must not contain a path, query, fragment, or credentials")
+    return f"{parsed.scheme}://{parsed.netloc}", parsed.netloc
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(5)
+
+    def request_path(self):
+        return urlsplit(self.path).path
+
+    def has_path_traversal(self):
+        # SimpleHTTPRequestHandler also confines files to its directory, but
+        # reject traversal before dispatch so encoded dot segments cannot
+        # accidentally select a special endpoint or an injected index.
+        return any(part == ".." for part in unquote(self.request_path()).split("/"))
+
+    def allowed_host(self):
+        host = self.headers.get("Host")
+        configured = getattr(self.server, "allowed_authority", None)
+        return host == self.server.authority or (configured is not None and host == configured)
+
+    def allowed_origin(self):
+        origin = self.headers.get("Origin")
+        origins = getattr(self.server, "allowed_origins", {f"http://{self.server.authority}"})
+        if origin not in origins:
+            return False
+        # Do not let a request combine the forwarded Host with the loopback
+        # origin (or vice versa); each accepted authority has one origin.
+        if self.headers.get("Host") == getattr(self.server, "allowed_authority", None):
+            return origin == getattr(self.server, "allowed_origin", None)
+        return origin == f"http://{self.server.authority}"
+
+    def send_bytes(self, body, content_type):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if not self.allowed_host():
+            self.send_error(403)
+            return
+        if self.has_path_traversal():
+            self.send_error(404)
+            return
+        path = self.request_path()
+        if self.path == "/__performance/probe.mjs":
+            self.send_bytes((ROOT / "scripts/web-performance-probe.mjs").read_bytes(), "text/javascript")
+            return
+        if self.path == "/__performance/autostart.mjs":
+            if not getattr(self.server, "auto_capture", False):
+                self.send_error(404)
+                return
+            self.send_bytes((ROOT / "scripts/web-performance-autostart.mjs").read_bytes(), "text/javascript")
+            return
+        if getattr(self.server, "auto_capture", False) \
+                and "performance" in parse_qs(urlsplit(self.path).query, keep_blank_values=True) \
+                and path in {"/", "/index.html"}:
+            index = (pathlib.Path(self.directory) / "index.html").read_bytes()
+            marker = b"</body>"
+            injection = AUTOSTART_SCRIPT
+            if injection not in index:
+                index = index.replace(marker, injection + marker, 1) if marker in index else index + injection
+            self.send_bytes(index, "text/html; charset=utf-8")
+            return
+        super().do_GET()
+
+    def do_HEAD(self):
+        # Keep HEAD metadata handling strict and separate from GET injection.
+        if not self.allowed_host():
+            self.send_error(403)
+            return
+        if self.has_path_traversal():
+            self.send_error(404)
+            return
+        super().do_HEAD()
+
+    def do_POST(self):
+        if (not self.allowed_host() or self.path != "/__performance/record"
+                or not self.allowed_origin()):
+            self.send_error(403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= MAX_RECORD_BYTES:
+                raise ValueError("invalid record size")
+            record = json.loads(self.rfile.read(length))
+            if (not isinstance(record, dict) or not isinstance(record.get("type"), str)
+                    or not record["type"] or len(record["type"]) > 64):
+                raise ValueError("invalid record")
+            encoded = json.dumps(record, allow_nan=False, separators=(",", ":"))
+            if len(encoded.encode("utf8")) > MAX_RECORD_BYTES:
+                raise ValueError("encoded record is too large")
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            self.send_error(400)
+            return
+        self.server.output.write(encoded + "\n")
+        self.server.output.flush()
+        self.send_response(204)
+        self.end_headers()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dist", type=pathlib.Path, default=ROOT / "dist")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--bind", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1",
+                        help="listen address (default: 127.0.0.1)")
+    parser.add_argument("--output", type=pathlib.Path, default=ROOT / "target/performance/web.jsonl")
+    parser.add_argument("--auto-capture", action="store_true",
+                        help="inject capture startup only for index URLs containing ?performance")
+    parser.add_argument("--allowed-origin", default=None,
+                        help="additional exact browser origin/Host authority, e.g. https://turfrace.localc")
+    options = parser.parse_args()
+    if not (options.dist / "index.html").is_file():
+        parser.error("missing release bundle; run CARGO_BUILD_JOBS=2 trunk build --release first")
+    if not 1 <= options.port <= 65535:
+        parser.error("port must be 1..65535")
+    allowed_origin = None
+    allowed_authority = None
+    if options.allowed_origin is not None:
+        try:
+            allowed_origin, allowed_authority = origin_parts(options.allowed_origin)
+        except ValueError as error:
+            parser.error(str(error))
+    options.output.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation prevents accidentally destroying an earlier crash log.
+    try:
+        output = options.output.open("x", encoding="utf8")
+    except FileExistsError:
+        parser.error("output already exists; choose a fresh --output path")
+    authority = f"127.0.0.1:{options.port}"
+    with output, socketserver.TCPServer((options.bind, options.port),
+            functools.partial(Handler, directory=str(options.dist.resolve()))) as server:
+        server.authority = authority
+        server.allowed_authority = allowed_authority
+        server.allowed_origin = allowed_origin
+        server.allowed_origins = {f"http://{authority}"} | ({allowed_origin} if allowed_origin else set())
+        server.auto_capture = options.auto_capture
+        server.output = output
+        public = allowed_origin or f"http://{authority}"
+        if options.auto_capture:
+            print(f"Open {public}/?performance to opt into the automatic 180-second capture.", flush=True)
+        else:
+            print(f"Open http://{authority}; configure/start the match, then run in the browser console:", flush=True)
+            print("import('./__performance/probe.mjs').then(p => p.start({seconds:180,label:'8-player-normal'}))", flush=True)
+        print(f"Windows persist to {options.output}. Ctrl-C stops server. No browser/build is started.", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+
+if __name__ == "__main__":
+    main()

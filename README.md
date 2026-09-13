@@ -78,9 +78,15 @@ The repository's normal handoff check formats, compiles, lints, and runs every t
 
 Use `./scripts/feedback --quick` while iterating. The test suite covers geometry, capture and combat ordering, respawn and victory boundaries, persistence/input/lobby behavior, viewport layouts, render mappings, and an accelerated deterministic one-hour NPC soak.
 
-NPCs use bounded local sensing and a deterministic tactical capture planner. Focused tests cover
-plan sizing, risk response, action commitment, and realized multi-NPC capture quality; the
-accelerated soak separately checks long-running authoritative invariants.
+NPCs use authored builder, hunter, and raider policies independently of difficulty, with
+bounded local perception, persistent tactics, and shared-movement trajectory planning.
+The [NPC laboratory](docs/npc-lab.md) runs seeded encounters through the production simulation
+and records replayable outcomes and SVG trajectories. Encounter checks complement focused
+planner tests and the accelerated soak; neither soak survival nor tactic labels prove behavior quality.
+
+For release browser frame-time logs, crash evidence and sustained native CPU timing,
+see [performance diagnostics](docs/web-performance.md). Headless simulation timings
+are not browser FPS or a smoothness sign-off.
 
 ## Controlled visual playtests
 

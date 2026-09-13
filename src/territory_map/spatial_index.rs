@@ -1,6 +1,9 @@
 use bevy::prelude::*;
 
-use crate::{geometry::MultiPolygon, ids::MAX_COMPETITORS};
+use crate::geometry::{MultiPolygon, Point};
+use crate::ids::MAX_COMPETITORS;
+
+use super::containment_index::TerritoryContainmentIndex;
 
 const INDEX_SIDE: usize = 64;
 #[cfg(test)]
@@ -13,6 +16,7 @@ pub(super) struct TerritorySpatialIndex {
     /// One candidate bit per competitor. A zero mask is a known-empty index
     /// cell, distinct from an unavailable/out-of-bounds index lookup.
     pub(super) cells: Vec<u16>,
+    containment: TerritoryContainmentIndex,
 }
 
 impl TerritorySpatialIndex {
@@ -21,6 +25,7 @@ impl TerritorySpatialIndex {
         arena: &MultiPolygon,
         territories: &[MultiPolygon; MAX_COMPETITORS],
     ) {
+        self.containment.rebuild(arena, territories);
         let Some((min, max)) = arena.bounds() else {
             self.origin = Vec2::ZERO;
             self.cell_size = Vec2::ZERO;
@@ -46,6 +51,10 @@ impl TerritorySpatialIndex {
                 }
             }
         }
+    }
+
+    pub(super) fn contains(&self, territory: usize, point: Point) -> Option<bool> {
+        self.containment.contains(territory, point)
     }
 
     pub(super) fn candidate_mask(&self, point: Vec2) -> Option<u16> {

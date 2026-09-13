@@ -81,13 +81,17 @@ fn personal_npc_events_reach_controller_memory_without_presentation_drain() {
     let mut app = App::new();
     let id = CompetitorId(0);
     let entry = crate::npc::generate_npc_roster(77, 1, crate::npc::NpcDifficulty::Normal).remove(0);
-    app.insert_resource(crate::npc::NpcEventQueue(vec![(
-        id,
-        crate::npc::NpcEvent::TerritoryStolen {
-            by: CompetitorId(1),
-            area: 30.0,
+    app.insert_resource(crate::npc::NpcEventQueue(vec![
+        crate::npc::NpcEventMessage {
+            recipient: id,
+            event: crate::npc::NpcEvent::TerritoryStolen {
+                by: CompetitorId(1),
+                area: 30.0,
+                location: Vec2::ZERO,
+            },
+            tick: 1,
         },
-    )]))
+    ]))
     .add_systems(Update, deliver_npc_events);
     app.world_mut().spawn((
         Competitor {
@@ -822,7 +826,8 @@ fn npc_capture_plans_expand_meaningfully_without_constant_self_cuts() {
             let mut query = world.query::<(&crate::npc::NpcController, Option<&ActiveTrail>)>();
             for (controller, trail) in query.iter(world) {
                 max_planned_area = max_planned_area.max(controller.memory.planned_capture_area);
-                max_waypoint_index = max_waypoint_index.max(controller.memory.waypoint_index);
+                max_waypoint_index =
+                    max_waypoint_index.max(controller.tactic.map_or(0, |t| t.route_index));
                 max_trail_length = max_trail_length.max(trail.map_or(0.0, |trail| trail.length));
             }
         }

@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+# Deliberately bounded developer diagnostic.  This wrapper does not make
+# browser/GPU claims and does not enable tracing in normal game runs.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+
+if [ "${1:-}" = replay ]; then
+    shift
+    exec cargo run --no-default-features --example npc_lab -- replay "$@"
+fi
+
+fixture=return-race
+ticks=1800
+trace=target/npc-lab/${fixture}.json
+
+# Keep the common invocation useful while allowing all example flags through.
+expect_fixture=0
+expect_ticks=0
+for arg in "$@"; do
+    if [ "$expect_fixture" -eq 1 ]; then
+        fixture=$arg
+        trace=target/npc-lab/${fixture}.json
+        expect_fixture=0
+        continue
+    fi
+    if [ "$expect_ticks" -eq 1 ]; then
+        ticks=$arg
+        expect_ticks=0
+        continue
+    fi
+    case "$arg" in
+        --fixture) expect_fixture=1 ;;
+        --ticks) expect_ticks=1 ;;
+    esac
+done
+case "$ticks" in
+    ''|*[!0-9]*) echo "ticks must be an integer in [1,7200]" >&2; exit 2 ;;
+esac
+[ "$ticks" -ge 1 ] && [ "$ticks" -le 7200 ] || {
+    echo "ticks must be in [1,7200]" >&2
+    exit 2
+}
+mkdir -p "$(dirname "$trace")"
+exec cargo run --no-default-features --example npc_lab -- \
+    --fixture "$fixture" --ticks "$ticks" --trace "$trace" "$@"

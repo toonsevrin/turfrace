@@ -11,7 +11,10 @@ use crate::{
     config::GameConfig,
     ids::CompetitorId,
     movement::CompetitorMotion,
-    npc::{NpcController, NpcEvent, NpcEventQueue, NpcRosterEntry, generate_npc_roster},
+    npc::{
+        NpcController, NpcEvent, NpcEventMessage, NpcEventQueue, NpcRosterEntry,
+        generate_npc_roster,
+    },
     territory_map::TerritoryMap,
 };
 
@@ -147,10 +150,15 @@ pub fn start_simulation(world: &mut World, spec: &MatchSpec) {
             npc_entry,
         );
         if matches!(descriptor, RosterDescriptor::Npc) {
+            let tick = world.resource::<super::model::SimulationClock>().0;
             world
                 .resource_mut::<NpcEventQueue>()
                 .0
-                .push((CompetitorId(index as u8), NpcEvent::Spawned));
+                .push(NpcEventMessage {
+                    recipient: CompetitorId(index as u8),
+                    event: NpcEvent::Spawned,
+                    tick,
+                });
         }
     }
 }

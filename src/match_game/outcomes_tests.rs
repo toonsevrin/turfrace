@@ -188,15 +188,15 @@ fn resolver_applies_each_cause_once_and_updates_all_effect_channels() {
             .resource::<NpcEventQueue>()
             .0
             .iter()
-            .any(|(_, event)| matches!(event, NpcEvent::Died { killer: None }))
+            .any(|message| matches!(message.event, NpcEvent::Died { killer: None }))
     );
     assert!(
         app.world()
             .resource::<NpcEventQueue>()
             .0
             .iter()
-            .any(|(_, event)| matches!(
-                event,
+            .any(|message| matches!(
+                message.event,
                 NpcEvent::CreditedKill {
                     victim: CompetitorId(1)
                 }

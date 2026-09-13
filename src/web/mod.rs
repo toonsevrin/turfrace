@@ -1,4 +1,9 @@
-//! Small platform boundary for persistence, focus behavior, and fullscreen.
+//! Small platform boundary for persistence, focus behavior, fullscreen, and
+//! opt-in browser diagnostics.
+
+pub mod diagnostics;
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod frame_timing;
 
 use bevy::{
     prelude::*,
@@ -51,6 +56,15 @@ impl Plugin for WebPlugin {
                 apply_fullscreen,
             ),
         );
+        #[cfg(target_arch = "wasm32")]
+        if diagnostics::enabled() {
+            app.insert_resource(frame_timing::FrameTiming::enabled())
+                .add_systems(First, frame_timing::begin_frame)
+                .add_systems(FixedFirst, frame_timing::begin_fixed_tick)
+                .add_systems(FixedLast, frame_timing::end_fixed_tick)
+                .add_systems(Last, frame_timing::end_frame)
+                .add_systems(Update, diagnostics::publish_diagnostics);
+        }
     }
 }
 

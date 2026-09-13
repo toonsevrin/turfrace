@@ -1,27 +1,28 @@
-use bevy::{prelude::*, time::Fixed};
-
+use super::model::{
+    Competitor, LastOwnedCell, LifeState, MatchStatistics, Rankings, SpawnProtection,
+    TerritoryRecord,
+};
 use crate::{
     board::{BoardGrid, TrailSegmentRef},
+    config::GameConfig,
     ids::MAX_COMPETITORS,
     match_game::SteeringIntent,
     movement::CompetitorMotion,
     npc::{
-        CapturePlanContext, NpcController, NpcVisibleRival, NpcVisibleTrail, build_decision_frame,
-        propose_capture_plan, update_colored_error,
+        CaptureScratch, NpcController, NpcTickContext, NpcTrailSnapshot, NpcVisibleRival,
+        build_observation, collect_bounded_nearby_trail_segments,
     },
-    territory_map::{OwnerFrontier, TerritoryMap},
+    territory_map::TerritoryMap,
     trail::ActiveTrail,
 };
-
-use super::model::{
-    Competitor, LifeState, MatchSession, Rankings, SpawnProtection, TerritoryRecord,
-};
+use bevy::{prelude::*, time::Fixed};
 
 type NpcSnapshot = (
     &'static Competitor,
     &'static CompetitorMotion,
     &'static LifeState,
     &'static TerritoryRecord,
+    &'static MatchStatistics,
     Option<&'static ActiveTrail>,
 );
 type NpcControl = (
@@ -29,261 +30,213 @@ type NpcControl = (
     &'static CompetitorMotion,
     &'static LifeState,
     &'static SpawnProtection,
+    &'static MatchStatistics,
+    &'static LastOwnedCell,
     Option<&'static ActiveTrail>,
     &'static mut NpcController,
     &'static mut SteeringIntent,
 );
 
+#[derive(Clone, Copy)]
+pub(super) struct BodySnapshot {
+    id: crate::ids::CompetitorId,
+    position: Vec2,
+    heading: Vec2,
+    speed: f32,
+    alive: bool,
+    area: f32,
+    exposed: bool,
+}
+
+const NPC_SNAPSHOT_TRAIL_SEGMENT_CAP: usize =
+    crate::npc::NPC_RELEVANT_TRAIL_SEGMENT_CAP + MAX_COMPETITORS;
+
+fn retain_snapshot_trail_reference(output: &mut Vec<TrailSegmentRef>, reference: TrailSegmentRef) {
+    if reference.owner.index() < MAX_COMPETITORS
+        && !output.contains(&reference)
+        && output.len() < NPC_SNAPSHOT_TRAIL_SEGMENT_CAP
+    {
+        output.push(reference);
+    }
+}
+
+#[derive(Default)]
+pub(super) struct NpcWorldSnapshot {
+    people: Vec<BodySnapshot>,
+    trails: [Option<NpcTrailSnapshot>; MAX_COMPETITORS],
+    /// Union of bounded spatial selections around the NPCs. Each owner has a
+    /// fixed budget large enough for every NPC's fair selection; keeping this
+    /// outside each observation avoids cloning a whole trail per NPC.
+    relevant_refs: [Vec<crate::board::TrailSegmentRef>; MAX_COMPETITORS],
+    nearby_refs: Vec<crate::board::TrailSegmentRef>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn npc_think(
     time: Res<Time<Fixed>>,
+    config: Res<GameConfig>,
     board: Res<BoardGrid>,
     territory: Res<TerritoryMap>,
-    session: Res<MatchSession>,
+    clock: Res<super::model::SimulationClock>,
     rankings: Res<Rankings>,
     mut queries: ParamSet<(Query<NpcSnapshot>, Query<NpcControl>)>,
-    mut people: Local<Vec<NpcPersonSnapshot>>,
-    mut trail_perceptions: Local<[Vec<NpcVisibleTrail>; MAX_COMPETITORS]>,
-    mut nearby_people: Local<Vec<NpcVisibleRival>>,
-    mut nearby_trails: Local<Vec<NpcVisibleTrail>>,
-    mut segment_refs: Local<Vec<TrailSegmentRef>>,
-    mut frontier_scratch: Local<Vec<OwnerFrontier>>,
+    mut world: Local<NpcWorldSnapshot>,
+    mut scratch: Local<CaptureScratch>,
 ) {
-    let should_build_snapshot = queries
+    let dt = time.delta_secs();
+    let should_think = queries
         .p1()
         .iter()
-        .any(|(_, _, life, _, _, controller, _)| {
-            life.is_alive() && controller.think_remaining <= time.delta_secs()
+        .any(|(_, _, life, _, _, _, _, controller, _)| {
+            life.is_alive() && controller.think_remaining <= dt
         });
-    if !should_build_snapshot {
-        for (_, _, life, _, _, mut controller, _) in queries.p1().iter_mut() {
+    if !should_think {
+        for (_, _, life, _, _, _, _, mut controller, _) in queries.p1().iter_mut() {
             if life.is_alive() {
-                controller.think_remaining -= time.delta_secs();
+                controller.think_remaining -= dt;
             }
         }
         return;
     }
-
-    people.clear();
-    people.extend(
-        queries.p0().iter().map(
-            |(competitor, motion, life, territory, trail)| NpcPersonSnapshot {
-                id: competitor.id,
-                position: motion.position,
-                alive: life.is_alive(),
-                territory_area: territory.current_area,
-                exposed: trail.is_some(),
-            },
-        ),
-    );
-    collect_trail_perceptions(
-        &board,
-        &mut queries,
-        &people,
-        &mut trail_perceptions,
-        &mut segment_refs,
-    );
-
-    for (competitor, motion, life, protection, trail, mut controller, mut steering) in
-        queries.p1().iter_mut()
+    let world = &mut *world;
+    world.people.clear();
+    world.trails.iter_mut().for_each(|x| *x = None);
+    world.relevant_refs.iter_mut().for_each(|refs| refs.clear());
+    for (competitor, motion, life, territory_record, stats, trail) in queries.p0().iter() {
+        world.people.push(BodySnapshot {
+            id: competitor.id,
+            position: motion.position,
+            heading: motion.heading,
+            speed: config.player_speed_for_kills(stats.kills),
+            alive: life.is_alive(),
+            area: territory_record.current_area,
+            exposed: trail.is_some(),
+        });
+        if let Some(trail) = trail {
+            let segment_start = trail
+                .segment_count()
+                .saturating_sub(crate::npc::NPC_TRAIL_SNAPSHOT_CAP);
+            world.trails[competitor.id.index()] = Some(NpcTrailSnapshot {
+                owner: competitor.id,
+                segment_start,
+                spatial_segments: Vec::new(),
+                segments: (segment_start..trail.segment_count())
+                    .filter_map(|i| trail.segment(i))
+                    .collect(),
+            });
+        }
+    }
+    // Select indexed history around NPCs before constructing observations.
+    // This is a shared union, rather than one cloned trail per NPC.
+    // The per-observation query is capped fairly by owner. The shared sparse
+    // snapshot has a slightly larger fixed per-owner budget so a segment
+    // selected for one NPC cannot be evicted by another NPC's selection.
+    {
+        for (_, motion, life, _, _, _, _, controller, _) in queries.p1().iter_mut() {
+            if !life.is_alive() {
+                continue;
+            }
+            collect_bounded_nearby_trail_segments(
+                &board,
+                motion.position,
+                controller.profile.competence.sensor_horizon(),
+                &mut world.nearby_refs,
+            );
+            for reference in world.nearby_refs.iter().copied() {
+                retain_snapshot_trail_reference(
+                    &mut world.relevant_refs[reference.owner.index()],
+                    reference,
+                );
+            }
+        }
+    }
+    // Resolve only the selected sparse refs while the authoritative ECS trail
+    // is borrowed. Older indexed segments are now available alongside the
+    // newest contiguous snapshot tail.
+    for (competitor, _, _, _, _, trail) in queries.p0().iter() {
+        let Some(trail) = trail else {
+            continue;
+        };
+        let index = competitor.id.index();
+        let Some(snapshot) = world.trails[index].as_mut() else {
+            continue;
+        };
+        let segment_start = snapshot.segment_start;
+        for reference in world.relevant_refs[index].iter().copied() {
+            if reference.segment >= segment_start {
+                continue;
+            }
+            if let Some((start, end)) = trail.segment(reference.segment) {
+                snapshot
+                    .spatial_segments
+                    .push((reference.segment, start, end));
+            }
+        }
+    }
+    for (
+        competitor,
+        motion,
+        life,
+        protection,
+        stats,
+        last_owned,
+        trail,
+        mut controller,
+        mut steering,
+    ) in queries.p1().iter_mut()
     {
         if !life.is_alive() {
             continue;
         }
-        controller.think_remaining -= time.delta_secs();
+        controller.think_remaining -= dt;
         if controller.think_remaining > 0.0 {
             continue;
         }
-        let think_hz = controller.traits.think_hz();
-        controller.think_remaining += 1.0 / think_hz;
-        let radius = controller.traits.perception_radius();
-        nearby_people.clear();
-        nearby_people.extend(
-            people
-                .iter()
-                .filter(|person| person.alive && person.id != competitor.id)
-                .map(|person| NpcVisibleRival {
-                    id: person.id,
-                    relative: person.position - motion.position,
-                    distance: person.position.distance(motion.position),
-                    territory_share: person.territory_area / territory.arena_area().max(1.0),
-                    exposed: person.exposed,
-                })
-                .filter(|rival| rival.distance <= radius),
-        );
-        sort_visible_rivals(&mut nearby_people);
-        nearby_trails.clear();
-        nearby_trails.extend(
-            trail_perceptions[competitor.id.index()]
-                .iter()
-                .copied()
-                .filter(|trail| trail.distance <= radius),
-        );
+        let hz = controller.profile.competence.think_hz();
+        controller.think_remaining += 1.0 / hz;
+        let rivals: Vec<_> = world
+            .people
+            .iter()
+            .filter(|p| p.alive && p.id != competitor.id)
+            .map(|p| NpcVisibleRival {
+                id: p.id,
+                relative: p.position - motion.position,
+                distance: p.position.distance(motion.position),
+                territory_share: p.area / territory.arena_area().max(1.0),
+                exposed: p.exposed,
+                heading: p.heading,
+                speed: p.speed,
+            })
+            .collect();
         let rank = rankings
             .rank_of(competitor.id)
             .map_or(12, |entry| entry.rank);
-        controller.prepare_thought(motion.position, 1.0 / think_hz);
-        let proposed_capture = if territory.owns(motion.position, competitor.id)
-            && !protection.active()
-            && controller.memory.active_waypoint().is_none()
-        {
-            propose_capture_plan(
-                CapturePlanContext {
-                    board: &board,
-                    territory: &territory,
-                    id: competitor.id,
-                    position: motion.position,
-                    heading: motion.heading,
-                    visible_rank: rank,
-                    traits: controller.traits,
-                    memory: &controller.memory,
-                    rivals: &nearby_people,
-                },
-                &mut frontier_scratch,
-            )
-        } else {
-            None
-        };
-        let frame = build_decision_frame(
+        let speed = config.player_speed_for_kills(stats.kills);
+        let observation = build_observation(
+            &board,
             &territory,
             competitor.id,
             motion.position,
             motion.heading,
+            speed,
             protection.active(),
-            trail.map_or(0.0, |trail| trail.length),
-            rank,
-            &nearby_people,
-            &nearby_trails,
-            controller.traits,
+            trail.map_or(0.0, |t| t.length),
+            &rivals,
+            &world.trails,
+            controller.profile,
             &controller.memory,
-            proposed_capture,
         );
-        controller.decide(&frame);
-        update_colored_error(&mut controller, competitor.id, session.elapsed_seconds);
+        let context = NpcTickContext {
+            board: &board,
+            territory: &territory,
+            config: &config,
+            rank,
+            tick: clock.0,
+            speed,
+            last_owned: last_owned.0,
+            own_trail: trail,
+        };
+        controller.tick(&observation, *motion, &context, &mut scratch);
         controller.write_steering(&mut steering);
-    }
-}
-
-fn collect_trail_perceptions(
-    board: &BoardGrid,
-    queries: &mut ParamSet<(Query<NpcSnapshot>, Query<NpcControl>)>,
-    people: &[NpcPersonSnapshot],
-    trail_perceptions: &mut [Vec<NpcVisibleTrail>; MAX_COMPETITORS],
-    segment_refs: &mut Vec<TrailSegmentRef>,
-) {
-    trail_perceptions
-        .iter_mut()
-        .for_each(|perceptions| perceptions.clear());
-    for viewer in people {
-        board.collect_nearby_trail_segments(viewer.position, 28.0, segment_refs);
-        let snapshots = queries.p0();
-        for reference in segment_refs.iter().copied() {
-            let Some((_, _, _, _, trail)) = snapshots
-                .iter()
-                .find(|(owner, _, _, _, _)| owner.id == reference.owner)
-            else {
-                continue;
-            };
-            let Some((a, b)) = trail.and_then(|trail| trail.segment(reference.segment)) else {
-                continue;
-            };
-            let nearest_point = nearest_point_on_segment(viewer.position, a, b);
-            let perception = NpcVisibleTrail {
-                owner: reference.owner,
-                relative: nearest_point - viewer.position,
-                distance: nearest_point.distance(viewer.position),
-                own: reference.owner == viewer.id,
-            };
-            let entries = &mut trail_perceptions[viewer.id.index()];
-            if let Some(existing) = entries
-                .iter_mut()
-                .find(|trail| trail.owner == reference.owner)
-            {
-                if perception.distance < existing.distance {
-                    *existing = perception;
-                }
-            } else {
-                entries.push(perception);
-            }
-        }
-        sort_visible_trails(&mut trail_perceptions[viewer.id.index()]);
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct NpcPersonSnapshot {
-    id: crate::ids::CompetitorId,
-    position: Vec2,
-    alive: bool,
-    territory_area: f32,
-    exposed: bool,
-}
-
-fn sort_visible_rivals(rivals: &mut [NpcVisibleRival]) {
-    rivals.sort_by(|a, b| {
-        a.distance
-            .total_cmp(&b.distance)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-}
-
-fn sort_visible_trails(trails: &mut [NpcVisibleTrail]) {
-    trails.sort_by(|a, b| {
-        a.distance
-            .total_cmp(&b.distance)
-            .then_with(|| a.owner.cmp(&b.owner))
-    });
-}
-
-fn nearest_point_on_segment(point: Vec2, a: Vec2, b: Vec2) -> Vec2 {
-    let segment = b - a;
-    if segment.length_squared() <= 1e-8 {
-        return a;
-    }
-    a + segment * ((point - a).dot(segment) / segment.length_squared()).clamp(0.0, 1.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ids::CompetitorId;
-
-    #[test]
-    fn perception_ties_are_ordered_by_competitor_id() {
-        let mut rivals = vec![
-            NpcVisibleRival {
-                id: CompetitorId(3),
-                distance: 4.0,
-                ..default()
-            },
-            NpcVisibleRival {
-                id: CompetitorId(1),
-                distance: 4.0,
-                ..default()
-            },
-        ];
-        sort_visible_rivals(&mut rivals);
-        assert_eq!(
-            rivals.iter().map(|rival| rival.id).collect::<Vec<_>>(),
-            vec![CompetitorId(1), CompetitorId(3)]
-        );
-
-        let mut trails = vec![
-            NpcVisibleTrail {
-                owner: CompetitorId(2),
-                distance: 4.0,
-                ..default()
-            },
-            NpcVisibleTrail {
-                owner: CompetitorId(0),
-                distance: 4.0,
-                ..default()
-            },
-        ];
-        sort_visible_trails(&mut trails);
-        assert_eq!(
-            trails.iter().map(|trail| trail.owner).collect::<Vec<_>>(),
-            vec![CompetitorId(0), CompetitorId(2)]
-        );
     }
 }

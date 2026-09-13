@@ -4,7 +4,7 @@ use crate::{
     board::BoardGrid,
     config::GameConfig,
     ids::CompetitorId,
-    npc::{NpcEvent, NpcEventQueue},
+    npc::{NpcEvent, NpcEventMessage, NpcEventQueue},
     territory_map::{TerritoryMap, VectorCaptureResult},
     trail::{ActiveTrail, clear_trail_bits},
 };
@@ -49,6 +49,7 @@ pub(super) fn resolve_captures(
     mut pending: ResMut<PendingCaptures>,
     mut displaced: ResMut<DisplacementCredits>,
     mut events: ResMut<SimulationEvents>,
+    clock: Option<Res<super::model::SimulationClock>>,
     mut npc_events: Option<ResMut<NpcEventQueue>>,
     mut captures: Local<Vec<(CompetitorId, VectorCaptureResult)>>,
     mut query: Query<(&Competitor, &mut MatchStatistics)>,
@@ -73,6 +74,7 @@ pub(super) fn resolve_captures(
             &mut territory,
             &mut displaced,
             &mut events,
+            clock.as_ref().map_or(0, |clock| clock.0),
             npc_events.as_mut(),
             &mut captures,
             &mut query,
@@ -92,6 +94,7 @@ fn resolve_capture_group(
     territory: &mut TerritoryMap,
     displaced: &mut DisplacementCredits,
     events: &mut SimulationEvents,
+    tick: u64,
     mut npc_events: Option<&mut ResMut<NpcEventQueue>>,
     captures: &mut Vec<(CompetitorId, VectorCaptureResult)>,
     query: &mut Query<(&Competitor, &mut MatchStatistics)>,
@@ -141,23 +144,29 @@ fn resolve_capture_group(
             loop_fill: result.used_loop_fill,
         });
         if let Some(npc_events) = npc_events.as_deref_mut() {
-            npc_events.0.push((
-                pending.player,
-                NpcEvent::OwnCapture {
+            npc_events.0.push(NpcEventMessage {
+                recipient: pending.player,
+                event: NpcEvent::OwnCapture {
                     area: result.claimed_area,
                 },
-            ));
+                tick,
+            });
             npc_events
                 .0
-                .extend(result.stolen_by_owner.iter().map(|(victim, area)| {
-                    (
-                        *victim,
-                        NpcEvent::TerritoryStolen {
-                            by: pending.player,
-                            area: *area,
-                        },
-                    )
-                }));
+                .extend(
+                    result
+                        .stolen_by_owner
+                        .iter()
+                        .map(|(victim, area)| NpcEventMessage {
+                            recipient: *victim,
+                            event: NpcEvent::TerritoryStolen {
+                                by: pending.player,
+                                area: *area,
+                                location: pending.trail.head,
+                            },
+                            tick,
+                        }),
+                );
         }
     }
 }

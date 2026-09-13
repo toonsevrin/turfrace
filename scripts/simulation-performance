@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Run and compare the release headless simulation benchmark for 8 and 12 NPCs."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PREFIX = Path("target/performance/simulation-performance")
+NPC_COUNTS = (8, 12)
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return parsed
+
+
+def output_path(prefix: Path, npcs: int) -> Path:
+    return prefix.parent / f"{prefix.name}-{npcs}-npcs.jsonl"
+
+
+def binary_path(env: dict[str, str]) -> Path:
+    target = Path(env.get("CARGO_TARGET_DIR") or "target")
+    if not target.is_absolute():
+        target = ROOT / target
+    return target.resolve() / "release/examples/simulation_performance"
+
+
+def summarize(records: list[dict[str, Any]]) -> dict[str, float | int]:
+    """Aggregate windows without pretending their p95 values are one sample set."""
+    if not records:
+        raise ValueError("benchmark produced no JSONL windows")
+
+    weighted_total = 0.0
+    sample_count = 0
+    maximum_window_p95 = 0.0
+    maximum_tick = 0.0
+    ticks_over = 0
+    for index, record in enumerate(records, start=1):
+        try:
+            samples = record["samples"]
+            mean_ms = record["mean_ms"]
+            p95_ms = record["p95_ms"]
+            max_ms = record["max_ms"]
+            over = record["ticks_over_16_67_ms"]
+        except KeyError as error:
+            raise ValueError(f"JSONL window {index} is missing {error.args[0]}") from error
+        if (
+            isinstance(samples, bool)
+            or not isinstance(samples, int)
+            or samples < 1
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in (mean_ms, p95_ms, max_ms)
+            )
+            or isinstance(over, bool)
+            or not isinstance(over, int)
+            or not 0 <= over <= samples
+        ):
+            raise ValueError(f"JSONL window {index} has invalid timing fields")
+        weighted_total += mean_ms * samples
+        sample_count += samples
+        maximum_window_p95 = max(maximum_window_p95, p95_ms)
+        maximum_tick = max(maximum_tick, max_ms)
+        ticks_over += over
+
+    return {
+        "samples": sample_count,
+        "weighted_mean_ms": weighted_total / sample_count,
+        "maximum_window_p95_ms": maximum_window_p95,
+        "max_tick_ms": maximum_tick,
+        "ticks_over_16_67_ms": ticks_over,
+    }
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ValueError(f"cannot read {path}: {error}") from error
+    for number, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{path}:{number} is not valid JSON") from error
+        if not isinstance(record, dict):
+            raise ValueError(f"{path}:{number} is not a JSON object")
+        records.append(record)
+    return records
+
+
+def benchmark_command(binary: Path, ticks: int, window: int, seed: int, npcs: int) -> list[str]:
+    return [
+        str(binary),
+        "--ticks",
+        str(ticks),
+        "--window",
+        str(window),
+        "--npcs",
+        str(npcs),
+        "--seed",
+        str(seed),
+    ]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ticks", type=positive_int, default=3_600)
+    parser.add_argument("--window", type=positive_int, default=300)
+    parser.add_argument("--seed", type=lambda value: int(value, 0), default=42)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_PREFIX,
+        metavar="PREFIX",
+        help="raw JSONL prefix (default: target/performance/simulation-performance)",
+    )
+    parser.add_argument("--build-timeout", type=positive_float, default=900.0, metavar="SECONDS")
+    parser.add_argument("--run-timeout", type=positive_float, default=120.0, metavar="SECONDS")
+    parser.add_argument("--phase-timing", action="store_true")
+    parser.add_argument("--no-build", action="store_true", help="reuse the existing release example")
+    return parser.parse_args()
+
+
+def run_checked(command: list[str], timeout: float, label: str, env: dict[str, str], **kwargs: Any) -> int:
+    try:
+        process = subprocess.Popen(
+            command,
+            env=env,
+            start_new_session=True,
+            **kwargs,
+        )
+    except OSError as error:
+        print(f"{label} could not start: {error}", file=sys.stderr)
+        return 127
+
+    try:
+        process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # start_new_session gives the child its own process group, so a timed
+        # out Cargo run cannot leave rustc (or the benchmark) behind.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        # The leader may exit while a child remains in the session. Escalate
+        # unconditionally after the grace period, then reap the leader.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        print(f"{label} timed out after {timeout:g}s", file=sys.stderr)
+        return 124
+
+    if process.returncode != 0:
+        print(f"{label} failed with exit {process.returncode}", file=sys.stderr)
+    return process.returncode
+
+
+def main() -> int:
+    args = parse_args()
+    if not 1 <= args.ticks <= 216_000 or not 1 <= args.window <= 3_600:
+        print("ticks must be 1..216000 and window must be 1..3600", file=sys.stderr)
+        return 2
+    if not 0 <= args.seed <= 2**64 - 1:
+        print("seed must be an unsigned 64-bit integer", file=sys.stderr)
+        return 2
+
+    os.chdir(ROOT)
+    prefix = args.output if args.output.is_absolute() else ROOT / args.output
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["CARGO_BUILD_JOBS"] = env.get("CARGO_BUILD_JOBS") or "2"
+    env["RUST_TEST_THREADS"] = env.get("RUST_TEST_THREADS") or "2"
+    binary = binary_path(env)
+
+    if not args.no_build:
+        status = run_checked(
+            [
+                "cargo",
+                "build",
+                "--release",
+                "--no-default-features",
+                "--example",
+                "simulation_performance",
+            ],
+            args.build_timeout,
+            "release build",
+            env,
+        )
+        if status:
+            return status
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        print(f"missing executable {binary}; build it or remove --no-build", file=sys.stderr)
+        return 1
+
+    summaries: dict[int, dict[str, float | int]] = {}
+    for npcs in NPC_COUNTS:
+        raw = output_path(prefix, npcs)
+        command = benchmark_command(binary, args.ticks, args.window, args.seed, npcs)
+        if args.phase_timing:
+            command.append("--phase-timing")
+        print(f"running {npcs} NPCs -> {raw}", file=sys.stderr)
+        try:
+            with raw.open("w", encoding="utf-8") as stream:
+                status = run_checked(command, args.run_timeout, f"{npcs}-NPC run", env, stdout=stream)
+        except OSError as error:
+            print(f"cannot write {raw}: {error}", file=sys.stderr)
+            return 1
+        if status:
+            return status
+        try:
+            summaries[npcs] = summarize(read_jsonl(raw))
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+
+    lines = [
+        "Native headless simulation comparison (CPU diagnostic; not browser FPS):",
+    ]
+    for npcs in NPC_COUNTS:
+        summary = summaries[npcs]
+        lines.append(
+            f"{npcs:2d} NPCs: weighted mean {summary['weighted_mean_ms']:.2f} ms/tick; "
+            f"maximum window p95 {summary['maximum_window_p95_ms']:.2f} ms (not global p95); "
+            f"max tick {summary['max_tick_ms']:.2f} ms; "
+            f"ticks >16.67 ms {summary['ticks_over_16_67_ms']}"
+        )
+    delta = summaries[12]["weighted_mean_ms"] - summaries[8]["weighted_mean_ms"]
+    lines.append(f"12 vs 8 weighted-mean change: {delta:+.2f} ms/tick")
+    report = "\n".join(lines) + "\n"
+    summary_path = prefix.parent / f"{prefix.name}-comparison.txt"
+    summary_path.write_text(report, encoding="utf-8")
+    print(report, end="")
+    print(f"comparison written to {summary_path}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::{
     board::BoardGrid,
     ids::CompetitorId,
-    npc::{NpcEvent, NpcEventQueue},
+    npc::{NpcEvent, NpcEventMessage, NpcEventQueue},
     territory_map::TerritoryMap,
     trail::{ActiveTrail, clear_trail_bits},
 };
@@ -54,6 +54,7 @@ pub(super) type EliminationQuery = (
 pub(super) struct EliminationResources<'w> {
     pub events: ResMut<'w, SimulationEvents>,
     pub session: Option<Res<'w, MatchSession>>,
+    pub clock: Option<Res<'w, SimulationClock>>,
     pub feed: Option<ResMut<'w, EliminationFeed>>,
     pub npc_events: Option<ResMut<'w, NpcEventQueue>>,
 }
@@ -155,12 +156,13 @@ fn resolve_elimination(
         cause: outcome.cause,
     });
     if let Some(npc_events) = effects.npc_events.as_deref_mut() {
-        npc_events.0.push((
-            outcome.victim,
-            NpcEvent::Died {
+        npc_events.0.push(NpcEventMessage {
+            recipient: outcome.victim,
+            event: NpcEvent::Died {
                 killer: outcome.killer,
             },
-        ));
+            tick: effects.clock.as_ref().map_or(0, |clock| clock.0),
+        });
     }
     let match_time = effects
         .session
@@ -190,8 +192,10 @@ fn credit_kill(
         .0
         .push(SimulationEvent::Kill { killer, progress });
     if let Some(npc_events) = effects.npc_events.as_deref_mut() {
-        npc_events
-            .0
-            .push((killer, NpcEvent::CreditedKill { victim }));
+        npc_events.0.push(NpcEventMessage {
+            recipient: killer,
+            event: NpcEvent::CreditedKill { victim },
+            tick: effects.clock.as_ref().map_or(0, |clock| clock.0),
+        });
     }
 }

@@ -34,7 +34,7 @@ fn hash_f32(hash: &mut u64, value: f32) {
     hash_word(hash, u64::from(value.to_bits()));
 }
 
-fn territory_fingerprint(map: &crate::territory_map::TerritoryMap) -> u64 {
+pub(crate) fn territory_fingerprint(map: &crate::territory_map::TerritoryMap) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
     for geometry in std::iter::once(map.arena()).chain(map.territories()) {
         for contour in geometry.contours() {
@@ -49,7 +49,7 @@ fn territory_fingerprint(map: &crate::territory_map::TerritoryMap) -> u64 {
     hash
 }
 
-fn trail_fingerprint(trail: &crate::trail::ActiveTrail) -> u64 {
+pub(crate) fn trail_fingerprint(trail: &crate::trail::ActiveTrail) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
     hash_word(&mut hash, trail.points.len() as u64);
     for point in trail
@@ -65,26 +65,176 @@ fn trail_fingerprint(trail: &crate::trail::ActiveTrail) -> u64 {
     hash
 }
 
-fn npc_fingerprint(npc: &crate::npc::NpcController) -> u64 {
+pub(crate) fn npc_fingerprint(npc: &crate::npc::NpcController) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
+    hash_word(&mut hash, npc.id.0 as u64);
+    hash_word(&mut hash, policy_code(npc.profile.policy));
+    hash_f32(&mut hash, npc.profile.competence.skill);
     hash_f32(&mut hash, npc.think_remaining);
     hash_f32(&mut hash, npc.steering_error);
     hash_f32(&mut hash, npc.steering_error_target);
-    hash_word(&mut hash, u64::from(npc.error_epoch));
-    hash_word(&mut hash, u64::from(npc.safety_override as u8));
+    hash_word(&mut hash, npc.error_epoch as u64);
+    hash_f32(&mut hash, npc.last_steering.x);
+    hash_f32(&mut hash, npc.last_steering.y);
+    hash_word(&mut hash, u64::from(npc.safety_override));
     hash_word(&mut hash, npc.memory.decision_counter);
-    hash_word(&mut hash, npc.memory.waypoint_count as u64);
-    hash_word(&mut hash, npc.memory.waypoint_index as u64);
-    hash_f32(&mut hash, npc.memory.commitment_remaining);
+    hash_word(&mut hash, npc.tactic_sequence);
+    hash_word(&mut hash, npc.mistake_cooldown_tick);
+    hash_word(&mut hash, u64::from(npc.tactic.is_some()));
+    if let Some(tactic) = npc.tactic {
+        hash_tactic_kind(&mut hash, tactic.kind);
+        hash_word(&mut hash, tactic.phase as u64);
+        hash_word(&mut hash, tactic.route_index as u64);
+        hash_word(&mut hash, tactic.route.count as u64);
+        hash_route_target(&mut hash, tactic.route.target);
+        hash_word(&mut hash, tactic.started_tick);
+        hash_word(&mut hash, tactic.next_interrupt_tick);
+        hash_word(&mut hash, tactic.max_duration_ticks as u64);
+        hash_word(&mut hash, u64::from(tactic.left_owned));
+        hash_word(&mut hash, u64::from(tactic.encounter.target.is_some()));
+        if let Some(target) = tactic.encounter.target {
+            hash_hunt_target(&mut hash, target);
+        }
+        hash_f32(&mut hash, tactic.encounter.position.x);
+        hash_f32(&mut hash, tactic.encounter.position.y);
+        hash_f32(&mut hash, tactic.encounter.velocity.x);
+        hash_f32(&mut hash, tactic.encounter.velocity.y);
+        hash_f32(&mut hash, tactic.encounter.distance);
+        hash_f32(&mut hash, tactic.encounter.intercept_time);
+        hash_f32(&mut hash, tactic.encounter.confidence);
+        for point in tactic.route.points.iter().take(tactic.route.count as usize) {
+            hash_f32(&mut hash, point.x);
+            hash_f32(&mut hash, point.y);
+        }
+        hash_word(&mut hash, u64::from(tactic.mistake.is_some()));
+        if let Some(mistake) = tactic.mistake {
+            hash_word(&mut hash, mistake as u64);
+        }
+    }
+    hash_word(&mut hash, npc.memory.recent_len as u64);
+    for event in npc
+        .memory
+        .recent
+        .iter()
+        .take(npc.memory.recent_len as usize)
+    {
+        hash_word(&mut hash, event.tick);
+        hash_word(&mut hash, event.opponent.map_or(u64::MAX, |x| x.0 as u64));
+        hash_word(
+            &mut hash,
+            event.outcome.map_or(u64::MAX, |outcome| outcome as u64),
+        );
+        hash_f32(&mut hash, event.area);
+        hash_f32(&mut hash, event.location.x);
+        hash_f32(&mut hash, event.location.y);
+    }
+    for opponent in npc.memory.opponents {
+        hash_word(&mut hash, opponent.observations as u64);
+        hash_f32(&mut hash, opponent.threat);
+        hash_word(&mut hash, opponent.last_seen_tick);
+        hash_word(
+            &mut hash,
+            opponent
+                .last_outcome
+                .map_or(u64::MAX, |outcome| outcome as u64),
+        );
+        hash_f32(&mut hash, opponent.last_location.x);
+        hash_f32(&mut hash, opponent.last_location.y);
+    }
+    hash_word(
+        &mut hash,
+        npc.memory.revenge_target.map_or(u64::MAX, |id| id.0 as u64),
+    );
+    hash_word(&mut hash, npc.memory.revenge_expires);
+    hash_word(&mut hash, u64::from(npc.memory.revenge_used));
+    hash_word(&mut hash, npc.memory.pursuit_cooldown_until);
+    if let Some(failure) = npc.memory.last_failure {
+        hash_word(&mut hash, failure.tick);
+        hash_word(&mut hash, failure.mistake as u64);
+        hash_f32(&mut hash, failure.location.x);
+        hash_f32(&mut hash, failure.location.y);
+    } else {
+        hash_word(&mut hash, u64::MAX);
+    }
     hash_f32(&mut hash, npc.memory.confidence);
     hash_f32(&mut hash, npc.memory.frustration);
-    hash_f32(&mut hash, npc.memory.active_plan_risk);
     hash_f32(&mut hash, npc.memory.planned_capture_area);
-    for waypoint in npc.memory.waypoints {
-        hash_f32(&mut hash, waypoint.x);
-        hash_f32(&mut hash, waypoint.y);
-    }
     hash
+}
+fn hash_route_target(hash: &mut u64, target: crate::npc::RouteTarget) {
+    use crate::npc::RouteTarget;
+    match target {
+        RouteTarget::OwnedGround => hash_word(hash, 0),
+        RouteTarget::Frontier => hash_word(hash, 1),
+        RouteTarget::Segment { owner, index } => {
+            hash_word(hash, 2);
+            hash_word(hash, owner.0 as u64);
+            hash_word(hash, index as u64);
+        }
+        RouteTarget::Rival(id) => {
+            hash_word(hash, 3);
+            hash_word(hash, id.0 as u64);
+        }
+        RouteTarget::EnemyBorder(id) => {
+            hash_word(hash, 4);
+            hash_word(hash, id.0 as u64);
+        }
+        RouteTarget::OpenSpace => hash_word(hash, 5),
+        RouteTarget::EmergencyReturn => hash_word(hash, 6),
+    }
+}
+fn hash_hunt_target(hash: &mut u64, target: crate::npc::HuntTarget) {
+    match target {
+        crate::npc::HuntTarget::Segment { owner, segment } => {
+            hash_word(hash, 0);
+            hash_word(hash, owner.0 as u64);
+            hash_word(hash, segment as u64);
+        }
+        crate::npc::HuntTarget::Rival(id) => {
+            hash_word(hash, 1);
+            hash_word(hash, id.0 as u64);
+        }
+    }
+}
+fn policy_code(policy: crate::npc::NpcPolicy) -> u64 {
+    match policy {
+        crate::npc::NpcPolicy::Builder(p) => 10 + p.shape as u64 * 4 + p.side as u64,
+        crate::npc::NpcPolicy::Hunter(p) => 30 + p.target as u64,
+        crate::npc::NpcPolicy::Raider(p) => 40 + p.objective as u64 * 2 + p.shape as u64,
+    }
+}
+fn hash_tactic_kind(hash: &mut u64, kind: crate::npc::NpcTacticKind) {
+    use crate::npc::{NpcTacticKind, RaidTarget};
+    match kind {
+        NpcTacticKind::Return(reason) => {
+            hash_word(hash, 0);
+            hash_word(hash, reason as u64);
+        }
+        NpcTacticKind::Capture(purpose) => {
+            hash_word(hash, 1);
+            hash_word(hash, purpose as u64);
+        }
+        NpcTacticKind::Hunt(target) => {
+            hash_word(hash, 2);
+            hash_hunt_target(hash, target);
+        }
+        NpcTacticKind::Raid(target) => {
+            hash_word(hash, 3);
+            match target {
+                RaidTarget::Border { owner, point } => {
+                    hash_word(hash, 0);
+                    hash_word(hash, owner.0 as u64);
+                    hash_f32(hash, point.x);
+                    hash_f32(hash, point.y);
+                }
+                RaidTarget::Leader(id) => {
+                    hash_word(hash, 1);
+                    hash_word(hash, id.0 as u64);
+                }
+            }
+        }
+        NpcTacticKind::Roam => hash_word(hash, 4),
+    }
 }
 
 impl HeadlessMatch {
@@ -118,6 +268,12 @@ impl HeadlessMatch {
 
     pub fn generation(&self) -> u64 {
         self.app.world().resource::<super::MatchGeneration>().0
+    }
+
+    /// Grants deterministic lab fixtures access to the authoritative ECS state
+    /// without transferring ownership of the simulation app.
+    pub(crate) fn world_mut(&mut self) -> &mut World {
+        self.app.world_mut()
     }
 
     pub fn tick(&self) -> u64 {
@@ -258,6 +414,42 @@ mod tests {
             vec![RosterDescriptor::Npc, RosterDescriptor::Npc],
             &config,
         )
+    }
+
+    #[test]
+    fn npc_fingerprint_distinguishes_targets_and_optional_state() {
+        use crate::{ids::CompetitorId, npc::*};
+        let entry = generate_npc_roster(42, 1, NpcDifficulty::Normal).remove(0);
+        let mut npc = NpcController::from_roster(CompetitorId(0), &entry, 0);
+        let route = NpcRoute::from_points(&[Vec2::X], RouteTarget::OwnedGround);
+        npc.tactic = Some(NpcTactic::new(
+            NpcTacticKind::Hunt(HuntTarget::Rival(CompetitorId(1))),
+            route,
+            1,
+        ));
+        let first = npc_fingerprint(&npc);
+        npc.tactic.as_mut().unwrap().kind = NpcTacticKind::Hunt(HuntTarget::Rival(CompetitorId(2)));
+        assert_ne!(first, npc_fingerprint(&npc));
+
+        // These route variants collided in the old XOR-packed encoding.
+        npc.tactic.as_mut().unwrap().route.target = RouteTarget::Rival(CompetitorId(10));
+        let rival = npc_fingerprint(&npc);
+        npc.tactic.as_mut().unwrap().route.target = RouteTarget::EnemyBorder(CompetitorId(0));
+        assert_ne!(rival, npc_fingerprint(&npc));
+
+        let no_mistake = npc_fingerprint(&npc);
+        npc.tactic.as_mut().unwrap().mistake = Some(NpcMistake::LateAbort);
+        assert_ne!(no_mistake, npc_fingerprint(&npc));
+        npc.tactic.as_mut().unwrap().kind = NpcTacticKind::Raid(RaidTarget::Border {
+            owner: CompetitorId(1),
+            point: Vec2::X,
+        });
+        let border = npc_fingerprint(&npc);
+        npc.tactic.as_mut().unwrap().kind = NpcTacticKind::Raid(RaidTarget::Border {
+            owner: CompetitorId(1),
+            point: Vec2::Y,
+        });
+        assert_ne!(border, npc_fingerprint(&npc));
     }
 
     #[test]

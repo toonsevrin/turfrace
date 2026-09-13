@@ -44,27 +44,30 @@ pub(super) fn update_npc_debug_overlay(
             .iter()
             .filter(|estimate| estimate.observations > 0)
             .count();
+        let (tactic, phase, route_index, route_count) =
+            controller.tactic.map_or(("none", "-", 0, 0), |t| {
+                (
+                    npc_tactic_name(t.kind),
+                    npc_phase_name(t.phase),
+                    t.route_index,
+                    t.route.count,
+                )
+            });
+        let c = controller.profile.competence;
         let _ = writeln!(
             content,
-            "{} {:?} a={:?} risk={:.2} area={:.1} r={:.1} safe={} wp={}/{} opp={} traits s{:.2} a{:.2} g{:.2} e{:.2} c{:.2} ad{:.2} co{:.2} t{:.2}",
+            "{} policy={} tactic={} phase={} route={}/{} reason={} safe={} opp={} skill={:.2} mistake_cd={}",
             competitor.display_name,
-            controller.brain_kind,
-            controller.last_decision.action,
-            controller.last_decision.risk_budget,
-            controller.memory.planned_capture_area,
-            controller.traits.perception_radius(),
+            controller.profile.policy.label(),
+            tactic,
+            phase,
+            route_index,
+            route_count,
+            controller.last_reason,
             controller.safety_override,
-            controller.memory.waypoint_index,
-            controller.memory.waypoint_count,
             observed,
-            controller.traits.skill,
-            controller.traits.aggression,
-            controller.traits.greed,
-            controller.traits.exploration,
-            controller.traits.composure,
-            controller.traits.adaptability,
-            controller.traits.commitment,
-            controller.traits.turning_bias,
+            c.skill,
+            controller.mistake_cooldown_tick
         );
     }
     if let Ok(mut text) = overlay_text.single_mut() {
@@ -92,6 +95,26 @@ pub(super) fn update_npc_debug_overlay(
         GlobalZIndex(200),
         Pickable::IGNORE,
     ));
+}
+
+#[cfg(debug_assertions)]
+fn npc_tactic_name(kind: crate::npc::NpcTacticKind) -> &'static str {
+    match kind {
+        crate::npc::NpcTacticKind::Return(_) => "return",
+        crate::npc::NpcTacticKind::Capture(_) => "capture",
+        crate::npc::NpcTacticKind::Hunt(_) => "hunt",
+        crate::npc::NpcTacticKind::Raid(_) => "raid",
+        crate::npc::NpcTacticKind::Roam => "roam",
+    }
+}
+#[cfg(debug_assertions)]
+fn npc_phase_name(phase: crate::npc::TacticPhase) -> &'static str {
+    match phase {
+        crate::npc::TacticPhase::Acquiring => "acquire",
+        crate::npc::TacticPhase::Travelling => "travel",
+        crate::npc::TacticPhase::Committing => "commit",
+        crate::npc::TacticPhase::Aborting => "abort",
+    }
 }
 
 type CompetitorHudQuery<'w, 's> = Query<'w, 's, (&'static Competitor, &'static LifeState)>;

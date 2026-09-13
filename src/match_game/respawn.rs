@@ -5,7 +5,7 @@ use crate::{
     config::GameConfig,
     ids::{CompetitorId, MAX_COMPETITORS},
     movement::CompetitorMotion,
-    npc::{NpcEvent, NpcEventQueue},
+    npc::{NpcEvent, NpcEventMessage, NpcEventQueue},
     territory_map::TerritoryMap,
     trail::ActiveTrail,
 };
@@ -46,6 +46,7 @@ pub(super) fn advance_respawns(
     board: Res<BoardGrid>,
     mut territory_map: ResMut<TerritoryMap>,
     session: Res<MatchSession>,
+    clock: Option<Res<super::model::SimulationClock>>,
     mut events: ResMut<SimulationEvents>,
     mut npc_events: ResMut<NpcEventQueue>,
     mut displacement_credits: ResMut<DisplacementCredits>,
@@ -139,7 +140,11 @@ pub(super) fn advance_respawns(
         events.0.push(SimulationEvent::Respawn {
             player: competitor.id,
         });
-        npc_events.0.push((competitor.id, NpcEvent::Spawned));
+        npc_events.0.push(NpcEventMessage {
+            recipient: competitor.id,
+            event: NpcEvent::Spawned,
+            tick: clock.as_ref().map_or(0, |clock| clock.0),
+        });
     }
 }
 

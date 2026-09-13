@@ -28,12 +28,26 @@ pub fn advance_motion(
     speed: f32,
     dt: f32,
 ) {
+    *motion = predict_motion(*motion, desired, territory, config, speed, dt);
+}
+
+/// Predict one authoritative movement step without mutating an ECS component.
+/// NPC planning and replay forecasting use this function so finite turns and
+/// arena contact cannot drift from the real simulation.
+pub fn predict_motion(
+    mut motion: CompetitorMotion,
+    desired: Option<Vec2>,
+    territory: &TerritoryMap,
+    config: &GameConfig,
+    speed: f32,
+    dt: f32,
+) -> CompetitorMotion {
     motion.previous_position = motion.position;
     let speed = speed.max(0.0);
     let step = speed * dt;
     let margin = config.collision_radius;
     let arena = territory.arena_boundary();
-    let on_boundary = arena.signed_distance(motion.position) <= margin + CONTACT_DISTANCE;
+    let on_boundary = arena.at_most_margin(motion.position, margin + CONTACT_DISTANCE);
     let mut leave_boundary = false;
     if let Some(mut desired) = desired.and_then(Vec2::try_normalize) {
         if on_boundary {
@@ -58,17 +72,23 @@ pub fn advance_motion(
     }
 
     if on_boundary && !leave_boundary {
-        follow_arena_margin(motion, territory, margin, step, config.inward_edge_steer);
-        return;
+        follow_arena_margin(
+            &mut motion,
+            territory,
+            margin,
+            step,
+            config.inward_edge_steer,
+        );
+        return motion;
     }
 
     let attempted = motion.position + motion.heading * step;
-    if arena.signed_distance(attempted) >= margin {
+    if arena.at_least_margin(attempted, margin) {
         motion.position = attempted;
-        return;
+        return motion;
     }
 
-    let (safe, remaining_step) = if arena.signed_distance(motion.position) >= margin {
+    let (safe, remaining_step) = if arena.at_least_margin(motion.position, margin) {
         let fraction = arena
             .margin_exit_time(motion.position, attempted, margin)
             .unwrap_or(0.0);
@@ -79,16 +99,39 @@ pub fn advance_motion(
     } else if let Some(position) = arena.project_inside(motion.position, margin) {
         (position, step)
     } else {
-        return;
+        return motion;
     };
     motion.position = safe;
     follow_arena_margin(
-        motion,
+        &mut motion,
         territory,
         margin,
         remaining_step,
         config.inward_edge_steer,
     );
+    motion
+}
+
+/// Forecast a position using the same bounded movement primitive.
+pub fn predict_position(
+    motion: CompetitorMotion,
+    desired: Option<Vec2>,
+    territory: &TerritoryMap,
+    config: &GameConfig,
+    speed: f32,
+    horizon: f32,
+) -> Vec2 {
+    let horizon = horizon.max(0.0);
+    if horizon <= f32::EPSILON {
+        return motion.position;
+    }
+    let samples = (horizon / 0.25).ceil().clamp(1.0, 4.0) as usize;
+    let dt = horizon / samples as f32;
+    let mut forecast = motion;
+    for _ in 0..samples {
+        forecast = predict_motion(forecast, desired, territory, config, speed, dt);
+    }
+    forecast.position
 }
 
 /// Geometric contact tolerance and an input dead band prevent signed-distance
@@ -354,6 +397,39 @@ mod tests {
         let mut motion = CompetitorMotion::new(edge - Vec2::X, Vec2::X);
         advance_motion(&mut motion, None, &map, &cfg, cfg.player_speed, 1.0);
         assert!(map.arena_signed_distance(motion.position) >= cfg.collision_radius - 0.5);
+    }
+
+    #[test]
+    fn prediction_matches_authoritative_step_for_normal_turn_and_edge() {
+        let cfg = GameConfig::default();
+        let board = BoardGrid::generate(31, 2, &cfg);
+        let map = TerritoryMap::from_board(&board);
+        let cases = [
+            (Vec2::ZERO, Vec2::X, Some(Vec2::Y)),
+            (Vec2::ZERO, Vec2::X, Some(-Vec2::X)),
+            (board.contour.points[0], Vec2::X, None),
+        ];
+        for (position, heading, desired) in cases {
+            let motion = CompetitorMotion::new(position, heading);
+            let predicted = predict_motion(
+                motion,
+                desired,
+                &map,
+                &cfg,
+                cfg.player_speed,
+                cfg.fixed_delta_seconds(),
+            );
+            let mut authoritative = motion;
+            advance_motion(
+                &mut authoritative,
+                desired,
+                &map,
+                &cfg,
+                cfg.player_speed,
+                cfg.fixed_delta_seconds(),
+            );
+            assert_eq!(predicted, authoritative);
+        }
     }
 
     #[test]
